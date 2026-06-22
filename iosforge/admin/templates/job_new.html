@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Upload APK · IOSForge Admin{% endblock %}
+{% block content %}
+<p><a href="/jobs">← Jobs</a></p>
+<div class="card" style="max-width:480px;">
+  <h2>Upload APK</h2>
+  {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  <form method="post" action="/jobs" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+    <p><input type="file" name="apk" accept=".apk,.xapk" required></p>
+    <p><button class="btn" type="submit">Upload &amp; queue job</button></p>
+  </form>
+  <p style="color:#667;font-size:13px;">The APK is stored in object storage and a job is queued
+  (QUEUED). A worker boots the emulator, crawls screens, and generates a Flutter app.</p>
+</div>
+{% endblock %}

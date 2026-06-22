@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}IOSForge Admin{% endblock %}</title>
+  {% block head %}{% endblock %}
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #f6f7f9; color: #1c2330; }
+    header { background: #1c2330; color: #fff; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; }
+    header a { color: #9ec1ff; text-decoration: none; }
+    main { max-width: 960px; margin: 24px auto; padding: 0 16px; }
+    table { width: 100%; border-collapse: collapse; background: #fff; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e3e6ea; font-size: 14px; }
+    .card { background: #fff; border: 1px solid #e3e6ea; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .btn { display: inline-block; background: #2f6fed; color: #fff; padding: 8px 14px; border: 0; border-radius: 6px; cursor: pointer; text-decoration: none; font-size: 14px; }
+    .err { background: #fdecec; color: #a12121; padding: 10px 12px; border-radius: 6px; margin: 10px 0; }
+    .state { font-weight: 600; padding: 2px 8px; border-radius: 10px; background: #eef; font-size: 12px; }
+    .gallery img { max-width: 200px; border: 1px solid #ccc; margin: 4px; }
+    input[type=password], input[type=text] { padding: 8px; width: 100%; box-sizing: border-box; }
+  </style>
+</head>
+<body>
+{% if user %}
+<header>
+  <div><a href="/jobs"><strong>IOSForge</strong></a> &nbsp;·&nbsp; pipeline admin</div>
+  <div>
+    {{ user.username }} &nbsp;
+    <form method="post" action="/logout" style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+      <button class="btn" type="submit">Logout</button>
+    </form>
+  </div>
+</header>
+{% endif %}
+<main>
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

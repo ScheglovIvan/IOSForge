@@ -1,0 +1,94 @@
+# IOSForge — local infrastructure (SPEC §8): PostgreSQL + Redis + MinIO.
+# T-1.2. Variables are read from .env (gitignored) with safe DEV defaults so the
+# stack also boots from .env.example values. NO real secrets live here.
+#
+# Quick start:
+#   cp .env.example .env        # adjust if needed
+#   docker compose up -d
+#   docker compose ps           # wait until all services are healthy
+# See docs/local-infra.md for the full runbook.
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: iosforge-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-iosforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-iosforge}
+      POSTGRES_DB: ${POSTGRES_DB:-iosforge}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-iosforge} -d ${POSTGRES_DB:-iosforge}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    container_name: iosforge-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: iosforge-minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      # Root credentials reuse the app S3 keys for a single source of truth locally.
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-iosforge-dev}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-iosforge-dev-secret}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"      # S3 API
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"  # Web console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    restart: unless-stopped
+
+  # One-shot init: waits for MinIO, then ensures the artifacts bucket exists.
+  # Exits 0 once the bucket is present; safe to re-run (idempotent).
+  minio-init:
+    image: minio/mc:latest
+    container_name: iosforge-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-iosforge-dev}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-iosforge-dev-secret}
+      S3_BUCKET: ${S3_BUCKET:-iosforge-artifacts}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --ignore-existing "local/$$S3_BUCKET"
+        mc version enable "local/$$S3_BUCKET"
+        echo "MinIO bucket '$$S3_BUCKET' ready (versioning enabled)."
+    restart: "no"
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:

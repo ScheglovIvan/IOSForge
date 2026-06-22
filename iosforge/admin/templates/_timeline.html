@@ -1,0 +1,17 @@
+<table>
+  <thead><tr><th>Stage</th><th>Started</th><th>Finished</th><th>Duration</th><th>Error</th></tr></thead>
+  <tbody>
+  {% for row in timeline %}
+    <tr>
+      <td>{{ row.stage.value }}</td>
+      <td>{{ row.started_at.strftime('%H:%M:%S') if row.started_at else '—' }}</td>
+      <td>{{ row.finished_at.strftime('%H:%M:%S') if row.finished_at else '—' }}</td>
+      <td>{{ (row.duration_ms ~ ' ms') if row.duration_ms is not none else '—' }}</td>
+      <td>{{ row.error or '' }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5">No stages recorded yet (waiting for the worker).</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if job.state.value == 'failed' %}<div class="err">Job failed — see the stage error above.</div>{% endif %}

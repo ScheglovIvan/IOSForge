@@ -1,0 +1,30 @@
+artifacts/
+*.ipa
+*.dSYM.zip
+*.mobileprovision
+*.p12
+.env
+.env.*
+!.env.example
+node_modules/
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Claude Code (локальная команда/контекст — не коммитим в репозиторий проекта)
+/CLAUDE.md
+/.claude/
+/BOOTSTRAP_DONE.md
+/team-bootstrap/
+# SPEC.md НЕ игнорируем — это требования продукта (источник правды по ТЗ).
+
+# MVP vertical outputs / local sample APKs (not committed)
+runs/
+samples/

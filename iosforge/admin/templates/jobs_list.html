@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Jobs · IOSForge Admin{% endblock %}
+{% block content %}
+<div style="display:flex;justify-content:space-between;align-items:center;">
+  <h2>Jobs</h2>
+  <a class="btn" href="/jobs/new">+ Upload APK</a>
+</div>
+<table>
+  <thead><tr><th>Created</th><th>Source</th><th>State</th><th></th></tr></thead>
+  <tbody>
+  {% for job in jobs %}
+    <tr>
+      <td>{{ job.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+      <td>{{ job.source_app_ref }}</td>
+      <td><span class="state">{{ job.state.value }}</span></td>
+      <td><a href="/jobs/{{ job.id }}">open</a></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4">No jobs yet. Upload an APK to start.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

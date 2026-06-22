@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Artifacts · IOSForge Admin{% endblock %}
+{% block content %}
+<p><a href="/jobs/{{ job.id }}">← Job</a></p>
+<h2>Artifacts</h2>
+
+<div class="card">
+  <h3>Screenshots</h3>
+  {% if walk and walk.screenshot_keys %}
+    <div class="gallery">
+      {% for key in walk.screenshot_keys %}
+        <img src="/jobs/{{ job.id }}/artifacts/object?key={{ key | urlencode }}" alt="screen">
+      {% endfor %}
+    </div>
+  {% else %}
+    <p>No screenshots yet.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Screen map</h3>
+  {% if walk and walk.screen_map and walk.screen_map.screens %}
+    <table>
+      <thead><tr><th>Screen</th><th>Activity</th><th>From</th><th>Tapped</th></tr></thead>
+      <tbody>
+      {% for s in walk.screen_map.screens %}
+        <tr>
+          <td>{{ s.id }}</td>
+          <td>{{ s.activity }}</td>
+          <td>{{ s.from or '—' }}</td>
+          <td>{{ s.tapped.text if s.tapped else '—' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p>No screen map yet.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Generated Flutter app</h3>
+  {% if gen and gen.sources_key %}
+    <p><a class="btn" href="/jobs/{{ job.id }}/artifacts/object?key={{ gen.sources_key | urlencode }}">Download flutter_app.zip</a></p>
+    {% if gen.compliance_score is not none %}<p>Compliance: {{ (gen.compliance_score * 100) | round(1) }}%</p>{% endif %}
+  {% else %}
+    <p>Not generated yet.</p>
+  {% endif %}
+</div>
+{% endblock %}

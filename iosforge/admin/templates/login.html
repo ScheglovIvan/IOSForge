@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Login · IOSForge Admin{% endblock %}
+{% block content %}
+<div class="card" style="max-width:380px;margin:48px auto;">
+  <h2>Sign in</h2>
+  {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  <form method="post" action="/login">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p><label>Username<br><input type="text" name="username" autocomplete="username" required></label></p>
+    <p><label>Password<br><input type="password" name="password" autocomplete="current-password" required></label></p>
+    <p><button class="btn" type="submit">Log in</button></p>
+  </form>
+</div>
+{% endblock %}

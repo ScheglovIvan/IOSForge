@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Job · IOSForge Admin{% endblock %}
+{% block head %}
+  {% if job.state.value not in ['done', 'failed', 'cancelled'] %}
+  <meta http-equiv="refresh" content="3">
+  {% endif %}
+{% endblock %}
+{% block content %}
+<p><a href="/jobs">← Jobs</a></p>
+<div class="card">
+  <h2>Job <code>{{ job.id }}</code></h2>
+  <p>Source: <strong>{{ job.source_app_ref }}</strong></p>
+  <p>State: <span class="state">{{ job.state.value }}</span>
+     &nbsp;·&nbsp; created {{ job.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</p>
+  <p><a class="btn" href="/jobs/{{ job.id }}/artifacts">View artifacts</a></p>
+</div>
+<div class="card">
+  <h3>Timeline</h3>
+  {% include "_timeline.html" %}
+</div>
+{% endblock %}
