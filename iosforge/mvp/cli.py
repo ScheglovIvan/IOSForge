@@ -13,6 +13,7 @@ from pathlib import Path
 from iosforge.common.config import get_settings
 from iosforge.common.logging import configure_logging, get_logger
 from iosforge.mvp import claude_gen, crawl, emulator
+from iosforge.mvp.analyze import analyze, decompose
 from iosforge.mvp.paths import RunPaths
 
 log = get_logger("mvp.cli")
@@ -32,7 +33,9 @@ def run(apk: Path, out_base: Path, max_screens: int, avd: str, do_build_check: b
 
     crawl.walk(paths, package, max_screens)
 
-    flutter_app = claude_gen.generate(paths)
+    analyze(paths)
+    decompose(paths)
+    flutter_app = claude_gen.generate_from_tasks(paths)
     if do_build_check:
         claude_gen.build_check(flutter_app)
 

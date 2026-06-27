@@ -7,11 +7,13 @@ One pass, no 95% loop (phase 2).
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
 
 from iosforge.common.logging import get_logger
+from iosforge.mvp.analyze import topo_order
 from iosforge.mvp.paths import RunPaths
 
 log = get_logger("mvp.claude_gen")
@@ -59,7 +61,11 @@ def generate(paths: RunPaths, timeout: int = 1800) -> Path:
     log.info("claude_gen.invoking", workdir=str(paths.claude_ws))
     res = subprocess.run(
         [CLAUDE_BIN, "-p", PROMPT, "--permission-mode", "acceptEdits"],
-        cwd=paths.claude_ws, capture_output=True, text=True, timeout=timeout, check=False,
+        cwd=paths.claude_ws,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
     )
     if res.returncode != 0:
         log.error("claude_gen.cli_failed", code=res.returncode, stderr=res.stderr[-2000:])
@@ -77,6 +83,117 @@ def generate(paths: RunPaths, timeout: int = 1800) -> Path:
         shutil.rmtree(paths.flutter_app)
     shutil.move(str(generated), str(paths.flutter_app))
     log.info("claude_gen.done", flutter_app=str(paths.flutter_app))
+    return paths.flutter_app
+
+
+def _prepare_task_workspace(paths: RunPaths) -> None:
+    """Stage crawl + analysis artifacts into the persistent task-runner workspace.
+
+    Reuses :func:`_prepare_workspace` (screens/, screens.json) and adds
+    app_spec.json + tasks.json. The single-pass PROMPT.md is removed so only the
+    per-task TASK.md instruction is present and cannot confuse a task stage.
+    flutter_app/ is intentionally left untouched so it accumulates across
+    per-task invocations.
+    """
+    _prepare_workspace(paths)
+    (paths.claude_ws / "PROMPT.md").unlink(missing_ok=True)
+    shutil.copy2(paths.app_spec_json, paths.claude_ws / "app_spec.json")
+    shutil.copy2(paths.tasks_json, paths.claude_ws / "tasks.json")
+
+
+def _task_prompt(task: dict[str, object]) -> str:
+    """Inline per-task prompt for the task runner.
+
+    Inlined to match the existing single-pass prompt; moving prompts to a managed
+    PromptSetProvider (SPEC §6) is deferred tech-debt for the MVP vertical.
+    """
+    screens = task.get("screens", [])
+    screen_ids = [str(s) for s in screens] if isinstance(screens, list) else []
+    shots = "\n".join(f"- screens/{sid}.png" for sid in screen_ids) or "- (none)"
+    return f"""\
+You are incrementally building a Flutter app under `flutter_app/` in this directory.
+
+Context files (read as needed):
+- `app_spec.json` — the full structured spec for the target app.
+- `screens.json` — the raw crawl with element bounds and navigation links.
+- `flutter_app/` — the app so far. EDIT IT IN PLACE. Do not delete or rewrite
+  files that other tasks created unless this task requires it.
+
+Current task:
+- id: {task.get("id")}
+- type: {task.get("type")}
+- title: {task.get("title")}
+
+Relevant screenshots to LOOK at (vision):
+{shots}
+
+Do exactly the work this task describes and nothing more:
+- If type is "scaffold": create the Flutter project skeleton —
+  `flutter_app/pubspec.yaml`, `flutter_app/lib/main.dart` (app entry + theme +
+  routing). Use only the Flutter SDK + material widgets. Keep it compiling.
+- Otherwise: ADD or EDIT files under `flutter_app/lib/` to implement this task,
+  reusing the existing scaffold, theme and routing.
+
+Output ONLY changes under `flutter_app/`. Do not run the app.
+"""
+
+
+def generate_from_tasks(paths: RunPaths, timeout: int = 1800) -> Path:
+    """Stage D: build flutter_app/ task-by-task from tasks.json; return its path.
+
+    Parallel to :func:`generate` (single-pass). Executes tasks in dependency
+    order, accumulating edits in the persistent workspace flutter_app/.
+    """
+    bound = log.bind(stage="codegen_tasks", run_dir=str(paths.run_dir))
+    if not paths.app_spec_json.exists():
+        raise RuntimeError(f"app_spec.json missing; run analyze first: {paths.app_spec_json}")
+    if not paths.tasks_json.exists():
+        raise RuntimeError(f"tasks.json missing; run decompose first: {paths.tasks_json}")
+
+    _prepare_task_workspace(paths)
+    payload = json.loads(paths.tasks_json.read_text())
+    tasks = payload.get("tasks") if isinstance(payload, dict) else None
+    if not isinstance(tasks, list) or not tasks:
+        raise RuntimeError("tasks.json has an empty or missing 'tasks' array")
+    ordered = topo_order(tasks)
+    flutter_app = paths.claude_ws / "flutter_app"
+    pubspec = flutter_app / "pubspec.yaml"
+    main_dart = flutter_app / "lib" / "main.dart"
+
+    for index, task in enumerate(ordered):
+        tlog = bound.bind(task_id=str(task.get("id")), task_type=str(task.get("type")))
+        tlog.info("codegen_tasks.task.start", index=index)
+        prompt = _task_prompt(task)
+        (paths.claude_ws / "TASK.md").write_text(prompt)
+        res = subprocess.run(
+            [CLAUDE_BIN, "-p", prompt, "--permission-mode", "acceptEdits"],
+            cwd=paths.claude_ws,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if res.returncode != 0:
+            tlog.warning(
+                "codegen_tasks.task.cli_failed",
+                code=res.returncode,
+                stderr=res.stderr[-500:],
+            )
+        if index == 0 and not pubspec.exists():
+            raise RuntimeError(
+                f"scaffold task {task.get('id')!r} did not produce flutter_app/pubspec.yaml"
+            )
+        tlog.info("codegen_tasks.task.done", index=index)
+
+    if not (pubspec.exists() and main_dart.exists()):
+        raise RuntimeError(
+            "task runner did not produce a valid flutter_app/ "
+            f"(pubspec={pubspec.exists()}, main.dart={main_dart.exists()})"
+        )
+    if paths.flutter_app.exists():
+        shutil.rmtree(paths.flutter_app)
+    shutil.move(str(flutter_app), str(paths.flutter_app))
+    bound.info("codegen_tasks.done", flutter_app=str(paths.flutter_app), tasks=len(ordered))
     return paths.flutter_app
 
 

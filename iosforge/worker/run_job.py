@@ -45,7 +45,7 @@ def _finish_stage(db, row: StageTimeline) -> None:
 
 @celery_app.task(base=PipelineTask, name="iosforge.run_job", bind=True)
 def run_job(self, job_id: str) -> str:
-    from iosforge.mvp import claude_gen, crawl, emulator
+    from iosforge.mvp import analyze, claude_gen, crawl, emulator
     from iosforge.mvp.paths import RunPaths
 
     settings = get_settings()
@@ -83,20 +83,27 @@ def run_job(self, job_id: str) -> str:
                 storage.put(key, png.read_bytes(), content_type="image/png")
                 screenshot_keys.append(key)
             screen_map = json.loads(paths.screens_json.read_text())
-            db.add(WalkthroughResult(
-                job_id=job.id, screenshot_keys=screenshot_keys,
-                screen_map=screen_map, provider="adb-mvp",
-            ))
+            db.add(
+                WalkthroughResult(
+                    job_id=job.id,
+                    screenshot_keys=screenshot_keys,
+                    screen_map=screen_map,
+                    provider="adb-mvp",
+                )
+            )
             _finish_stage(db, stage_row)
 
             # --- Codegen ---
             stage_row = _start_stage(db, job, Stage.CODEGEN, JobState.CODEGEN)
-            flutter_app = claude_gen.generate(paths)
+            analyze.analyze(paths)
+            analyze.decompose(paths)
+            flutter_app = claude_gen.generate_from_tasks(paths)
             zip_base = tmp / "flutter_app"
             shutil.make_archive(str(zip_base), "zip", str(flutter_app))
             sources_key = build_key(job_id=job_id, kind="sources", name="flutter_app.zip")
-            storage.put(sources_key, Path(f"{zip_base}.zip").read_bytes(),
-                        content_type="application/zip")
+            storage.put(
+                sources_key, Path(f"{zip_base}.zip").read_bytes(), content_type="application/zip"
+            )
             db.add(GenerationResult(job_id=job.id, sources_key=sources_key))
             _finish_stage(db, stage_row)
 

@@ -9,13 +9,20 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class RunPaths:
-    """Layout of one MVP run: runs/<ts>/{screens/,screens.json,claude_ws/,flutter_app/}."""
+    """Layout of one MVP run: runs/<ts>/{screens/,screens.json,claude_ws/,flutter_app/}.
+
+    ``app_spec_json`` and ``tasks_json`` are the canonical outputs of the
+    analysis (Stage B) and decomposition (Stage C) steps that sit between the
+    crawl and codegen passes.
+    """
 
     run_dir: Path
     screens_dir: Path
     screens_json: Path
     claude_ws: Path
     flutter_app: Path
+    app_spec_json: Path
+    tasks_json: Path
 
     @classmethod
     def create(cls, base: Path) -> RunPaths:
@@ -27,6 +34,8 @@ class RunPaths:
             screens_json=run_dir / "screens.json",
             claude_ws=run_dir / "claude_ws",
             flutter_app=run_dir / "flutter_app",
+            app_spec_json=run_dir / "app_spec.json",
+            tasks_json=run_dir / "tasks.json",
         )
         rp.screens_dir.mkdir(parents=True, exist_ok=True)
         return rp
