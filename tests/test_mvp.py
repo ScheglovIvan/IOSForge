@@ -128,7 +128,18 @@ def test_cli_run_uses_staged_pipeline(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setattr(cli.crawl, "walk", _fake_walk)
     monkeypatch.setattr(subprocess, "run", _staged_claude())
 
+    captured: dict[str, Any] = {}
+
+    def _fake_refine(paths: RunPaths, **kwargs: Any) -> dict[str, Any]:
+        captured["called"] = True
+        captured["flutter_app_exists"] = paths.flutter_app.exists()
+        return {"compliance_score": 0.97, "status": "pass", "stop_reason": "threshold_met"}
+
+    monkeypatch.setattr(cli.compliance, "refine_until_compliant", _fake_refine)
+
     flutter_app = cli.run(apk, tmp_path / "runs", max_screens=2, avd="mvp", do_build_check=False)
+
+    assert captured == {"called": True, "flutter_app_exists": True}
 
     assert flutter_app.name == "flutter_app"
     assert (flutter_app / "pubspec.yaml").exists()

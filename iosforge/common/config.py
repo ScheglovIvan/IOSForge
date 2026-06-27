@@ -99,6 +99,7 @@ class Settings(BaseSettings):
     compliance_weight_visual: float = Field(default=0.5, ge=0.0, le=1.0)
     compliance_weight_coverage: float = Field(default=0.3, ge=0.0, le=1.0)
     compliance_weight_flows: float = Field(default=0.2, ge=0.0, le=1.0)
+    compliance_max_iterations: int = Field(default=3, gt=0)
 
     # --- Walkthrough limits (DECISIONS Q3) — placeholders, per-job overridable ---
     walkthrough_max_screens: int = Field(default=40, gt=0)

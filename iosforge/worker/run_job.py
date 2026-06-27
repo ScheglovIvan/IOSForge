@@ -45,7 +45,7 @@ def _finish_stage(db, row: StageTimeline) -> None:
 
 @celery_app.task(base=PipelineTask, name="iosforge.run_job", bind=True)
 def run_job(self, job_id: str) -> str:
-    from iosforge.mvp import analyze, claude_gen, crawl, emulator
+    from iosforge.mvp import analyze, claude_gen, compliance, crawl, emulator
     from iosforge.mvp.paths import RunPaths
 
     settings = get_settings()
@@ -93,18 +93,37 @@ def run_job(self, job_id: str) -> str:
             )
             _finish_stage(db, stage_row)
 
-            # --- Codegen ---
+            # --- Codegen (Stage B->C->D->E inside one CODEGEN span) ---
             stage_row = _start_stage(db, job, Stage.CODEGEN, JobState.CODEGEN)
             analyze.analyze(paths)
             analyze.decompose(paths)
-            flutter_app = claude_gen.generate_from_tasks(paths)
+            claude_gen.generate_from_tasks(paths)
+            report = compliance.refine_until_compliant(
+                paths,
+                threshold=settings.compliance_threshold,
+                soft_floor=settings.compliance_soft_floor,
+                max_iterations=settings.compliance_max_iterations,
+                weights=compliance.ComplianceWeights.from_settings(settings),
+                avd=settings.admin_avd,
+            )
+
             zip_base = tmp / "flutter_app"
-            shutil.make_archive(str(zip_base), "zip", str(flutter_app))
+            shutil.make_archive(str(zip_base), "zip", str(paths.flutter_app))
             sources_key = build_key(job_id=job_id, kind="sources", name="flutter_app.zip")
             storage.put(
                 sources_key, Path(f"{zip_base}.zip").read_bytes(), content_type="application/zip"
             )
-            db.add(GenerationResult(job_id=job.id, sources_key=sources_key))
+            for png in sorted(paths.generated_screens_dir.glob("*.png")):
+                key = build_key(job_id=job_id, kind="generated_screenshots", name=png.name)
+                storage.put(key, png.read_bytes(), content_type="image/png")
+            db.add(
+                GenerationResult(
+                    job_id=job.id,
+                    sources_key=sources_key,
+                    compliance_score=report["compliance_score"],
+                    selftest_report=report,
+                )
+            )
             _finish_stage(db, stage_row)
 
             job.state = JobState.DONE

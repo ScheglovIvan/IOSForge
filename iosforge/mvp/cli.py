@@ -12,7 +12,7 @@ from pathlib import Path
 
 from iosforge.common.config import get_settings
 from iosforge.common.logging import configure_logging, get_logger
-from iosforge.mvp import claude_gen, crawl, emulator
+from iosforge.mvp import claude_gen, compliance, crawl, emulator
 from iosforge.mvp.analyze import analyze, decompose
 from iosforge.mvp.paths import RunPaths
 
@@ -36,11 +36,27 @@ def run(apk: Path, out_base: Path, max_screens: int, avd: str, do_build_check: b
     analyze(paths)
     decompose(paths)
     flutter_app = claude_gen.generate_from_tasks(paths)
+
+    settings = get_settings()
+    report = compliance.refine_until_compliant(
+        paths,
+        threshold=settings.compliance_threshold,
+        soft_floor=settings.compliance_soft_floor,
+        max_iterations=settings.compliance_max_iterations,
+        weights=compliance.ComplianceWeights.from_settings(settings),
+        avd=avd,
+    )
     if do_build_check:
         claude_gen.build_check(flutter_app)
 
-    log.info("mvp.run.done", flutter_app=str(flutter_app))
+    log.info(
+        "mvp.run.done",
+        flutter_app=str(flutter_app),
+        compliance_score=report.get("compliance_score"),
+        status=report.get("status"),
+    )
     print(f"\nDONE. Flutter app: {flutter_app}")
+    print(f"Compliance:      {report.get('compliance_score')} ({report.get('status')})")
     print(f"Screens + map:   {paths.screens_json}")
     return flutter_app
 

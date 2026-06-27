@@ -12,6 +12,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import structlog
+
 from iosforge.common.logging import get_logger
 from iosforge.mvp.analyze import topo_order
 from iosforge.mvp.paths import RunPaths
@@ -131,11 +133,44 @@ Do exactly the work this task describes and nothing more:
 - If type is "scaffold": create the Flutter project skeleton —
   `flutter_app/pubspec.yaml`, `flutter_app/lib/main.dart` (app entry + theme +
   routing). Use only the Flutter SDK + material widgets. Keep it compiling.
+  The app MUST support deep-link navigation `iosforge://screen/<id>` that routes
+  directly to the screen whose id matches `<id>` (the same ids used in
+  `app_spec.json` / `screens.json`). Add an `<intent-filter>` with
+  `<data android:scheme="iosforge"/>` to `android/app/src/main/AndroidManifest.xml`
+  and a router (e.g. `onGenerateRoute` / a platform deep-link handler) that parses
+  the incoming URI host/path and shows the matching screen.
 - Otherwise: ADD or EDIT files under `flutter_app/lib/` to implement this task,
   reusing the existing scaffold, theme and routing.
 
 Output ONLY changes under `flutter_app/`. Do not run the app.
 """
+
+
+def run_task(
+    paths: RunPaths,
+    prompt: str,
+    *,
+    timeout: int,
+    tlog: structlog.stdlib.BoundLogger,
+) -> int:
+    """Write TASK.md and run one `claude -p` task invocation in the workspace.
+
+    Shared by the Stage D task runner and the Stage E corrective runner. Returns
+    the CLI return code; a non-zero code is logged as a warning (best-effort, the
+    caller decides whether the resulting flutter_app/ is still valid).
+    """
+    (paths.claude_ws / "TASK.md").write_text(prompt)
+    res = subprocess.run(
+        [CLAUDE_BIN, "-p", prompt, "--permission-mode", "acceptEdits"],
+        cwd=paths.claude_ws,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if res.returncode != 0:
+        tlog.warning("codegen_tasks.task.cli_failed", code=res.returncode, stderr=res.stderr[-500:])
+    return res.returncode
 
 
 def generate_from_tasks(paths: RunPaths, timeout: int = 1800) -> Path:
@@ -163,22 +198,7 @@ def generate_from_tasks(paths: RunPaths, timeout: int = 1800) -> Path:
     for index, task in enumerate(ordered):
         tlog = bound.bind(task_id=str(task.get("id")), task_type=str(task.get("type")))
         tlog.info("codegen_tasks.task.start", index=index)
-        prompt = _task_prompt(task)
-        (paths.claude_ws / "TASK.md").write_text(prompt)
-        res = subprocess.run(
-            [CLAUDE_BIN, "-p", prompt, "--permission-mode", "acceptEdits"],
-            cwd=paths.claude_ws,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        if res.returncode != 0:
-            tlog.warning(
-                "codegen_tasks.task.cli_failed",
-                code=res.returncode,
-                stderr=res.stderr[-500:],
-            )
+        run_task(paths, _task_prompt(task), timeout=timeout, tlog=tlog)
         if index == 0 and not pubspec.exists():
             raise RuntimeError(
                 f"scaffold task {task.get('id')!r} did not produce flutter_app/pubspec.yaml"

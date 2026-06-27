@@ -14,6 +14,12 @@ class RunPaths:
     ``app_spec_json`` and ``tasks_json`` are the canonical outputs of the
     analysis (Stage B) and decomposition (Stage C) steps that sit between the
     crawl and codegen passes.
+
+    ``apk``, ``generated_screens_dir``, ``generated_screens_json``,
+    ``selftest_report_json`` and ``corrective_tasks_json`` are the Stage E
+    (compliance/refinement) artifacts: the built Flutter APK, the deep-link
+    render of each generated screen, the compliance report and the corrective
+    task list.
     """
 
     run_dir: Path
@@ -23,6 +29,11 @@ class RunPaths:
     flutter_app: Path
     app_spec_json: Path
     tasks_json: Path
+    apk: Path
+    generated_screens_dir: Path
+    generated_screens_json: Path
+    selftest_report_json: Path
+    corrective_tasks_json: Path
 
     @classmethod
     def create(cls, base: Path) -> RunPaths:
@@ -36,6 +47,12 @@ class RunPaths:
             flutter_app=run_dir / "flutter_app",
             app_spec_json=run_dir / "app_spec.json",
             tasks_json=run_dir / "tasks.json",
+            apk=run_dir / "generated.apk",
+            generated_screens_dir=run_dir / "generated_screens",
+            generated_screens_json=run_dir / "generated_screens.json",
+            selftest_report_json=run_dir / "selftest_report.json",
+            corrective_tasks_json=run_dir / "corrective_tasks.json",
         )
         rp.screens_dir.mkdir(parents=True, exist_ok=True)
+        rp.generated_screens_dir.mkdir(parents=True, exist_ok=True)
         return rp
