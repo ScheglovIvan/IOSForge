@@ -18,56 +18,150 @@ deferred tech-debt for the MVP vertical only.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 from iosforge.common.logging import get_logger
+from iosforge.mvp import handoff, spec_contract
 from iosforge.mvp.paths import RunPaths
 
 log = get_logger("mvp.analyze")
 
 CLAUDE_BIN = "claude"
+ANALYZE_TOOLS = "WebSearch WebFetch Read Write Edit Glob Grep"
 
 ANALYZE_PROMPT = """\
-You are analysing an existing Android app from its crawled screens to produce a
-structured specification a Flutter generator can build from.
+You are a senior product analyst reverse-engineering an existing mobile app from
+its crawled screens to produce a COMPLETE, build-ready specification. The target
+is a native-feeling iOS app; it is tested as a Flutter build. The spec must be
+universal — it serves games, photo editors, social, utilities, content-
+subscription, e-commerce, productivity and other app types alike.
 
 Inputs in this directory:
-- `screens.json` — crawled screens: each has a screenshot path, the current
-  activity, the clickable `elements` (text / resource_id / bounds), and
-  `from`/`tapped` links showing how screens connect.
-- `screens/` — one PNG screenshot per screen. LOOK at every screenshot.
+- `screens.json` — crawled screens: each has a screenshot path, activity, the
+  clickable `elements` (text / resource_id / bounds), and `from`/`tapped`/
+  `navigates_to` links showing how screens connect.
+- `screens/` — one PNG screenshot per screen. LOOK at every screenshot (vision).
 
-Task:
-1. Study every PNG screenshot (use vision) together with the screens.json
-   structure to understand each screen's purpose, components and navigation.
-2. Write a single file `app_spec.json` in this directory with EXACTLY this schema:
+Method:
+1. Study every screenshot together with screens.json to understand each screen,
+   its components and the navigation graph.
+2. Infer the app's identity, domain logic and business model from the UI.
+3. Use web search to research how comparable apps in this category are built
+   (features, monetization, content, conventions) and cite sources. If web
+   access is unavailable, fill `market_research` from your own knowledge and set
+   its `sources` to [] and note it in `analysis_quality`.
+4. Be explicit about what the crawl could NOT reveal (screens behind login,
+   dynamic content) under `analysis_quality`; never invent fake certainty.
+
+Write a single file `app_spec.json` with this schema (ALL top-level keys are
+REQUIRED; use [] / {} / "" when a section does not apply, never omit a key):
 
 {
+  "spec_version": "3.0",                // emit exactly this; omit "provenance" (tool injects it)
   "app_name": str,
   "package": str,
+  "app_type": str,                      // game | photo-editor | social | utility |
+                                        // content-subscription | e-commerce | productivity |
+                                        // health | education | media | other
+  "one_liner": str,
+  "description": str,                   // what it is
+  "how_it_works": str,                  // the core user loop, in plain words
+  "target_audience": str,
+  "platforms": [str],
+  "market_research": {
+    "similar_apps": [ {"name": str, "notes": str} ],
+    "category_conventions": [str],      // expected patterns for this app type
+    "monetization_norms": [str],
+    "sources": [str]                    // URLs
+  },
+  "business_logic": {
+    "summary": str,
+    "domain_rules": [str],              // for games: rules/goal/win-lose/levels/scoring
+    "workflows": [ {"name": str, "steps": [str]} ],
+    "state_machine": [ {"state": str, "transitions": [str]} ]
+  },
   "screens": [
     {
-      "id": str,
-      "name": str,
-      "purpose": str,
-      "screenshot": str,
-      "components": [ {"type": str} ],
+      "id": str, "name": str, "purpose": str, "screenshot": str, "route": str,
+      "source": "observed",             // "observed" (seen in a screenshot) | "inferred"
+      "components": [ {"type": str, "role": str, "data": str} ],
       "layout_notes": str,
-      "navigates_to": [str]
+      "states": [str],                  // loading / empty / error / success variants
+      "dynamic_content": [str],         // what is data-driven vs static
+      "navigates_to": [str]             // screen ids; MUST reference ids in this `screens` array
     }
   ],
-  "flows": [ {"name": str, "steps": [str]} ],
-  "data_model": [],
-  "design": {"primary_color": str, "theme": str}
+  "requirements": [                     // testable, traceable; >=1 item
+    {
+      "id": "REQ-...",                  // unique, pattern REQ-<slug>
+      "type": str,                      // EARS type: ubiquitous | event_driven |
+                                        // state_driven | optional_feature | unwanted_behavior
+      "text": str,                      // EARS: "When <trigger>, the system shall <action>"
+      "priority": str,                  // must|should|could
+      "screens": [str],                 // screen ids this requirement touches (must exist)
+      "acceptance": [str],              // Given/When/Then style checks
+      "source": "observed"              // "observed" | "inferred"
+    }
+  ],
+  "design_tokens": {                    // W3C design tokens ($value/$type/$description)
+    "color":   { "primary": {"$value": "#RRGGBB", "$type": "color", "$description": str} },
+    "font":    { "body":    {"$value": str, "$type": "fontFamily"} },
+    "dimension": { "radius_md": {"$value": "8px", "$type": "dimension"} },
+    "dark_mode": bool,
+    "ios_adaptation": [str]
+  },
+  "navigation": {"type": str, "map": [ {"from": str, "to": str, "via": str} ], "deep_links": [str]},
+  "content": {
+    "data_model": [ {"entity": str, "fields": [str], "relations": [str]} ],
+    "content_inventory": [str],         // sticker packs / presets / filters / templates / sounds
+    "content_to_seed": [ {"item": str, "amount": str, "format": str, "example": str} ],
+    "persistence": str                  // local / cloud / offline / sync
+  },
+  "monetization": {
+    "model": str,                       // free | freemium | subscription | one-time | ads | mixed
+    "paywalls": [ {"location": str, "gates": str} ],
+    "packages": [ {"name": str, "price": str, "period": str, "includes": [str]} ],
+    "ads": [str],
+    "free_vs_premium": [ {"feature": str, "tier": str} ]
+  },
+  "backend": {
+    "backend_needed": bool, "why": str,
+    "admin_panel_needed": bool, "admin_scope": [str],
+    "auth": {"required": bool, "methods": [str]},
+    "user_roles": [str], "apis": [str], "push_notifications": bool, "cloud_sync": bool
+  },
+  "permissions": [ {"permission": str, "reason": str} ],
+  "integrations": [ {"name": str, "purpose": str} ],
+  "cross_cutting": {
+    "localization": [str], "onboarding": str, "analytics_events": [str],
+    "accessibility": [str], "legal": [str]
+  },
+  "analysis_quality": {
+    "assumptions": [str], "open_questions": [str], "coverage_gaps": [str],
+    "confidence": {"overall": str, "by_section": [ {"section": str, "level": str} ]}
+  },
+  "acceptance_criteria": [str]          // checklist: the full app is done when ...
 }
 
-3. The `screens` array MUST be non-empty and cover every distinct crawled screen.
-   Keep ids consistent with screens.json so navigation can be wired later.
+Rules:
+- `screens` MUST be non-empty and cover every distinct crawled screen; keep ids
+  consistent with screens.json. Every `navigates_to` / requirement `screens`
+  entry MUST reference an id that exists in the `screens` array.
+- `requirements` MUST be EARS-phrased, each with a unique `REQ-<slug>` id and at
+  least one acceptance check; this is what downstream tests are generated from.
+- Tag every screen and requirement `source` as "observed" (directly visible in a
+  screenshot) or "inferred" (a category convention you added); record inferences
+  in `analysis_quality.assumptions`.
+- `design_tokens` MUST use the W3C token shape ($value / $type / $description).
+- Fill every section as completely as the evidence allows; prefer category
+  conventions over leaving a section empty.
 
-Output ONLY the file `app_spec.json`. Do not generate any app code.
+Output ONLY the file `app_spec.json`. Do not generate any app code or other files.
 """
 
 DECOMPOSE_PROMPT = """\
@@ -75,7 +169,8 @@ You are turning an app specification into an ordered build plan for a Flutter
 generator.
 
 Input in this directory:
-- `app_spec.json` — the structured spec (screens, flows, data_model, design).
+- `app_spec.json` — the App Spec v3 (screens, requirements, design_tokens,
+  navigation, content, monetization, backend, ...).
 
 Task:
 Write a single file `tasks.json` in this directory with EXACTLY this schema:
@@ -123,10 +218,13 @@ def _prepare_decompose_workspace(paths: RunPaths) -> None:
     (paths.claude_ws / "DECOMPOSE_PROMPT.md").write_text(DECOMPOSE_PROMPT)
 
 
-def _run_claude(prompt: str, workdir: Path, timeout: int) -> None:
+def _run_claude(prompt: str, workdir: Path, timeout: int, tools: str | None = None) -> None:
     """Invoke the local Claude Code CLI non-interactively in ``workdir``."""
+    cmd = [CLAUDE_BIN, "-p", prompt, "--permission-mode", "acceptEdits"]
+    if tools:
+        cmd += ["--allowed-tools", tools]
     res = subprocess.run(
-        [CLAUDE_BIN, "-p", prompt, "--permission-mode", "acceptEdits"],
+        cmd,
         cwd=workdir,
         capture_output=True,
         text=True,
@@ -138,26 +236,172 @@ def _run_claude(prompt: str, workdir: Path, timeout: int) -> None:
         raise RuntimeError(f"claude CLI exited {res.returncode}: {res.stderr[-500:]}")
 
 
+_SECTION_TITLES = {
+    "one_liner": "Summary",
+    "description": "What it is",
+    "how_it_works": "How it works",
+    "app_type": "App type",
+    "target_audience": "Target audience",
+    "platforms": "Platforms",
+    "market_research": "Market research",
+    "business_logic": "Business & domain logic",
+    "screens": "Screens",
+    "requirements": "Requirements (EARS)",
+    "design_tokens": "Design tokens",
+    "navigation": "Navigation",
+    "content": "Content & data",
+    "monetization": "Monetization",
+    "backend": "Backend / admin / accounts",
+    "permissions": "Permissions",
+    "integrations": "Integrations",
+    "cross_cutting": "Cross-cutting",
+    "analysis_quality": "Analysis quality & gaps",
+    "acceptance_criteria": "Acceptance criteria",
+}
+
+_SPEC_MD_ORDER = (
+    "one_liner",
+    "description",
+    "how_it_works",
+    "app_type",
+    "target_audience",
+    "platforms",
+    "market_research",
+    "business_logic",
+    "screens",
+    "requirements",
+    "design_tokens",
+    "navigation",
+    "content",
+    "monetization",
+    "backend",
+    "permissions",
+    "integrations",
+    "cross_cutting",
+    "analysis_quality",
+    "acceptance_criteria",
+)
+
+
+def _scalar(value: object) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return str(value)
+
+
+def _md_block(value: object, indent: int = 0) -> list[str]:
+    """Render an app_spec value as readable markdown lines."""
+    pad = "  " * indent
+    lines: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(item, (dict, list)):
+                lines.append(f"{pad}- **{key}**:")
+                lines.extend(_md_block(item, indent + 1))
+            else:
+                lines.append(f"{pad}- **{key}**: {_scalar(item)}")
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                inline = ", ".join(
+                    f"{k}: {_scalar(v)}" for k, v in item.items() if not isinstance(v, (dict, list))
+                )
+                lines.append(f"{pad}- {inline}" if inline else f"{pad}-")
+                for k, v in item.items():
+                    if isinstance(v, (dict, list)):
+                        lines.append(f"{pad}  - **{k}**:")
+                        lines.extend(_md_block(v, indent + 2))
+            elif isinstance(item, list):
+                lines.extend(_md_block(item, indent + 1))
+            else:
+                lines.append(f"{pad}- {_scalar(item)}")
+    elif isinstance(value, str):
+        if value.strip():
+            lines.append(f"{pad}{value}")
+    else:
+        lines.append(f"{pad}{_scalar(value)}")
+    return lines
+
+
+def _render_spec_md(spec: dict[str, object]) -> str:
+    """Render a human-readable SPEC.md from the validated app_spec.json."""
+    name = spec.get("app_name", "App")
+    out: list[str] = [f"# {name} — App Specification", ""]
+    for key in _SPEC_MD_ORDER:
+        if key not in spec:
+            continue
+        out.append(f"## {_SECTION_TITLES.get(key, key)}")
+        body = _md_block(spec[key])
+        out.extend(body if body else ["_(none)_"])
+        out.append("")
+    return "\n".join(out)
+
+
+def _crawl_screen_ids(screens_json: Path) -> set[str]:
+    try:
+        data = json.loads(screens_json.read_text())
+    except (OSError, json.JSONDecodeError):
+        return set()
+    screens = data.get("screens", []) if isinstance(data, dict) else []
+    return {str(s["id"]) for s in screens if isinstance(s, dict) and "id" in s}
+
+
 def analyze(paths: RunPaths, timeout: int = 1800) -> Path:
-    """Stage B: derive a structured app_spec.json from the crawl; return its path."""
+    """Stage B: derive a validated app_spec.json (+ SPEC.md) from the crawl.
+
+    Runs the local Claude CLI (vision + web research), injects provenance and
+    ``spec_version``, then enforces the App Spec v3 contract
+    (:func:`iosforge.mvp.spec_contract.validate_spec`) before persisting.
+    """
     bound = log.bind(stage="analyze", run_dir=str(paths.run_dir))
     _prepare_analysis_workspace(paths)
     bound.info("analyze.invoking", workdir=str(paths.claude_ws))
-    _run_claude(ANALYZE_PROMPT, paths.claude_ws, timeout)
+    _run_claude(ANALYZE_PROMPT, paths.claude_ws, timeout, tools=ANALYZE_TOOLS)
 
     produced = paths.claude_ws / "app_spec.json"
     if not produced.exists():
         raise RuntimeError("Claude did not produce app_spec.json")
     try:
-        spec = json.loads(produced.read_text())
+        payload = json.loads(produced.read_text())
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"app_spec.json is not valid JSON: {exc}") from exc
-    screens = spec.get("screens") if isinstance(spec, dict) else None
-    if not isinstance(screens, list) or not screens:
-        raise RuntimeError("app_spec.json has an empty or missing 'screens' array")
+    if not isinstance(payload, dict):
+        raise RuntimeError("app_spec.json must be a JSON object")
 
-    shutil.move(str(produced), str(paths.app_spec_json))
-    bound.info("analyze.done", app_spec=str(paths.app_spec_json), screens=len(screens))
+    crawl_ids = _crawl_screen_ids(paths.screens_json)
+    source_sha = (
+        hashlib.sha256(paths.screens_json.read_bytes()).hexdigest()
+        if paths.screens_json.exists()
+        else ""
+    )
+    payload["spec_version"] = spec_contract.SPEC_VERSION
+    payload["provenance"] = spec_contract.build_provenance(
+        generator="iosforge-mvp-analyze/v3",
+        generated_at=datetime.now(UTC).isoformat(),
+        source_crawl_sha256=source_sha,
+        screen_count=len(crawl_ids),
+    )
+
+    spec = spec_contract.validate_spec(payload)
+    uncovered = spec_contract.uncovered_screens(spec, crawl_ids)
+    if uncovered:
+        bound.warning("analyze.coverage_gap", uncovered=uncovered, crawled=len(crawl_ids))
+
+    paths.app_spec_json.write_text(json.dumps(spec, indent=2, ensure_ascii=False))
+    produced.unlink(missing_ok=True)
+    paths.spec_md.write_text(_render_spec_md(spec))
+    handoff_files = handoff.build_handoff(spec, paths.handoff_dir)
+    screens = spec["screens"]
+    n_screens = len(screens) if isinstance(screens, list) else 0
+    bound.info(
+        "analyze.done",
+        app_spec=str(paths.app_spec_json),
+        spec_md=str(paths.spec_md),
+        handoff=str(paths.handoff_dir),
+        handoff_files=len(handoff_files),
+        screens=n_screens,
+        uncovered=len(uncovered),
+    )
     return paths.app_spec_json
 
 

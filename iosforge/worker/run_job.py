@@ -92,6 +92,13 @@ def run_job(self, job_id: str) -> str:
                 )
             )
             _finish_stage(db, stage_row)
+            stage_row = None
+
+            if settings.pipeline_stop_after_walkthrough:
+                job.state = JobState.DONE
+                db.commit()
+                log.info("run_job.walkthrough_only_done", job_id=job_id)
+                return f"job {job_id} done (walkthrough only)"
 
             # --- Codegen (Stage B->C->D->E inside one CODEGEN span) ---
             stage_row = _start_stage(db, job, Stage.CODEGEN, JobState.CODEGEN)

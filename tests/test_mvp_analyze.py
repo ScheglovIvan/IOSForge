@@ -85,9 +85,81 @@ _VALID_APP_SPEC = {
             "navigates_to": ["0000"],
         },
     ],
-    "flows": [{"name": "create", "steps": ["tap add", "enter text", "save"]}],
-    "data_model": [],
-    "design": {"primary_color": "#3366FF", "theme": "light"},
+    "app_type": "productivity",
+    "one_liner": "A todo app",
+    "description": "Manage tasks",
+    "how_it_works": "Add, edit and complete tasks",
+    "target_audience": "everyone",
+    "platforms": ["ios"],
+    "market_research": {
+        "similar_apps": [{"name": "Things", "notes": "premium todo"}],
+        "category_conventions": ["swipe to complete"],
+        "monetization_norms": ["one-time purchase"],
+        "sources": [],
+    },
+    "business_logic": {
+        "summary": "task tracking",
+        "domain_rules": ["a task is done or not"],
+        "workflows": [{"name": "create", "steps": ["tap add", "enter text", "save"]}],
+        "state_machine": [],
+    },
+    "requirements": [
+        {
+            "id": "REQ-add-task",
+            "type": "event_driven",
+            "text": "When the user taps Add, the system shall open the Add screen.",
+            "priority": "must",
+            "screens": ["0000", "0001"],
+            "acceptance": ["Given Home, when Add tapped, then Add screen is shown"],
+            "source": "observed",
+        }
+    ],
+    "design_tokens": {
+        "color": {"primary": {"$value": "#3366FF", "$type": "color"}},
+        "dark_mode": True,
+        "ios_adaptation": ["use cupertino nav"],
+    },
+    "navigation": {"type": "stack", "map": [], "deep_links": []},
+    "content": {
+        "data_model": [{"entity": "Task", "fields": ["title", "done"], "relations": []}],
+        "content_inventory": [],
+        "content_to_seed": [],
+        "persistence": "local",
+    },
+    "monetization": {
+        "model": "free",
+        "paywalls": [],
+        "packages": [],
+        "ads": [],
+        "free_vs_premium": [],
+    },
+    "backend": {
+        "backend_needed": False,
+        "why": "local only",
+        "admin_panel_needed": False,
+        "admin_scope": [],
+        "auth": {"required": False, "methods": []},
+        "user_roles": [],
+        "apis": [],
+        "push_notifications": False,
+        "cloud_sync": False,
+    },
+    "permissions": [],
+    "integrations": [],
+    "cross_cutting": {
+        "localization": ["en"],
+        "onboarding": "none",
+        "analytics_events": [],
+        "accessibility": [],
+        "legal": [],
+    },
+    "analysis_quality": {
+        "assumptions": ["inferred swipe-to-complete"],
+        "open_questions": [],
+        "coverage_gaps": [],
+        "confidence": {"overall": "medium", "by_section": []},
+    },
+    "acceptance_criteria": ["can add and complete a task"],
 }
 
 _VALID_TASKS = {
@@ -152,6 +224,16 @@ def test_analyze_writes_and_validates_app_spec(
     assert len(spec["screens"]) == 2
     assert (rp.claude_ws / "screens" / "0000.png").exists()
     assert "app_spec.json" in (rp.claude_ws / "ANALYZE_PROMPT.md").read_text()
+    assert rp.spec_md.exists()
+    md = rp.spec_md.read_text()
+    assert "App Specification" in md
+    assert "Monetization" in md
+    assert "Requirements (EARS)" in md
+    # provenance + spec_version are injected by analyze(), not by the model
+    assert spec["spec_version"] == "3.0"
+    assert spec["provenance"]["source_crawl_sha256"]
+    assert spec["provenance"]["screen_count"] == 3
+    assert spec["requirements"][0]["id"] == "REQ-add-task"
 
 
 def test_analyze_rejects_empty_screens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -159,7 +241,16 @@ def test_analyze_rejects_empty_screens(tmp_path: Path, monkeypatch: pytest.Monke
     bad = {"app_name": "X", "package": "p", "screens": []}
     monkeypatch.setattr(analyze.subprocess, "run", _fake_claude("app_spec.json", bad))
 
-    with pytest.raises(RuntimeError, match="screens"):
+    with pytest.raises(RuntimeError, match="schema violation"):
+        analyze.analyze(rp)
+
+
+def test_analyze_rejects_incomplete_spec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rp = _make_paths(tmp_path)
+    incomplete = {"app_name": "X", "package": "p", "screens": [{"id": "0000"}]}
+    monkeypatch.setattr(analyze.subprocess, "run", _fake_claude("app_spec.json", incomplete))
+
+    with pytest.raises(RuntimeError, match="schema violation"):
         analyze.analyze(rp)
 
 

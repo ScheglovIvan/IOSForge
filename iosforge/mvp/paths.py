@@ -28,6 +28,8 @@ class RunPaths:
     claude_ws: Path
     flutter_app: Path
     app_spec_json: Path
+    spec_md: Path
+    handoff_dir: Path
     tasks_json: Path
     apk: Path
     generated_screens_dir: Path
@@ -46,6 +48,8 @@ class RunPaths:
             claude_ws=run_dir / "claude_ws",
             flutter_app=run_dir / "flutter_app",
             app_spec_json=run_dir / "app_spec.json",
+            spec_md=run_dir / "SPEC.md",
+            handoff_dir=run_dir / "handoff",
             tasks_json=run_dir / "tasks.json",
             apk=run_dir / "generated.apk",
             generated_screens_dir=run_dir / "generated_screens",

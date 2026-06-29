@@ -67,10 +67,41 @@ def test_prepare_workspace_copies_inputs_and_prompt(tmp_path: Path) -> None:
 _APP_SPEC = {
     "app_name": "Todo",
     "package": "com.example.todo",
-    "screens": [{"id": "0000", "name": "Home", "screenshot": "screens/0000.png"}],
-    "flows": [],
-    "data_model": [],
-    "design": {"primary_color": "#3366FF", "theme": "light"},
+    "app_type": "productivity",
+    "one_liner": "A todo app",
+    "description": "Manage tasks",
+    "how_it_works": "Add and complete tasks",
+    "target_audience": "everyone",
+    "platforms": ["ios"],
+    "screens": [
+        {"id": "0000", "name": "Home", "purpose": "list", "screenshot": "screens/0000.png"}
+    ],
+    "market_research": {"similar_apps": [], "category_conventions": [], "sources": []},
+    "business_logic": {"summary": "tasks", "domain_rules": [], "workflows": []},
+    "requirements": [
+        {
+            "id": "REQ-home",
+            "type": "ubiquitous",
+            "text": "The system shall show the home screen on launch.",
+            "screens": ["0000"],
+            "source": "observed",
+        }
+    ],
+    "design_tokens": {"color": {"primary": {"$value": "#3366FF", "$type": "color"}}},
+    "navigation": {"type": "stack", "map": [], "deep_links": []},
+    "content": {"data_model": [], "content_inventory": [], "content_to_seed": []},
+    "monetization": {"model": "free", "paywalls": [], "packages": []},
+    "backend": {"backend_needed": False, "admin_panel_needed": False},
+    "permissions": [],
+    "integrations": [],
+    "cross_cutting": {"localization": ["en"], "onboarding": "none"},
+    "analysis_quality": {
+        "assumptions": [],
+        "open_questions": [],
+        "coverage_gaps": [],
+        "confidence": {"overall": "low"},
+    },
+    "acceptance_criteria": ["can add a task"],
 }
 
 _TASKS = {

@@ -28,3 +28,4 @@ __pycache__/
 # MVP vertical outputs / local sample APKs (not committed)
 runs/
 samples/
+uploads/

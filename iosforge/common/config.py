@@ -106,6 +106,12 @@ class Settings(BaseSettings):
     walkthrough_max_depth: int = Field(default=6, gt=0)
     walkthrough_job_timeout_s: int = Field(default=1200, gt=0)
     walkthrough_action_timeout_s: int = Field(default=15, gt=0)
+    # Walkthrough-only mode: finish a Job (DONE) right after the emulator crawl,
+    # skipping the codegen/compliance stage (e.g. when Flutter is unavailable).
+    pipeline_stop_after_walkthrough: bool = Field(default=False)
+    # Stage 3 codegen orchestration: "claude" = single local Claude CLI pass;
+    # "hermes" = Hermes Agent orchestrates, local Claude CLI executes (Variant A).
+    codegen_orchestrator: str = Field(default="claude")
 
     # --- Admin panel (SPEC §7) — internet-facing behind a TLS reverse proxy ---
     # Secret for signing session ids / CSRF tokens. MUST be set via env in prod.

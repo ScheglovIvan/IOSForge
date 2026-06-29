@@ -21,6 +21,8 @@ dependencies = [
     "itsdangerous>=2.2.0",
     "redis>=6.4.0",
     "pyaxmlparser>=0.3.31",
+    "jsonschema>=4.26.0",
+    "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]
@@ -30,6 +32,8 @@ dev = [
     "httpx",
     "ruff",
     "mypy",
+    "types-jsonschema>=4.26.0.20260518",
+    "types-pyyaml>=6.0.12.20260518",
 ]
 
 [build-system]
