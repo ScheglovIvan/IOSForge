@@ -94,6 +94,16 @@ def render_constitution(spec: dict[str, Any]) -> str:
         out.append("  - (no screens in spec)")
     out += [
         "",
+        "## Parallel build discipline (worktree-per-task)",
+        "- The screen layer is built **in parallel** — one worker per screen, each in its"
+        " own git worktree, merged after.",
+        "- **File ownership to avoid merge conflicts:** a screen worker creates/edits ONLY"
+        " files under its own `lib/features/<screen>/`. Shared core — `lib/core/theme/`,"
+        " `lib/core/router/`, `lib/main.dart`, `pubspec.yaml` — is owned by the scaffold and"
+        " integration phases ONLY; screen workers must not edit it.",
+        "- The scaffold pre-registers every route pointing at a placeholder widget, so each"
+        " screen worker only fills in its own widget without touching the router.",
+        "",
         "## State & data",
         "- State via **Riverpod** providers; no `setState` for shared/business state.",
         "- Data models from `app_spec.json` `content.data_model`; repositories abstract the"

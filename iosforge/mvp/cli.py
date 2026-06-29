@@ -12,7 +12,7 @@ from pathlib import Path
 
 from iosforge.common.config import get_settings
 from iosforge.common.logging import configure_logging, get_logger
-from iosforge.mvp import claude_gen, compliance, crawl, emulator
+from iosforge.mvp import claude_gen, codegen, compliance, crawl, emulator
 from iosforge.mvp.analyze import analyze, decompose
 from iosforge.mvp.paths import RunPaths
 
@@ -35,9 +35,9 @@ def run(apk: Path, out_base: Path, max_screens: int, avd: str, do_build_check: b
 
     analyze(paths)
     decompose(paths)
-    flutter_app = claude_gen.generate_from_tasks(paths)
-
     settings = get_settings()
+    flutter_app = codegen.generate(paths, settings)
+
     report = compliance.refine_until_compliant(
         paths,
         threshold=settings.compliance_threshold,

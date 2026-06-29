@@ -45,7 +45,7 @@ def _finish_stage(db, row: StageTimeline) -> None:
 
 @celery_app.task(base=PipelineTask, name="iosforge.run_job", bind=True)
 def run_job(self, job_id: str) -> str:
-    from iosforge.mvp import analyze, claude_gen, compliance, crawl, emulator
+    from iosforge.mvp import analyze, codegen, compliance, crawl, emulator
     from iosforge.mvp.paths import RunPaths
 
     settings = get_settings()
@@ -104,7 +104,7 @@ def run_job(self, job_id: str) -> str:
             stage_row = _start_stage(db, job, Stage.CODEGEN, JobState.CODEGEN)
             analyze.analyze(paths)
             analyze.decompose(paths)
-            claude_gen.generate_from_tasks(paths)
+            codegen.generate(paths, settings)
             report = compliance.refine_until_compliant(
                 paths,
                 threshold=settings.compliance_threshold,

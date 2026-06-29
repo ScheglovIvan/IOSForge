@@ -41,6 +41,12 @@ def test_constitution_lists_routes_from_screens() -> None:
     assert "`/0001`" in text  # fallback route derived from screen id
 
 
+def test_constitution_has_parallel_build_discipline() -> None:
+    text = constitution.render_constitution(_spec())
+    assert "worktree" in text
+    assert "lib/features/" in text  # screen workers own only their feature dir
+
+
 def test_constitution_backend_rule_is_conditional() -> None:
     with_backend = constitution.render_constitution(_spec(backend=True))
     assert "needs a backend" in with_backend
