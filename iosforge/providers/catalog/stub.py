@@ -23,9 +23,7 @@ def _score_from(app: AppMetadata, rank: int) -> float:
     Pure function of the inputs so ``search`` is deterministic: a digest of the
     source app's identity seeds the top score; lower ranks decay linearly.
     """
-    digest = hashlib.sha256(
-        f"{app.source_ref}|{app.name}|{app.publisher}".encode()
-    ).digest()
+    digest = hashlib.sha256(f"{app.source_ref}|{app.name}|{app.publisher}".encode()).digest()
     base = 0.6 + (digest[0] / 255.0) * 0.4  # in [0.6, 1.0]
     score = base - rank * 0.1
     return round(max(0.0, min(1.0, score)), 4)

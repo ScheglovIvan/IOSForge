@@ -279,9 +279,7 @@ class S3ArtifactStorage(ArtifactStorage):
         This permanently removes history and is *not* part of the abstract
         contract — callers in the pipeline use :meth:`delete` (soft).
         """
-        version_ids: Sequence[str | None] = [
-            v.version_id for v in self.list_versions(key)
-        ]
+        version_ids: Sequence[str | None] = [v.version_id for v in self.list_versions(key)]
         for vid in version_ids:
             kwargs: dict[str, str] = {"Bucket": self._bucket, "Key": key}
             if vid is not None:

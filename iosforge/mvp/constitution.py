@@ -54,6 +54,9 @@ def render_constitution(spec: dict[str, Any]) -> str:
     name = spec.get("app_name", "App")
     backend = _as_dict(spec.get("backend"))
     backend_needed = bool(backend.get("backend_needed"))
+    monetization = _as_dict(spec.get("monetization"))
+    ad_placements = _as_list(monetization.get("ad_placements"))
+    has_ads = str(monetization.get("model", "")).lower() in ("ads", "mixed") or bool(ad_placements)
     routes = _routes(spec)
 
     out: list[str] = [
@@ -124,6 +127,21 @@ def render_constitution(spec: dict[str, Any]) -> str:
         out += [
             "- This app **does not need a backend**. Persist locally per"
             f" `content.persistence` ({persistence}).",
+        ]
+    if has_ads:
+        out += [
+            "",
+            "## Monetization & Ads",
+            "- This app **shows ads**. Add `google_mobile_ads` and use the ready bundle in"
+            " `admin/ads/flutter/` (`AdService` + `AdConfig`) — do not hand-roll ad plumbing.",
+            "- Initialize `AdService` in `main()`; inject the AdMob app id from"
+            " `admin/ads/admob.config.json` into `Info.plist` / `AndroidManifest.xml`.",
+            "- Place ads at the discovered `monetization.ad_placements` (see"
+            " `admin/ads/flutter/INTEGRATION.md`): banners embedded in-screen, interstitials on"
+            " the given triggers (respect `ads_frequency_interstitial` from Remote Config),"
+            " rewarded ads on the reward actions.",
+            "- **Disable ads for Pro**: bind `AdService.adsEnabled` to the inverse of the"
+            " RevenueCat `pro` entitlement (`ads_disabled_for_pro`).",
         ]
     out += [
         "",

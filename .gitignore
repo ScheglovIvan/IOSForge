@@ -29,3 +29,6 @@ __pycache__/
 runs/
 samples/
 uploads/
+
+# Local secrets (service-account keys, etc.) — never commit
+secrets/

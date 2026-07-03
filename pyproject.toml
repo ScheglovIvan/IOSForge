@@ -23,6 +23,8 @@ dependencies = [
     "pyaxmlparser>=0.3.31",
     "jsonschema>=4.26.0",
     "pyyaml>=6.0.3",
+    "firebase-admin>=7.5.0",
+    "google-api-python-client>=2.198.0",
 ]
 
 [dependency-groups]
@@ -66,6 +68,18 @@ module = ["iosforge.admin.*", "iosforge.worker.*"]
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
 disallow_untyped_decorators = false  # celery_app.task / FastAPI decorators are untyped
+
+# Firebase provisioning glue talks to untyped SDKs — loosen like admin/worker.
+[[tool.mypy.overrides]]
+module = ["iosforge.mvp.admin_provision"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+
+# Third-party SDKs without type stubs (Firebase/Google admin provisioning).
+[[tool.mypy.overrides]]
+module = ["firebase_admin.*", "googleapiclient.*", "google.oauth2.*", "google.auth.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

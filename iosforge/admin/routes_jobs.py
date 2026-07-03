@@ -11,14 +11,20 @@ from starlette.responses import RedirectResponse, Response
 from starlette.status import HTTP_303_SEE_OTHER
 
 from iosforge.admin import csrf
-from iosforge.admin.apk_validate import ApkValidationError, validate
 from iosforge.admin.deps import get_db, get_storage, require_user
 from iosforge.admin.session import SessionData
 from iosforge.admin.templating import templates
+from iosforge.admin.video_validate import VideoValidationError, validate
 from iosforge.common.config import get_settings
 from iosforge.common.logging import get_logger
 from iosforge.common.types import JobState
-from iosforge.db.models import ApkArtifact, GenerationResult, Job, StageTimeline, WalkthroughResult
+from iosforge.db.models import (
+    GenerationResult,
+    Job,
+    StageTimeline,
+    VideoArtifact,
+    WalkthroughResult,
+)
 from iosforge.storage.client import ArtifactStorage, build_key
 
 log = get_logger("admin.jobs")
@@ -37,9 +43,7 @@ def jobs_list(
     db: Session = Depends(get_db),
 ) -> Response:
     jobs = db.scalars(select(Job).order_by(Job.created_at.desc()).limit(200)).all()
-    return templates.TemplateResponse(
-        request, "jobs_list.html", {"jobs": jobs, "user": user}
-    )
+    return templates.TemplateResponse(request, "jobs_list.html", {"jobs": jobs, "user": user})
 
 
 @router.get("/jobs/new")
@@ -51,7 +55,7 @@ def jobs_new(request: Request, user: SessionData = Depends(require_user)) -> Res
 async def jobs_create(
     request: Request,
     csrf_token: str = Form(...),
-    apk: UploadFile = File(...),
+    video: UploadFile = File(...),
     user: SessionData = Depends(require_user),
     db: Session = Depends(get_db),
     storage: ArtifactStorage = Depends(get_storage),
@@ -64,7 +68,7 @@ async def jobs_create(
     # Stream the upload with a hard cap so an oversized file is never buffered.
     chunks: list[bytes] = []
     total = 0
-    while chunk := await apk.read(1024 * 1024):
+    while chunk := await video.read(1024 * 1024):
         total += len(chunk)
         if total > max_bytes:
             return _new_error(request, user, "File exceeds the size limit.", status=413)
@@ -72,26 +76,30 @@ async def jobs_create(
     raw = b"".join(chunks)
 
     try:
-        valid = validate(apk.filename or "upload.apk", raw, max_bytes)
-    except ApkValidationError as exc:
+        valid = validate(video.filename or "upload.mp4", raw, max_bytes)
+    except VideoValidationError as exc:
         return _new_error(request, user, str(exc), status=400)
 
     job_id = uuid.uuid4()
-    key = build_key(job_id=str(job_id), kind="apk", name=valid.filename)
-    storage.put(key, valid.data, content_type="application/vnd.android.package-archive")
+    key = build_key(job_id=str(job_id), kind="video", name=valid.filename)
+    storage.put(key, valid.data, content_type=f"video/{valid.container}")
 
     job = Job(
         id=job_id,
         state=JobState.QUEUED,
-        source_app_ref=f"manual-upload:{valid.filename}",
+        source_app_ref=f"manual-video:{valid.filename}",
         created_by_id=uuid.UUID(user.user_id),
-        submission_kind="manual_apk",
+        submission_kind="manual_video",
     )
     db.add(job)
     db.add(
-        ApkArtifact(
-            job_id=job_id, storage_key=key, source="manual-upload",
-            version=valid.filename, sha256=valid.sha256, size_bytes=valid.size,
+        VideoArtifact(
+            job_id=job_id,
+            storage_key=key,
+            source="manual-upload",
+            container=valid.container,
+            sha256=valid.sha256,
+            size_bytes=valid.size,
         )
     )
     db.commit()
@@ -143,7 +151,8 @@ def job_artifacts(
     walk = db.scalar(select(WalkthroughResult).where(WalkthroughResult.job_id == job_id))
     gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
     return templates.TemplateResponse(
-        request, "job_artifacts.html",
+        request,
+        "job_artifacts.html",
         {"job": job, "user": user, "walk": walk, "gen": gen},
     )
 

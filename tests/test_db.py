@@ -178,9 +178,7 @@ def test_child_models_crud_and_cascade(schema_engine: tuple[Engine, str]) -> Non
     engine, _ = schema_engine
     with Session(engine) as session:
         job = Job(source_app_ref="ios://app", state=JobState.QUEUED)
-        job.candidates.append(
-            Candidate(package_id="com.acme.app", score=0.91, selected=True)
-        )
+        job.candidates.append(Candidate(package_id="com.acme.app", score=0.91, selected=True))
         job.apk_artifacts.append(
             ApkArtifact(storage_key="apk/job/1.apk", sha256="ab" * 32, size_bytes=1024)
         )

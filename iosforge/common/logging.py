@@ -39,9 +39,7 @@ def configure_logging(level: str = "INFO", *, json_output: bool = True) -> None:
     ]
 
     renderer: Processor = (
-        structlog.processors.JSONRenderer()
-        if json_output
-        else structlog.dev.ConsoleRenderer()
+        structlog.processors.JSONRenderer() if json_output else structlog.dev.ConsoleRenderer()
     )
 
     # Send everything through the stdlib root logger so library logs and our

@@ -57,6 +57,13 @@ Method:
    its `sources` to [] and note it in `analysis_quality`.
 4. Be explicit about what the crawl could NOT reveal (screens behind login,
    dynamic content) under `analysis_quality`; never invent fake certainty.
+5. Frames come from a screen recording; a prior step already separated ad and
+   iOS-home frames, so `screens/` holds only real app screens. If a stray non-app
+   frame slips through, IGNORE it (do not add it to `screens`). Do NOT reverse-
+   engineer ad creatives; instead infer `monetization.ad_placements` (format /
+   trigger / screen_context / frequency) from the app's own paywall, rewards and
+   "watch ad for coins" screens that ARE present, and keep `ad_networks`
+   best-effort (only name a network when on-screen creative/store chrome shows it).
 
 Write a single file `app_spec.json` with this schema (ALL top-level keys are
 REQUIRED; use [] / {} / "" when a section does not apply, never omit a key):
@@ -126,7 +133,13 @@ REQUIRED; use [] / {} / "" when a section does not apply, never omit a key):
     "model": str,                       // free | freemium | subscription | one-time | ads | mixed
     "paywalls": [ {"location": str, "gates": str} ],
     "packages": [ {"name": str, "price": str, "period": str, "includes": [str]} ],
-    "ads": [str],
+    "ads": [str],                       // legacy free-text summary of the ad strategy
+    "ad_networks": [ {"name": str, "confidence": "high|medium|low",
+                      "evidence": str, "source": str} ],   // best-effort from creative only
+    "ad_placements": [ {   // where/when ads show (infer from kept rewards/paywall screens)
+      "format": "banner|interstitial|rewarded|native|offerwall",
+      "trigger": str, "screen_context": str, "frequency": str, "frames": [str]
+    } ],
     "free_vs_premium": [ {"feature": str, "tier": str} ]
   },
   "backend": {

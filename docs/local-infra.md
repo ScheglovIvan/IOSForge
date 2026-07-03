@@ -71,3 +71,35 @@ docker run --rm --network iosforge_default --entrypoint sh minio/mc:latest -c \
 - The artifacts bucket (`iosforge-artifacts`) has **object versioning enabled** — required
   for artifact version history (SPEC §8, §10; used later by T-2.3 storage abstraction).
 - Restart policy is `unless-stopped` for the long-running services; `minio-init` is `no`.
+
+## Mobile toolchain (Android SDK + emulator + Flutter)
+
+The emulator/crawl stage (`iosforge/mvp/emulator.py`) drives a host-installed Android SDK
+via `adb`/`emulator` and expects an AVD named `mvp` (`ANDROID_SDK_ROOT`, default
+`/opt/android-sdk`; `ADMIN_AVD=mvp`). Install everything with the idempotent script:
+
+```bash
+sudo bash scripts/install_android_toolchain.sh      # JDK17 + SDK + AVD 'mvp' + Flutter
+source /etc/profile.d/android-sdk.sh                 # load ANDROID_SDK_ROOT + PATH
+```
+
+Installs: JDK 17, Android command-line tools → `/opt/android-sdk`, `platform-tools`,
+`emulator`, `platforms;android-34`, `build-tools;34.0.0`, system image
+`android-34;google_apis;x86_64`, AVD `mvp` (pixel_6), and Flutter stable in `/opt/flutter`.
+Override defaults via env vars (`API_LEVEL`, `SYSTEM_IMAGE`, `AVD_NAME`, `CMDLINE_TOOLS_VER`).
+
+Requirements: Ubuntu x86_64, `/dev/kvm` present (hardware accel). The emulator runs headless
+(`-no-window -gpu swiftshader_indirect`). A non-root runtime user must be in the `kvm` group:
+
+```bash
+sudo usermod -aG kvm "$USER"      # then re-login
+```
+
+### Smoke test
+
+```bash
+emulator -list-avds                                  # -> mvp
+emulator -avd mvp -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect &
+adb wait-for-device && adb shell getprop sys.boot_completed    # -> 1
+flutter doctor                                       # Android toolchain OK
+```

@@ -31,9 +31,7 @@ def adb(*args: str, timeout: int = 120) -> subprocess.CompletedProcess[str]:
 
 def adb_raw(*args: str, timeout: int = 120) -> bytes:
     """Binary adb call (for screencap / file pulls that must not be text-decoded)."""
-    return subprocess.run(
-        [ADB, *args], capture_output=True, timeout=timeout, check=False
-    ).stdout
+    return subprocess.run([ADB, *args], capture_output=True, timeout=timeout, check=False).stdout
 
 
 def _emulator_running() -> bool:
@@ -48,9 +46,19 @@ def start_emulator(avd: str = "mvp") -> subprocess.Popen[bytes] | None:
         return None
     log.info("emulator.starting", avd=avd)
     proc = subprocess.Popen(
-        [EMULATOR, "-avd", avd, "-no-window", "-no-audio", "-no-boot-anim",
-         "-gpu", "swiftshader_indirect", "-no-snapshot"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        [
+            EMULATOR,
+            "-avd",
+            avd,
+            "-no-window",
+            "-no-audio",
+            "-no-boot-anim",
+            "-gpu",
+            "swiftshader_indirect",
+            "-no-snapshot",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     return proc
 

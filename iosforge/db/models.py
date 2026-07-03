@@ -100,6 +100,9 @@ class Job(Base):
     apk_artifacts: Mapped[list[ApkArtifact]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
+    video_artifacts: Mapped[list[VideoArtifact]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
     walkthrough_results: Mapped[list[WalkthroughResult]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
@@ -135,9 +138,7 @@ class StageTimeline(Base):
     """One stage attempt of a Job: timing, duration, error (SPEC §5.1, §8)."""
 
     __tablename__ = "stage_timeline"
-    __table_args__ = (
-        UniqueConstraint("job_id", "stage", "input_hash", name="stage_idempotency"),
-    )
+    __table_args__ = (UniqueConstraint("job_id", "stage", "input_hash", name="stage_idempotency"),)
 
     id: Mapped[uuid.UUID] = uuid_pk()
     job_id: Mapped[uuid.UUID] = mapped_column(
@@ -149,12 +150,8 @@ class StageTimeline(Base):
     # Natural idempotency key component (STACK): hash of the stage inputs.
     input_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
-    started_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    finished_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -208,6 +205,27 @@ class ApkArtifact(Base):
     job: Mapped[Job] = relationship(back_populates="apk_artifacts")
 
 
+class VideoArtifact(Base):
+    """An uploaded screen-recording used as the walkthrough source (SPEC §5.4)."""
+
+    __tablename__ = "video_artifacts"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    container: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    created_at: Mapped[dt.datetime] = _ts_col()
+
+    job: Mapped[Job] = relationship(back_populates="video_artifacts")
+
+
 class WalkthroughResult(Base):
     """Emulator walkthrough output: screenshots, screen map, logs (SPEC §5.4, §10)."""
 
@@ -219,9 +237,7 @@ class WalkthroughResult(Base):
     )
 
     # Storage keys for the per-screen screenshots.
-    screenshot_keys: Mapped[list[str]] = mapped_column(
-        ARRAY(String), nullable=False, default=list
-    )
+    screenshot_keys: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False, default=list)
     # Screen map (navigation graph) — schemaless JSONB.
     screen_map: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     logs: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -282,9 +298,7 @@ class PromptVersion(Base):
     """An immutable version of a prompt set's body (SPEC §6, §10)."""
 
     __tablename__ = "prompt_versions"
-    __table_args__ = (
-        UniqueConstraint("prompt_set_id", "version", name="prompt_version_seq"),
-    )
+    __table_args__ = (UniqueConstraint("prompt_set_id", "version", name="prompt_version_seq"),)
 
     id: Mapped[uuid.UUID] = uuid_pk()
     prompt_set_id: Mapped[uuid.UUID] = mapped_column(

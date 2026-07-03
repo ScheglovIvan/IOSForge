@@ -7,7 +7,10 @@ from typing import Any
 from iosforge.mvp import constitution
 
 
-def _spec(*, backend: bool = False) -> dict[str, Any]:
+def _spec(*, backend: bool = False, ads: bool = False) -> dict[str, Any]:
+    monetization: dict[str, Any] = {"model": "mixed"} if ads else {"model": "free"}
+    if ads:
+        monetization["ad_placements"] = [{"format": "rewarded", "screen_context": "Rewards"}]
     return {
         "app_name": "Todo",
         "app_type": "productivity",
@@ -18,6 +21,7 @@ def _spec(*, backend: bool = False) -> dict[str, Any]:
         ],
         "content": {"persistence": "local", "data_model": []},
         "backend": {"backend_needed": backend},
+        "monetization": monetization,
     }
 
 
@@ -54,3 +58,13 @@ def test_constitution_backend_rule_is_conditional() -> None:
 
     without = constitution.render_constitution(_spec(backend=False))
     assert "does not need a backend" in without
+
+
+def test_constitution_ads_section_is_conditional() -> None:
+    with_ads = constitution.render_constitution(_spec(ads=True))
+    assert "Monetization & Ads" in with_ads
+    assert "google_mobile_ads" in with_ads
+    assert "Disable ads for Pro" in with_ads
+
+    without = constitution.render_constitution(_spec(ads=False))
+    assert "Monetization & Ads" not in without

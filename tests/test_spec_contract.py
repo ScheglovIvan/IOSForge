@@ -132,3 +132,42 @@ def test_validate_returns_same_payload() -> None:
     original = _valid_spec()
     returned = validate_spec(copy.deepcopy(original))
     assert returned["requirements"][0]["id"] == "REQ-add-task"
+
+
+def test_structured_ad_monetization_validates() -> None:
+    spec = _valid_spec()
+    spec["monetization"] = {
+        "model": "mixed",
+        "ads": ["rewarded video for coins"],
+        "ad_networks": [
+            {
+                "name": "AdMob",
+                "confidence": "low",
+                "evidence": "install-now card",
+                "source": "video",
+            }
+        ],
+        "ad_placements": [
+            {
+                "format": "rewarded",
+                "trigger": "watch-for-coins tap",
+                "screen_context": "Rewards",
+                "frequency": "on demand",
+                "frames": ["0048.png"],
+            }
+        ],
+    }
+    assert validate_spec(spec)["monetization"]["ad_placements"][0]["format"] == "rewarded"
+
+
+def test_legacy_flat_ads_still_validates() -> None:
+    spec = _valid_spec()
+    spec["monetization"] = {"model": "ads", "ads": ["banner", "interstitial"]}
+    assert validate_spec(spec)["monetization"]["ads"] == ["banner", "interstitial"]
+
+
+def test_rejects_bad_ad_format() -> None:
+    bad = _valid_spec()
+    bad["monetization"] = {"model": "ads", "ad_placements": [{"format": "popup"}]}
+    with pytest.raises(SpecValidationError, match="schema violation"):
+        validate_spec(bad)

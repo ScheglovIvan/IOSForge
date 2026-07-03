@@ -54,6 +54,9 @@ _SOURCE_KINDS = ["observed", "inferred"]
 _STR = {"type": "string"}
 _STR_ARRAY = {"type": "array", "items": {"type": "string"}}
 
+_AD_FORMATS = ["banner", "interstitial", "rewarded", "native", "offerwall"]
+_CONFIDENCE = ["high", "medium", "low"]
+
 APP_SPEC_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "IOSForge App Spec v3",
@@ -151,7 +154,42 @@ APP_SPEC_SCHEMA: dict[str, Any] = {
             },
         },
         "content": {"type": "object"},
-        "monetization": {"type": "object"},
+        "monetization": {
+            "type": "object",
+            "properties": {
+                "model": _STR,
+                "paywalls": {"type": "array"},
+                "packages": {"type": "array"},
+                "ads": _STR_ARRAY,
+                "ad_networks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": _STR,
+                            "confidence": {"type": "string", "enum": _CONFIDENCE},
+                            "evidence": _STR,
+                            "source": _STR,
+                        },
+                    },
+                },
+                "ad_placements": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["format"],
+                        "properties": {
+                            "format": {"type": "string", "enum": _AD_FORMATS},
+                            "trigger": _STR,
+                            "screen_context": _STR,
+                            "frequency": _STR,
+                            "frames": _STR_ARRAY,
+                        },
+                    },
+                },
+                "free_vs_premium": {"type": "array"},
+            },
+        },
         "backend": {"type": "object"},
         "permissions": {"type": "array"},
         "integrations": {"type": "array"},

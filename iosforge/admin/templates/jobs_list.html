@@ -3,7 +3,7 @@
 {% block content %}
 <div style="display:flex;justify-content:space-between;align-items:center;">
   <h2>Jobs</h2>
-  <a class="btn" href="/jobs/new">+ Upload APK</a>
+  <a class="btn" href="/jobs/new">+ Upload video</a>
 </div>
 <table>
   <thead><tr><th>Created</th><th>Source</th><th>State</th><th></th></tr></thead>
@@ -16,7 +16,7 @@
       <td><a href="/jobs/{{ job.id }}">open</a></td>
     </tr>
   {% else %}
-    <tr><td colspan="4">No jobs yet. Upload an APK to start.</td></tr>
+    <tr><td colspan="4">No jobs yet. Upload a screen recording to start.</td></tr>
   {% endfor %}
   </tbody>
 </table>

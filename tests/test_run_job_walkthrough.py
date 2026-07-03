@@ -21,7 +21,7 @@ import pytest
 from iosforge.common.config import Settings
 from iosforge.common.types import JobState
 from iosforge.db.models import ApkArtifact, Job, WalkthroughResult
-from iosforge.mvp import analyze, claude_gen, compliance, crawl, emulator
+from iosforge.mvp import analyze, claude_gen, compliance, crawl, emulator, screen_filter
 from iosforge.mvp.paths import RunPaths
 from iosforge.worker import run_job as run_job_module
 
@@ -43,8 +43,8 @@ class _FakeSession:
     def get(self, model: type, pk: object) -> object | None:
         return self._job if model is Job else None
 
-    def scalar(self, _stmt: object) -> ApkArtifact:
-        return self._apk
+    def scalar(self, stmt: object) -> ApkArtifact | None:
+        return None if "video_artifacts" in str(stmt) else self._apk
 
     def add(self, obj: object) -> None:
         self.added.append(obj)
@@ -115,5 +115,58 @@ def test_walkthrough_only_finishes_done_and_skips_codegen(
     assert "walkthrough only" in result
 
 
+def test_analysis_only_runs_filter_and_analyze_then_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job = Job(source_app_ref="ios://app", state=JobState.QUEUED)
+    job.id = uuid.uuid4()
+    job_id = str(job.id)
+    apk_art = ApkArtifact(job_id=job.id, storage_key="jobs/x/apk/app.apk")
+
+    session = _FakeSession(job, apk_art)
+    monkeypatch.setattr(run_job_module, "get_sessionmaker", lambda: lambda: session)
+    monkeypatch.setattr(run_job_module, "S3ArtifactStorage", _FakeStorage)
+    monkeypatch.setattr(
+        run_job_module, "get_settings", lambda: Settings(pipeline_stop_after_analyze=True)
+    )
+
+    monkeypatch.setattr(emulator, "start_emulator", lambda avd: None)
+    monkeypatch.setattr(emulator, "wait_for_boot", lambda: None)
+    monkeypatch.setattr(emulator, "install_apk", lambda apk: "com.example.app")
+    monkeypatch.setattr(emulator, "launch", lambda package: None)
+
+    def _fake_walk(paths: RunPaths, package: str, max_screens: int) -> dict[str, object]:
+        (paths.screens_dir / "0000.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        result = {"package": package, "screens": [{"id": "0000"}]}
+        paths.screens_json.write_text(json.dumps(result))
+        return result
+
+    monkeypatch.setattr(crawl, "walk", _fake_walk)
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        screen_filter, "filter_screens", lambda paths, **k: (calls.append("filter"), {})[1]
+    )
+
+    def _fake_analyze(paths: RunPaths, *a: object, **k: object) -> None:
+        paths.app_spec_json.write_text("{}")
+        paths.spec_md.write_text("# spec")
+        calls.append("analyze")
+
+    monkeypatch.setattr(analyze, "analyze", _fake_analyze)
+    monkeypatch.setattr(analyze, "decompose", lambda *a, **k: calls.append("decompose"))
+    monkeypatch.setattr(claude_gen, "generate_from_tasks", lambda *a, **k: calls.append("generate"))
+    monkeypatch.setattr(
+        compliance, "refine_until_compliant", lambda *a, **k: calls.append("refine")
+    )
+
+    result = run_job_module.run_job.run(job_id)
+
+    assert calls == ["filter", "analyze"]
+    assert job.state is JobState.DONE
+    assert "analysis only" in result
+
+
 def test_setting_defaults_false() -> None:
     assert Settings().pipeline_stop_after_walkthrough is False
+    assert Settings().pipeline_stop_after_analyze is False

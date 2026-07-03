@@ -21,7 +21,14 @@ from iosforge.common.logging import get_logger
 from iosforge.common.queue import PipelineTask, celery_app
 from iosforge.common.types import JobState, Stage
 from iosforge.db.base import utcnow
-from iosforge.db.models import ApkArtifact, GenerationResult, Job, StageTimeline, WalkthroughResult
+from iosforge.db.models import (
+    ApkArtifact,
+    GenerationResult,
+    Job,
+    StageTimeline,
+    VideoArtifact,
+    WalkthroughResult,
+)
 from iosforge.db.session import get_sessionmaker
 from iosforge.storage.client import S3ArtifactStorage, build_key
 
@@ -45,7 +52,18 @@ def _finish_stage(db, row: StageTimeline) -> None:
 
 @celery_app.task(base=PipelineTask, name="iosforge.run_job", bind=True)
 def run_job(self, job_id: str) -> str:
-    from iosforge.mvp import analyze, codegen, compliance, crawl, emulator
+    from iosforge.mvp import (
+        ad_analysis,
+        admin_gen,
+        admin_provision,
+        analyze,
+        codegen,
+        compliance,
+        crawl,
+        emulator,
+        screen_filter,
+        video_frames,
+    )
     from iosforge.mvp.paths import RunPaths
 
     settings = get_settings()
@@ -57,38 +75,60 @@ def run_job(self, job_id: str) -> str:
         job = db.get(Job, uuid.UUID(job_id))
         if job is None:
             return f"job {job_id} not found"
+        video_art = db.scalar(select(VideoArtifact).where(VideoArtifact.job_id == job.id))
         apk_art = db.scalar(select(ApkArtifact).where(ApkArtifact.job_id == job.id))
-        if apk_art is None:
+        if video_art is None and apk_art is None:
             job.state = JobState.FAILED
             db.commit()
-            return f"job {job_id} has no APK artifact"
+            return f"job {job_id} has no source artifact"
 
         stage_row: StageTimeline | None = None
         try:
-            apk_path = tmp / "app.apk"
-            apk_path.write_bytes(storage.get(apk_art.storage_key))
-
-            # --- Walkthrough ---
-            stage_row = _start_stage(db, job, Stage.WALKTHROUGH, JobState.WALKTHROUGH)
-            emulator.start_emulator(settings.admin_avd)
-            emulator.wait_for_boot()
-            package = emulator.install_apk(apk_path)
-            emulator.launch(package)
             paths = RunPaths.create(tmp / "run")
-            crawl.walk(paths, package, settings.walkthrough_max_screens)
+
+            # --- Walkthrough: screens from a video upload or an emulator crawl ---
+            stage_row = _start_stage(db, job, Stage.WALKTHROUGH, JobState.WALKTHROUGH)
+            if video_art is not None:
+                video_path = tmp / "recording"
+                video_path.write_bytes(storage.get(video_art.storage_key))
+                screen_map = video_frames.extract_frames(
+                    video_path,
+                    paths,
+                    fps=settings.video_frame_fps,
+                    dedup=settings.video_dedup,
+                    max_frames=settings.video_max_frames,
+                )
+                provider = "ffmpeg-video"
+                strategy: dict[str, object] = {
+                    "fps": settings.video_frame_fps,
+                    "dedup": settings.video_dedup,
+                    "max_frames": settings.video_max_frames,
+                }
+            elif apk_art is not None:
+                apk_path = tmp / "app.apk"
+                apk_path.write_bytes(storage.get(apk_art.storage_key))
+                emulator.start_emulator(settings.admin_avd)
+                emulator.wait_for_boot()
+                package = emulator.install_apk(apk_path)
+                emulator.launch(package)
+                screen_map = crawl.walk(paths, package, settings.walkthrough_max_screens)
+                provider = "adb-mvp"
+                strategy = {}
+            else:  # guarded above; keeps the type-checker happy
+                raise RuntimeError("no source artifact")
 
             screenshot_keys = []
             for png in sorted(paths.screens_dir.glob("*.png")):
                 key = build_key(job_id=job_id, kind="screenshots", name=png.name)
                 storage.put(key, png.read_bytes(), content_type="image/png")
                 screenshot_keys.append(key)
-            screen_map = json.loads(paths.screens_json.read_text())
             db.add(
                 WalkthroughResult(
                     job_id=job.id,
                     screenshot_keys=screenshot_keys,
                     screen_map=screen_map,
-                    provider="adb-mvp",
+                    provider=provider,
+                    strategy=strategy,
                 )
             )
             _finish_stage(db, stage_row)
@@ -102,7 +142,83 @@ def run_job(self, job_id: str) -> str:
 
             # --- Codegen (Stage B->C->D->E inside one CODEGEN span) ---
             stage_row = _start_stage(db, job, Stage.CODEGEN, JobState.CODEGEN)
+            if settings.filter_junk_frames:
+                audit = screen_filter.filter_screens(paths)
+                labels_key = build_key(
+                    job_id=job_id, kind="screen_labels", name="screen_labels.json"
+                )
+                storage.put(
+                    labels_key,
+                    json.dumps(audit).encode(),
+                    content_type="application/json",
+                )
             analyze.analyze(paths)
+
+            if settings.analyze_ads and paths.ad_screens_dir.exists():
+                for png in sorted(paths.ad_screens_dir.glob("*.png")):
+                    storage.put(
+                        build_key(job_id=job_id, kind="ad_frames", name=png.name),
+                        png.read_bytes(),
+                        content_type="image/png",
+                    )
+                ad_res = ad_analysis.analyze_ads(paths)
+                if ad_res is not None:
+                    storage.put(
+                        build_key(job_id=job_id, kind="ad_analysis", name="ad_analysis.json"),
+                        ad_res.read_bytes(),
+                        content_type="application/json",
+                    )
+
+            if settings.generate_admin:
+                spec = json.loads(paths.app_spec_json.read_text())
+                if spec.get("backend", {}).get("admin_panel_needed"):
+                    admin_dir = admin_gen.generate_admin(spec, paths.run_dir / "admin")
+                    admin_zip = shutil.make_archive(str(tmp / "admin"), "zip", str(admin_dir))
+                    storage.put(
+                        build_key(job_id=job_id, kind="admin", name="admin.zip"),
+                        Path(admin_zip).read_bytes(),
+                        content_type="application/zip",
+                    )
+                    storage.put(
+                        build_key(job_id=job_id, kind="admin", name="manifest.json"),
+                        (admin_dir / "manifest.json").read_bytes(),
+                        content_type="application/json",
+                    )
+                    if settings.provision_admin and settings.firebase_sa_path:
+                        try:
+                            pres = admin_provision.provision(admin_dir, settings)
+                            storage.put(
+                                build_key(
+                                    job_id=job_id, kind="admin", name="provision_result.json"
+                                ),
+                                json.dumps(pres).encode(),
+                                content_type="application/json",
+                            )
+                            log.info(
+                                "run_job.admin_provisioned",
+                                job_id=job_id,
+                                project=pres["project_id"],
+                            )
+                        except Exception as exc:  # provisioning must not fail the job
+                            log.error(
+                                "run_job.admin_provision_failed", job_id=job_id, error=str(exc)
+                            )
+
+            if settings.pipeline_stop_after_analyze:
+                for kind, src in (("app_spec", paths.app_spec_json), ("spec_md", paths.spec_md)):
+                    if src.exists():
+                        ctype = "application/json" if src.suffix == ".json" else "text/markdown"
+                        storage.put(
+                            build_key(job_id=job_id, kind=kind, name=src.name),
+                            src.read_bytes(),
+                            content_type=ctype,
+                        )
+                _finish_stage(db, stage_row)
+                job.state = JobState.DONE
+                db.commit()
+                log.info("run_job.analysis_only_done", job_id=job_id)
+                return f"job {job_id} done (analysis only)"
+
             analyze.decompose(paths)
             codegen.generate(paths, settings)
             report = compliance.refine_until_compliant(

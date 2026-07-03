@@ -212,7 +212,12 @@ def make_celery_app(
     broker = broker_url or settings.redis_url
     backend = result_backend or settings.redis_url
 
-    app = Celery("iosforge", broker=broker, backend=backend)
+    app = Celery(
+        "iosforge",
+        broker=broker,
+        backend=backend,
+        include=["iosforge.worker.run_job"],
+    )
     app.conf.update(
         task_default_queue="discovery",
         task_queues=_build_task_queues(),

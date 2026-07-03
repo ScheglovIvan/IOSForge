@@ -79,9 +79,7 @@ def test_init_kwargs_override_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.env == "staging"
 
 
-def test_reads_from_toml_config_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_reads_from_toml_config_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A configs/*.toml file overrides defaults but env still wins over it."""
     cfg_file = tmp_path / "app.toml"
     cfg_file.write_text(

@@ -25,6 +25,9 @@ class RunPaths:
     run_dir: Path
     screens_dir: Path
     screens_json: Path
+    ad_screens_dir: Path
+    ad_analysis_json: Path
+    screen_labels_json: Path
     claude_ws: Path
     flutter_app: Path
     app_spec_json: Path
@@ -45,6 +48,9 @@ class RunPaths:
             run_dir=run_dir,
             screens_dir=run_dir / "screens",
             screens_json=run_dir / "screens.json",
+            ad_screens_dir=run_dir / "ad_screens",
+            ad_analysis_json=run_dir / "ad_analysis.json",
+            screen_labels_json=run_dir / "screen_labels.json",
             claude_ws=run_dir / "claude_ws",
             flutter_app=run_dir / "flutter_app",
             app_spec_json=run_dir / "app_spec.json",

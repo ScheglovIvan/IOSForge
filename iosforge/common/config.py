@@ -109,6 +109,35 @@ class Settings(BaseSettings):
     # Walkthrough-only mode: finish a Job (DONE) right after the emulator crawl,
     # skipping the codegen/compliance stage (e.g. when Flutter is unavailable).
     pipeline_stop_after_walkthrough: bool = Field(default=False)
+    # Analysis-only mode: run screen-filter + analyze, then finish (DONE) —
+    # skips decompose/codegen/compliance. For inspecting the App Spec cheaply.
+    pipeline_stop_after_analyze: bool = Field(default=False)
+    # Admin/backend deliverable (Firebase + Rowy + RevenueCat + Stream): emit an
+    # admin/ scaffold alongside the app when app_spec.backend.admin_panel_needed.
+    # provision_admin (opt-in) would create the live Firebase project — needs creds.
+    generate_admin: bool = Field(default=True)
+    provision_admin: bool = Field(default=False)
+    admin_backend_provider: str = Field(default="firebase_rowy")
+    # Firebase provisioning credentials (paths/keys only — real secret file lives
+    # outside the repo, referenced from .env). Empty = provisioning is skipped.
+    firebase_sa_path: str = Field(default="")
+    firebase_project_id: str = Field(default="")
+    firebase_create_project: bool = Field(default=False)
+    revenuecat_api_key: str = Field(default="")
+    # --- Video-frame ingestion: screens come from an uploaded screen-recording
+    # instead of an emulator crawl. Frames are sampled at video_frame_fps to keep
+    # transitions (modals, dropdowns, appearance animations) visible; mpdecimate
+    # (video_dedup) collapses only truly static holds. video_max_frames caps output.
+    video_frame_fps: int = Field(default=4, gt=0)
+    video_dedup: bool = Field(default=True)
+    video_max_frames: int = Field(default=80, gt=0)
+    # Before analysis, classify each frame (vision) and drop non-app frames —
+    # full-screen ads and the iOS home/lock screen captured in the recording.
+    filter_junk_frames: bool = Field(default=True)
+    # On-demand ad analysis: read the marked ad frames + monetization/rewards
+    # screens and emit a structured ad model (networks best-effort + placements).
+    # Off by default to save vision tokens; ad frames are always kept/marked.
+    analyze_ads: bool = Field(default=False)
     # Stage 3 codegen orchestration: "claude" = single local Claude CLI task runner;
     # "hermes" = Hermes Agent orchestrates, local Claude CLI executes (Variant A);
     # "cloud" = the local Claude Code agent orchestrates AND builds directly.
