@@ -100,6 +100,20 @@ class Settings(BaseSettings):
     compliance_weight_coverage: float = Field(default=0.3, ge=0.0, le=1.0)
     compliance_weight_flows: float = Field(default=0.2, ge=0.0, le=1.0)
     compliance_max_iterations: int = Field(default=3, gt=0)
+    # Web screen-similarity verification: after frontend codegen, build the app
+    # for web and render each screen in headless Chromium via the canonical preview
+    # route /#/screen/<id>, then vision-judge vs the originals. Non-fatal — a build
+    # or render failure never loses the generated frontend. chromium_bin empty =
+    # auto-discover (chromium / chromium-browser / google-chrome).
+    verify_frontend_web: bool = Field(default=True)
+    # Frontend web-verify pass bar. Distinct from the SPEC ≥0.95 iOS-compliance goal
+    # (compliance_threshold): a headless web render of a Flutter app compared to
+    # native iOS screenshots has an inherent ceiling, so the frontend MVP passes at
+    # 0.80 similarity.
+    frontend_verify_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
+    web_render_wait_ms: int = Field(default=15000, gt=0)
+    web_render_window: str = Field(default="390,844")
+    chromium_bin: str = Field(default="")
 
     # --- Walkthrough limits (DECISIONS Q3) — placeholders, per-job overridable ---
     walkthrough_max_screens: int = Field(default=40, gt=0)
@@ -123,14 +137,40 @@ class Settings(BaseSettings):
     firebase_sa_path: str = Field(default="")
     firebase_project_id: str = Field(default="")
     firebase_create_project: bool = Field(default=False)
+    # Per-app model: each clone gets its own GCP/Firebase project. Parent org/folder
+    # resource for project creation ("organizations/…"/"folders/…"); empty means no
+    # parent — a service account almost always needs an org + projectCreator + quota,
+    # so parentless create typically fails (logged as a warning).
+    firebase_parent: str = Field(default="")
+    firebase_project_prefix: str = Field(default="iosforge")
+    # Generate the backend-connected Flutter app (flutter_wiring) wired to the
+    # provisioned project's web config, alongside the static codegen output.
+    generate_wired_app: bool = Field(default=True)
     revenuecat_api_key: str = Field(default="")
-    # --- Video-frame ingestion: screens come from an uploaded screen-recording
-    # instead of an emulator crawl. Frames are sampled at video_frame_fps to keep
-    # transitions (modals, dropdowns, appearance animations) visible; mpdecimate
-    # (video_dedup) collapses only truly static holds. video_max_frames caps output.
-    video_frame_fps: int = Field(default=4, gt=0)
-    video_dedup: bool = Field(default=True)
-    video_max_frames: int = Field(default=80, gt=0)
+    # --- Media hosting: Cloudflare R2 (S3-compatible) — no Firebase Storage/Blaze.
+    # Endpoint + access key + secret live in a gitignored env file referenced by
+    # r2_secrets_path (e.g. secrets/r2.env with R2_ENDPOINT / R2_ACCESS_KEY_ID /
+    # R2_SECRET_ACCESS_KEY); bucket + public base URL are non-secret. One shared
+    # bucket, per-app key prefix (= collection_prefix). Empty bucket = R2 disabled.
+    r2_secrets_path: str = Field(default="")
+    r2_bucket: str = Field(default="")
+    r2_public_base: str = Field(default="")
+    # --- Fully automatic pipeline: Analysis auto-chains into Frontend Build +
+    # Code Generation, then GitHub Upload (no manual button). ---
+    auto_build_frontend: bool = Field(default=True)
+    # Per-task codegen retry budget (Code Generation "Retrying…" then permanent-fail).
+    codegen_task_max_attempts: int = Field(default=2, gt=0)
+    # GitHub Upload stage: push the generated project to a new public repo. Token
+    # (scope repo/public_repo) lives in a gitignored env file (github_token_path,
+    # GITHUB_TOKEN=...). Empty token / publish off = the stage is skipped.
+    github_publish: bool = Field(default=True)
+    github_token_path: str = Field(default="")
+    github_api_base: str = Field(default="https://api.github.com")
+    github_repo_private: bool = Field(default=False)
+    github_repo_prefix: str = Field(default="")
+    # Seed placeholder CONTENT (series/episodes + tiny dummy videos in Storage) so
+    # the generated app is visually reviewable; swap for real content later.
+    seed_placeholder_content: bool = Field(default=True)
     # Before analysis, classify each frame (vision) and drop non-app frames —
     # full-screen ads and the iOS home/lock screen captured in the recording.
     filter_junk_frames: bool = Field(default=True)
@@ -156,6 +196,14 @@ class Settings(BaseSettings):
     admin_login_max_attempts: int = Field(default=5, gt=0)
     admin_login_lockout_s: int = Field(default=300, gt=0)
     admin_avd: str = "mvp"  # AVD the worker boots for the walkthrough
+    # --- App Store ingestion: the source app is identified by its official App
+    # Store URL; the worker resolves name/description/screenshots via the iTunes
+    # Lookup API during the WALKTHROUGH stage. Screenshots are kept as reference
+    # metadata only (not the pipeline screens yet).
+    appstore_api_base: str = "https://itunes.apple.com"
+    appstore_country_default: str = "us"
+    appstore_fetch_timeout_s: int = Field(default=20, gt=0)
+    appstore_max_screenshots: int = Field(default=20, gt=0)
     # Seed-only operator credentials (used by `python -m iosforge.admin.seed`).
     # Never referenced at request time; password is hashed into admin_users.
     admin_seed_username: str = ""

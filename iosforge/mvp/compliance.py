@@ -18,10 +18,14 @@ SPEC §6 (PromptSetProvider) tech-debt as ``analyze``/``claude_gen``.
 
 from __future__ import annotations
 
+import functools
+import http.server
 import json
 import shutil
 import subprocess
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,6 +38,7 @@ from iosforge.mvp.paths import RunPaths
 log = get_logger("mvp.compliance")
 
 FLUTTER_BIN = "/opt/flutter/bin/flutter"
+_CHROMIUM_CANDIDATES = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
 
 JUDGE_PROMPT = """\
 You are judging how faithfully a generated Flutter app reproduces an original
@@ -144,6 +149,137 @@ def render_generated(paths: RunPaths, *, avd: str, timeout: int = 1800) -> dict[
     result = {"package": package, "screens": generated}
     paths.generated_screens_json.write_text(json.dumps(result, indent=2, ensure_ascii=False))
     bound.info("compliance.render.done", screens=len(generated))
+    return result
+
+
+def _discover_chromium(preferred: str = "") -> str:
+    """Locate a headless-capable Chromium/Chrome binary, or raise."""
+    if preferred:
+        return preferred
+    for name in _CHROMIUM_CANDIDATES:
+        found = shutil.which(name)
+        if found:
+            return found
+    for path in ("/snap/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"):
+        if Path(path).is_file():
+            return path
+    raise RuntimeError("no chromium/chrome binary found for web rendering")
+
+
+def build_web(paths: RunPaths, *, timeout: int = 1800) -> Path:
+    """Build ``paths.flutter_app`` for the web (release, self-contained assets).
+
+    ``--no-web-resources-cdn`` bundles CanvasKit locally so headless Chromium under
+    ``--no-sandbox`` renders without network. Success is checked by the presence of
+    ``build/web/index.html`` (the root warning under a root user is not fatal).
+    """
+    bound = log.bind(stage="compliance.build_web", run_dir=str(paths.run_dir))
+    app = paths.flutter_app
+    if not (app / "web" / "index.html").is_file():
+        subprocess.run(
+            [FLUTTER_BIN, "create", "--platforms=web", "."],
+            cwd=app,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    subprocess.run(
+        [
+            FLUTTER_BIN,
+            "build",
+            "web",
+            "--release",
+            "--no-web-resources-cdn",
+            "--suppress-analytics",
+        ],
+        cwd=app,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    out = app / "build" / "web"
+    if not (out / "index.html").is_file():
+        raise RuntimeError("flutter build web did not produce build/web/index.html")
+    bound.info("compliance.build_web.done", web=str(out))
+    return out
+
+
+def _snap_stage_dir(chromium_bin: str) -> Path | None:
+    """A screenshot staging dir a *snap-confined* Chromium can actually write to.
+
+    Snap Chromium runs under confinement and cannot write ``--screenshot`` to
+    ``/tmp`` (it silently writes into its private namespace, so the file never
+    appears at the real path). It CAN write under its own snap home. Return that
+    dir for a snap binary, or ``None`` for a normal (unconfined) Chromium.
+    """
+    if "/snap/" not in chromium_bin:
+        return None
+    stage = Path.home() / "snap" / "chromium" / "common" / "iosforge_render"
+    stage.mkdir(parents=True, exist_ok=True)
+    return stage
+
+
+def render_generated_web(
+    paths: RunPaths,
+    *,
+    chromium_bin: str,
+    wait_ms: int,
+    window: str,
+    timeout: int = 300,
+) -> dict[str, Any]:
+    """Serve ``build/web`` and screenshot each screen via ``/#/screen/<id>``.
+
+    Uses the canonical preview route the codegen contract guarantees. ``--headless=old``
+    writes the screenshot synchronously; software GL (SwiftShader) lets Flutter's
+    CanvasKit paint without a GPU. Snap-confined Chromium can't write to ``/tmp``, so
+    shots are staged in its snap home and moved into ``paths.generated_screens_dir``
+    (keyed by original id, same shape as the emulator :func:`render_generated`). The
+    HTTP server binds an ephemeral port and is always torn down.
+    """
+    bound = log.bind(stage="compliance.render_web", run_dir=str(paths.run_dir))
+    web_dir = paths.flutter_app / "build" / "web"
+    stage = _snap_stage_dir(chromium_bin)
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(web_dir))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    generated: list[dict[str, str]] = []
+    try:
+        for sid in _original_screen_ids(paths):
+            png = paths.generated_screens_dir / f"{sid}.png"
+            shot = (stage / f"{sid}.png") if stage is not None else png
+            subprocess.run(
+                [
+                    chromium_bin,
+                    "--headless=old",
+                    "--no-sandbox",
+                    "--hide-scrollbars",
+                    "--enable-unsafe-swiftshader",
+                    "--use-gl=angle",
+                    "--use-angle=swiftshader-webgl",
+                    f"--virtual-time-budget={wait_ms}",
+                    f"--window-size={window}",
+                    f"--screenshot={shot}",
+                    f"http://127.0.0.1:{port}/#/screen/{sid}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            if stage is not None and shot.is_file():
+                shutil.move(str(shot), str(png))
+            if png.is_file():
+                generated.append({"id": sid, "screenshot": f"generated_screens/{sid}.png"})
+    finally:
+        server.shutdown()
+        server.server_close()
+    result = {"package": "web", "screens": generated}
+    paths.generated_screens_json.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    bound.info("compliance.render_web.done", screens=len(generated))
     return result
 
 
@@ -400,28 +536,62 @@ def apply_corrective(
     return paths.flutter_app
 
 
-def refine_until_compliant(
+def _min_screen_score(report: dict[str, Any]) -> float:
+    scores = [float(s.get("score", 0.0)) for s in report.get("screens", [])]
+    return min(scores) if scores else 0.0
+
+
+def _apply_freeze(
+    report: dict[str, Any], frozen: dict[str, float], threshold: float, weights: ComplianceWeights
+) -> None:
+    """Lock screens that ever reached the threshold: hold their score and clear
+    their diffs so they are neither re-corrected nor regressed by judge/render
+    noise. Recomputes the overall score from the frozen-merged per-screen scores.
+    """
+    for screen in report.get("screens", []):
+        sid = str(screen.get("id"))
+        if sid in frozen:
+            screen["score"] = frozen[sid]
+            screen["diffs"] = []
+            screen["frozen"] = True
+        elif float(screen.get("score", 0.0)) >= threshold:
+            frozen[sid] = float(screen["score"])
+    scores = [float(s.get("score", 0.0)) for s in report.get("screens", [])]
+    if scores:
+        visual = sum(scores) / len(scores)
+        report["compliance_score"] = (
+            weights.visual * visual
+            + weights.coverage * float(report.get("coverage", 0.0))
+            + weights.flows * float(report.get("flows", 0.0))
+        )
+
+
+def _refine(
     paths: RunPaths,
+    prepare: Callable[[], None],
     *,
     threshold: float,
     soft_floor: float,
     max_iterations: int,
     weights: ComplianceWeights,
-    avd: str,
-    timeout: int = 1800,
+    timeout: int,
+    per_screen: bool = False,
+    freeze_passed: bool = False,
 ) -> dict[str, Any]:
-    """Loop build -> render -> evaluate -> correct until compliant or exhausted.
+    """Platform-agnostic refine loop: ``prepare`` builds + renders one iteration.
 
-    Stops on score>=threshold, iteration>=max_iterations, or improvement<=0.01 vs
-    the previous iteration. Always returns the final selftest report dict; a
-    ``below_floor`` status is reported but never raises (delivery is not blocked).
+    The gate metric is the overall compliance score, or — when ``per_screen`` — the
+    weakest individual screen, so the loop keeps correcting until EVERY screen meets
+    the threshold. When ``freeze_passed``, a screen that reaches the threshold is
+    locked (never re-corrected or regressed by judge/render noise). Stops on
+    gate>=threshold, iteration>=max_iterations, or improvement<=0.01.
     """
     bound = log.bind(stage="compliance", run_dir=str(paths.run_dir))
     history: list[float] = []
+    frozen: dict[str, float] = {}
     report: dict[str, Any] = {}
     for iteration in range(1, max_iterations + 1):
-        build_apk(paths, timeout=timeout)
-        render_generated(paths, avd=avd, timeout=timeout)
+        prepare()
         report = evaluate(
             paths,
             iteration,
@@ -431,17 +601,19 @@ def refine_until_compliant(
             history=history,
             timeout=timeout,
         )
-        score = float(report["compliance_score"])
-        if score >= threshold:
-            report["stop_reason"] = "threshold_met"
+        if freeze_passed:
+            _apply_freeze(report, frozen, threshold, weights)
+        gate = _min_screen_score(report) if per_screen else float(report["compliance_score"])
+        if gate >= threshold:
+            report["stop_reason"] = "all_screens_met" if per_screen else "threshold_met"
             break
         if iteration >= max_iterations:
             report["stop_reason"] = "max_iterations"
             break
-        if history and (score - history[-1]) <= 0.01:
+        if history and (gate - history[-1]) <= 0.01:
             report["stop_reason"] = "no_improvement"
             break
-        history.append(score)
+        history.append(gate)
         corrective = diffs_to_tasks(report, iteration)
         paths.corrective_tasks_json.write_text(json.dumps(corrective, indent=2, ensure_ascii=False))
         apply_corrective(paths, corrective, timeout=timeout)
@@ -454,3 +626,91 @@ def refine_until_compliant(
         stop_reason=report.get("stop_reason"),
     )
     return report
+
+
+def refine_until_compliant(
+    paths: RunPaths,
+    *,
+    threshold: float,
+    soft_floor: float,
+    max_iterations: int,
+    weights: ComplianceWeights,
+    avd: str,
+    timeout: int = 1800,
+) -> dict[str, Any]:
+    """Emulator refine loop: APK build -> deep-link render -> evaluate -> correct."""
+
+    def _prepare() -> None:
+        build_apk(paths, timeout=timeout)
+        render_generated(paths, avd=avd, timeout=timeout)
+
+    return _refine(
+        paths,
+        _prepare,
+        threshold=threshold,
+        soft_floor=soft_floor,
+        max_iterations=max_iterations,
+        weights=weights,
+        timeout=timeout,
+    )
+
+
+def refine_until_compliant_web(
+    paths: RunPaths,
+    *,
+    threshold: float,
+    soft_floor: float,
+    max_iterations: int,
+    weights: ComplianceWeights,
+    chromium_bin: str = "",
+    wait_ms: int,
+    window: str,
+    timeout: int = 1800,
+    require_all_screens: bool = False,
+) -> dict[str, Any]:
+    """Web refine loop: flutter build web -> headless Chromium render -> evaluate
+    -> correct weak screens, iterating toward ``threshold``. When
+    ``require_all_screens`` is set, the loop runs until EVERY screen meets the
+    threshold (weakest-screen gate), not just the overall score."""
+    chromium = _discover_chromium(chromium_bin)
+
+    def _prepare() -> None:
+        build_web(paths, timeout=timeout)
+        render_generated_web(paths, chromium_bin=chromium, wait_ms=wait_ms, window=window)
+
+    return _refine(
+        paths,
+        _prepare,
+        threshold=threshold,
+        soft_floor=soft_floor,
+        max_iterations=max_iterations,
+        weights=weights,
+        timeout=timeout,
+        per_screen=require_all_screens,
+        freeze_passed=require_all_screens,
+    )
+
+
+def verify_web(
+    paths: RunPaths,
+    *,
+    weights: ComplianceWeights,
+    threshold: float,
+    soft_floor: float,
+    chromium_bin: str = "",
+    wait_ms: int,
+    window: str,
+) -> dict[str, Any]:
+    """Web screen-similarity check: build web, render each screen in headless
+    Chromium, vision-judge vs the originals. One pass, no auto-refine."""
+    chromium = _discover_chromium(chromium_bin)
+    build_web(paths)
+    render_generated_web(paths, chromium_bin=chromium, wait_ms=wait_ms, window=window)
+    return evaluate(
+        paths,
+        0,
+        weights=weights,
+        threshold=threshold,
+        soft_floor=soft_floor,
+        history=[],
+    )

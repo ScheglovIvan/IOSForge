@@ -49,7 +49,7 @@ def test_generate_admin_video_app(tmp_path: Path) -> None:
     assert schema["collections"]["User"]["isGuest"] == "boolean"
 
     rules = (out / "firestore" / "firestore.rules").read_text()
-    assert "match /User/{id}" in rules
+    assert "match /User/{uid}" in rules  # user docs are owner-scoped
     assert "allow read, write: if false;" in rules  # deny-by-default catch-all
 
     products = json.loads((out / "revenuecat" / "products.json").read_text())
@@ -64,6 +64,21 @@ def test_generate_admin_video_app(tmp_path: Path) -> None:
     assert (out / "seed" / "seed_empty.py").exists()
     assert (out / "PROVISION.md").exists()
     assert (out / "rowy" / "rowy.config.json").exists()
+
+
+def test_collection_prefix_namespaces_collections(tmp_path: Path) -> None:
+    out = generate_admin(
+        _spec(video=True, app_type="content-subscription"),
+        tmp_path / "admin",
+        collection_prefix="storyreel_",
+    )
+    schema = json.loads((out / "firestore" / "collections.schema.json").read_text())
+    assert set(schema["collections"]) == {"storyreel_User", "storyreel_Episode"}
+    rules = (out / "firestore" / "firestore.rules").read_text()
+    assert "match /storyreel_User/{uid}" in rules  # prefixed user still owner-scoped
+    assert "isOwner(uid)" in rules
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["collection_prefix"] == "storyreel_"
 
 
 def test_generate_admin_non_video_app_has_no_stream(tmp_path: Path) -> None:

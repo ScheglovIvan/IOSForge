@@ -100,13 +100,16 @@ class Job(Base):
     apk_artifacts: Mapped[list[ApkArtifact]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
-    video_artifacts: Mapped[list[VideoArtifact]] = relationship(
+    data_archive_artifacts: Mapped[list[DataArchiveArtifact]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
     walkthrough_results: Mapped[list[WalkthroughResult]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
     generation_results: Mapped[list[GenerationResult]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
+    codegen_tasks: Mapped[list[CodegenTask]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
     timeline: Mapped[list[StageTimeline]] = relationship(
@@ -205,10 +208,15 @@ class ApkArtifact(Base):
     job: Mapped[Job] = relationship(back_populates="apk_artifacts")
 
 
-class VideoArtifact(Base):
-    """An uploaded screen-recording used as the walkthrough source (SPEC §5.4)."""
+class DataArchiveArtifact(Base):
+    """A Frida-collected data archive uploaded alongside the App Store URL.
 
-    __tablename__ = "video_artifacts"
+    The archive is stored untouched in object storage (outside any web root) and
+    is never executed. Future stages that unpack it MUST guard against zip-slip
+    and decompression bombs (untrusted input).
+    """
+
+    __tablename__ = "data_archive_artifacts"
 
     id: Mapped[uuid.UUID] = uuid_pk()
     job_id: Mapped[uuid.UUID] = mapped_column(
@@ -216,6 +224,7 @@ class VideoArtifact(Base):
     )
 
     storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    filename: Mapped[str | None] = mapped_column(String(512), nullable=True)
     container: Mapped[str | None] = mapped_column(String(32), nullable=True)
     source: Mapped[str | None] = mapped_column(String(256), nullable=True)
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -223,7 +232,7 @@ class VideoArtifact(Base):
 
     created_at: Mapped[dt.datetime] = _ts_col()
 
-    job: Mapped[Job] = relationship(back_populates="video_artifacts")
+    job: Mapped[Job] = relationship(back_populates="data_archive_artifacts")
 
 
 class WalkthroughResult(Base):
@@ -264,6 +273,8 @@ class GenerationResult(Base):
     # Compliance score in [0, 1] (the ">= 95%" metric, SPEC §5.5).
     compliance_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     selftest_report: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    # Public GitHub repository the generated project was pushed to (GitHub Upload stage).
+    github_repo_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     prompt_version_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("prompt_versions.id", ondelete="SET NULL"), nullable=True
     )
@@ -272,6 +283,33 @@ class GenerationResult(Base):
 
     job: Mapped[Job] = relationship(back_populates="generation_results")
     prompt_version: Mapped[PromptVersion | None] = relationship()
+
+
+class CodegenTask(Base):
+    """One implementation task of the Code Generation stage (live per-task progress).
+
+    The planner emits N tasks; each is upserted here as it runs so the admin UI can
+    show ``Task X/N — <title> — Running…`` with retries and a final completion state.
+    """
+
+    __tablename__ = "codegen_tasks"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    idx: Mapped[int] = mapped_column(Integer, nullable=False)
+    total: Mapped[int] = mapped_column(Integer, nullable=False)
+    task_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    # running | done | failed | retrying
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    created_at: Mapped[dt.datetime] = _ts_col()
+    updated_at: Mapped[dt.datetime] = _ts_col(onupdate=True)
+
+    job: Mapped[Job] = relationship(back_populates="codegen_tasks")
 
 
 class PromptSet(Base):
@@ -365,6 +403,8 @@ __all__ = [
     "ApkArtifact",
     "AuditLog",
     "Candidate",
+    "CodegenTask",
+    "DataArchiveArtifact",
     "GenerationResult",
     "Job",
     "PromptSet",

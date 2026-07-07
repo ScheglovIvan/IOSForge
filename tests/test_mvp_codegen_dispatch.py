@@ -20,7 +20,9 @@ def test_dispatch_default_claude_uses_task_runner(
 ) -> None:
     calls: dict[str, Any] = {}
     monkeypatch.setattr(
-        codegen.claude_gen, "generate_from_tasks", lambda paths: calls.setdefault("task", paths)
+        codegen.claude_gen,
+        "generate_from_tasks",
+        lambda paths, **kw: calls.setdefault("task", paths),
     )
     codegen.generate(tmp_path, _settings("claude"))  # type: ignore[arg-type]
     assert "task" in calls

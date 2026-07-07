@@ -10,19 +10,21 @@ from sqlalchemy.orm import Session
 from starlette.responses import RedirectResponse, Response
 from starlette.status import HTTP_303_SEE_OTHER
 
-from iosforge.admin import csrf
+from iosforge.admin import archive_validate, csrf
+from iosforge.admin.appstore_url import AppStoreUrlError
+from iosforge.admin.appstore_url import parse as parse_appstore_url
 from iosforge.admin.deps import get_db, get_storage, require_user
 from iosforge.admin.session import SessionData
 from iosforge.admin.templating import templates
-from iosforge.admin.video_validate import VideoValidationError, validate
 from iosforge.common.config import get_settings
 from iosforge.common.logging import get_logger
 from iosforge.common.types import JobState
 from iosforge.db.models import (
+    CodegenTask,
+    DataArchiveArtifact,
     GenerationResult,
     Job,
     StageTimeline,
-    VideoArtifact,
     WalkthroughResult,
 )
 from iosforge.storage.client import ArtifactStorage, build_key
@@ -55,7 +57,8 @@ def jobs_new(request: Request, user: SessionData = Depends(require_user)) -> Res
 async def jobs_create(
     request: Request,
     csrf_token: str = Form(...),
-    video: UploadFile = File(...),
+    appstore_url: str = Form(...),
+    archive: UploadFile = File(...),
     user: SessionData = Depends(require_user),
     db: Session = Depends(get_db),
     storage: ArtifactStorage = Depends(get_storage),
@@ -64,11 +67,16 @@ async def jobs_create(
         return _new_error(request, user, "Invalid request (CSRF).", status=400)
 
     settings = get_settings()
+    try:
+        parsed = parse_appstore_url(appstore_url, country_default=settings.appstore_country_default)
+    except AppStoreUrlError as exc:
+        return _new_error(request, user, str(exc), status=400)
+
     max_bytes = settings.admin_upload_max_bytes
     # Stream the upload with a hard cap so an oversized file is never buffered.
     chunks: list[bytes] = []
     total = 0
-    while chunk := await video.read(1024 * 1024):
+    while chunk := await archive.read(1024 * 1024):
         total += len(chunk)
         if total > max_bytes:
             return _new_error(request, user, "File exceeds the size limit.", status=413)
@@ -76,26 +84,28 @@ async def jobs_create(
     raw = b"".join(chunks)
 
     try:
-        valid = validate(video.filename or "upload.mp4", raw, max_bytes)
-    except VideoValidationError as exc:
+        valid = archive_validate.validate(archive.filename or "archive.zip", raw, max_bytes)
+    except archive_validate.ArchiveValidationError as exc:
         return _new_error(request, user, str(exc), status=400)
 
     job_id = uuid.uuid4()
-    key = build_key(job_id=str(job_id), kind="video", name=valid.filename)
-    storage.put(key, valid.data, content_type=f"video/{valid.container}")
+    key = build_key(job_id=str(job_id), kind="data_archive", name=valid.filename)
+    storage.put(key, valid.data, content_type="application/octet-stream")
 
     job = Job(
         id=job_id,
         state=JobState.QUEUED,
-        source_app_ref=f"manual-video:{valid.filename}",
+        source_app_ref=parsed.url,
+        source_app_metadata={"app_id": parsed.app_id, "country": parsed.country},
         created_by_id=uuid.UUID(user.user_id),
-        submission_kind="manual_video",
+        submission_kind="appstore",
     )
     db.add(job)
     db.add(
-        VideoArtifact(
+        DataArchiveArtifact(
             job_id=job_id,
             storage_key=key,
+            filename=valid.filename,
             source="manual-upload",
             container=valid.container,
             sha256=valid.sha256,
@@ -103,7 +113,7 @@ async def jobs_create(
         )
     )
     db.commit()
-    log.info("jobs.created", job_id=str(job_id))
+    log.info("jobs.created", job_id=str(job_id), app_id=parsed.app_id)
     _enqueue(job_id)
     return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
 
@@ -118,9 +128,42 @@ def job_detail(
     job = db.get(Job, job_id)
     if job is None:
         return Response("Not found", status_code=404)
+    gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
     return templates.TemplateResponse(
-        request, "job_detail.html", {"job": job, "user": user, "timeline": _timeline(db, job_id)}
+        request,
+        "job_detail.html",
+        {
+            "job": job,
+            "user": user,
+            "timeline": _timeline(db, job_id),
+            "codegen_tasks": _codegen_tasks(db, job_id),
+            "gen": gen,
+        },
     )
+
+
+@router.post("/jobs/{job_id}/build")
+def jobs_build(
+    request: Request,
+    job_id: uuid.UUID,
+    csrf_token: str = Form(...),
+    user: SessionData = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    if not csrf.verify(user.csrf_token, csrf_token):
+        return Response("Invalid request (CSRF).", status_code=400)
+    job = db.get(Job, job_id)
+    if job is None:
+        return Response("Not found", status_code=404)
+    walk = db.scalar(select(WalkthroughResult).where(WalkthroughResult.job_id == job_id))
+    gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
+    # Guard: analysis must be FINISHED (state DONE — not still WALKTHROUGH/ANALYSIS)
+    # and no build may already exist. state==DONE also excludes an in-flight CODEGEN.
+    if walk is None or not walk.screen_map or gen is not None or job.state != JobState.DONE:
+        return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
+    _enqueue_build(job_id)
+    log.info("jobs.build_requested", job_id=str(job_id))
+    return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
 
 
 @router.get("/jobs/{job_id}/timeline")
@@ -133,8 +176,16 @@ def job_timeline(
     job = db.get(Job, job_id)
     if job is None:
         return Response("Not found", status_code=404)
+    gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
     return templates.TemplateResponse(
-        request, "_timeline.html", {"job": job, "timeline": _timeline(db, job_id)}
+        request,
+        "_timeline.html",
+        {
+            "job": job,
+            "timeline": _timeline(db, job_id),
+            "codegen_tasks": _codegen_tasks(db, job_id),
+            "gen": gen,
+        },
     )
 
 
@@ -149,7 +200,11 @@ def job_artifacts(
     if job is None:
         return Response("Not found", status_code=404)
     walk = db.scalar(select(WalkthroughResult).where(WalkthroughResult.job_id == job_id))
-    gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
+    gen = db.scalar(
+        select(GenerationResult)
+        .where(GenerationResult.job_id == job_id)
+        .order_by(GenerationResult.created_at.desc())
+    )
     return templates.TemplateResponse(
         request,
         "job_artifacts.html",
@@ -196,6 +251,14 @@ def _timeline(db: Session, job_id: uuid.UUID) -> list[StageTimeline]:
     )
 
 
+def _codegen_tasks(db: Session, job_id: uuid.UUID) -> list[CodegenTask]:
+    return list(
+        db.scalars(
+            select(CodegenTask).where(CodegenTask.job_id == job_id).order_by(CodegenTask.idx.asc())
+        ).all()
+    )
+
+
 def _enqueue(job_id: uuid.UUID) -> None:
     try:
         from iosforge.worker.run_job import run_job
@@ -203,6 +266,15 @@ def _enqueue(job_id: uuid.UUID) -> None:
         run_job.apply_async(args=[str(job_id)], queue="codegen")
     except Exception as exc:  # broker down — Job stays QUEUED, surfaced in the UI
         log.error("jobs.enqueue_failed", job_id=str(job_id), error=str(exc))
+
+
+def _enqueue_build(job_id: uuid.UUID) -> None:
+    try:
+        from iosforge.worker.run_job import build_frontend
+
+        build_frontend.apply_async(args=[str(job_id)], queue="codegen")
+    except Exception as exc:  # broker down — surfaced in the UI, build can be retried
+        log.error("jobs.build_enqueue_failed", job_id=str(job_id), error=str(exc))
 
 
 def _new_error(request: Request, user: SessionData, message: str, *, status: int) -> Response:

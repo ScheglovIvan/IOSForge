@@ -32,3 +32,6 @@ uploads/
 
 # Local secrets (service-account keys, etc.) — never commit
 secrets/
+
+# Local runtime config (machine-specific paths, provisioning toggles)
+configs/app.toml

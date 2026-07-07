@@ -10,12 +10,13 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import structlog
 
 from iosforge.common.logging import get_logger
-from iosforge.mvp.analyze import topo_order
+from iosforge.mvp.analyze import stage_archive_context, topo_order
 from iosforge.mvp.paths import RunPaths
 
 log = get_logger("mvp.claude_gen")
@@ -101,6 +102,8 @@ def _prepare_task_workspace(paths: RunPaths) -> None:
     (paths.claude_ws / "PROMPT.md").unlink(missing_ok=True)
     shutil.copy2(paths.app_spec_json, paths.claude_ws / "app_spec.json")
     shutil.copy2(paths.tasks_json, paths.claude_ws / "tasks.json")
+    summary = stage_archive_context(paths, paths.claude_ws, include_bytes=True)
+    log.info("codegen_tasks.archive_context", **summary)
 
 
 def _task_prompt(task: dict[str, object]) -> str:
@@ -112,12 +115,21 @@ def _task_prompt(task: dict[str, object]) -> str:
     screens = task.get("screens", [])
     screen_ids = [str(s) for s in screens] if isinstance(screens, list) else []
     shots = "\n".join(f"- screens/{sid}.png" for sid in screen_ids) or "- (none)"
+    sources = "\n".join(f"- source/{sid}.json" for sid in screen_ids) or "- (none)"
     return f"""\
 You are incrementally building a Flutter app under `flutter_app/` in this directory.
 
 Context files (read as needed):
 - `app_spec.json` — the full structured spec for the target app.
 - `screens.json` — the raw crawl with element bounds and navigation links.
+- `source/<id>.json` (OPTIONAL) — the EXACT native view hierarchy per screen:
+  recursive nodes with `frame` (x/y/w/h in points, top-left), `text`, `font`
+  (postscript_name/family/point_size/weight/italic), `colors` (#RRGGBBAA),
+  `layer` (corner_radius/border/opacity/shadow), `kind` (image|video|animation)
+  and `asset_ref.media_id`. GROUND TRUTH for layout, typography and color.
+- `fonts.json` (OPTIONAL) — real fonts; bundled ones are files under `fonts/`.
+- `media.json` (OPTIONAL) — real media assets (`id`, `role`, `kind`, `path`);
+  byte files live under `media/`.
 - `flutter_app/` — the app so far. EDIT IT IN PLACE. Do not delete or rewrite
   files that other tasks created unless this task requires it.
 
@@ -128,19 +140,45 @@ Current task:
 
 Relevant screenshots to LOOK at (vision):
 {shots}
+Matching native layout ground truth (read if present):
+{sources}
 
 Do exactly the work this task describes and nothing more:
 - If type is "scaffold": create the Flutter project skeleton —
   `flutter_app/pubspec.yaml`, `flutter_app/lib/main.dart` (app entry + theme +
-  routing). Use only the Flutter SDK + material widgets. Keep it compiling.
+  routing). Keep it compiling.
+  FONTS: if `fonts.json` lists bundled fonts, copy each referenced file from
+  `fonts/` into `flutter_app/assets/fonts/`, declare them in pubspec `fonts:`
+  under their real `family`, and set the app `ThemeData.fontFamily` (and text
+  theme) to the primary custom family so every screen inherits it.
+  THEME: derive `ThemeData` colors from `app_spec.json` `design_tokens.color`
+  (real #RRGGBBAA values captured from the native UI), not from guesses.
+  You MAY add `video_player` (for .mp4 backgrounds) and `lottie` (for Lottie
+  `.json`) to pubspec ONLY if archive media needs them; otherwise stay on the
+  Flutter SDK + material widgets.
   The app MUST support deep-link navigation `iosforge://screen/<id>` that routes
   directly to the screen whose id matches `<id>` (the same ids used in
   `app_spec.json` / `screens.json`). Add an `<intent-filter>` with
   `<data android:scheme="iosforge"/>` to `android/app/src/main/AndroidManifest.xml`
   and a router (e.g. `onGenerateRoute` / a platform deep-link handler) that parses
   the incoming URI host/path and shows the matching screen.
+  ALSO register a canonical web preview route `/screen/:id` (reachable in a browser
+  at `/#/screen/<id>`) that shows the same screen for that `<id>` — this is used to
+  verify each screen in headless Chromium, so it MUST render standalone.
 - Otherwise: ADD or EDIT files under `flutter_app/lib/` to implement this task,
-  reusing the existing scaffold, theme and routing.
+  reusing the existing scaffold, theme and routing. When a `source/<id>.json`
+  exists for a screen this task builds, use it as EXACT layout ground truth:
+  position and size widgets from `frame`, text styles from `font`, colors from
+  `colors`, rounding/borders/shadow from `layer` — match the real geometry
+  instead of approximating from the screenshot.
+  MEDIA: for an image/video/animation node with `asset_ref.media_id`, look that
+  id up in `media.json`, copy its `path` file from `media/` into
+  `flutter_app/assets/media/`, declare it in pubspec `assets:`, and render it
+  (`Image.asset` for images, `video_player` for `.mp4`, `lottie` for Lottie
+  `.json`). For a full-bleed background of a splash or paywall screen whose node
+  is not joined (a SwiftUI overlay, `asset_ref.resolved:false` or no node), pick
+  the `media.json` entry by `role` (`splash_background` / `paywall_hero`) and use
+  it as that screen's background layer.
 
 Output ONLY changes under `flutter_app/`. Do not run the app.
 """
@@ -173,8 +211,27 @@ def run_task(
     return res.returncode
 
 
-def generate_from_tasks(paths: RunPaths, timeout: int = 1800) -> Path:
+def generate_from_tasks(
+    paths: RunPaths,
+    timeout: int = 1800,
+    *,
+    completed: set[str] | None = None,
+    on_task_done: Callable[[str], None] | None = None,
+    on_plan: Callable[[int], None] | None = None,
+    on_task: Callable[[int, int, str, str, str, int], None] | None = None,
+    max_attempts: int = 1,
+    strict: bool = False,
+) -> Path:
     """Stage D: build flutter_app/ task-by-task from tasks.json; return its path.
+
+    Resumable: tasks whose id is in ``completed`` are skipped (their output is
+    already in the hydrated workspace); ``on_task_done(task_id)`` is called after
+    each freshly-finished task so the caller can checkpoint.
+
+    Progress: ``on_plan(total)`` fires once the plan is known; ``on_task(idx, total,
+    key, title, status, attempts)`` fires per task with ``status`` in
+    ``running|retrying|done|failed``. Each task is retried up to ``max_attempts``;
+    when ``strict`` a task that fails permanently raises (Pipeline stopped).
 
     Parallel to :func:`generate` (single-pass). Executes tasks in dependency
     order, accumulating edits in the persistent workspace flutter_app/.
@@ -191,19 +248,53 @@ def generate_from_tasks(paths: RunPaths, timeout: int = 1800) -> Path:
     if not isinstance(tasks, list) or not tasks:
         raise RuntimeError("tasks.json has an empty or missing 'tasks' array")
     ordered = topo_order(tasks)
+    total = len(ordered)
+    if on_plan is not None:
+        on_plan(total)
+    done: set[str] = completed or set()
     flutter_app = paths.claude_ws / "flutter_app"
     pubspec = flutter_app / "pubspec.yaml"
     main_dart = flutter_app / "lib" / "main.dart"
 
     for index, task in enumerate(ordered):
-        tlog = bound.bind(task_id=str(task.get("id")), task_type=str(task.get("type")))
-        tlog.info("codegen_tasks.task.start", index=index)
-        run_task(paths, _task_prompt(task), timeout=timeout, tlog=tlog)
-        if index == 0 and not pubspec.exists():
-            raise RuntimeError(
-                f"scaffold task {task.get('id')!r} did not produce flutter_app/pubspec.yaml"
-            )
-        tlog.info("codegen_tasks.task.done", index=index)
+        tid = str(task.get("id"))
+        title = str(task.get("title") or tid)
+        tlog = bound.bind(task_id=tid, task_type=str(task.get("type")))
+        if tid in done:
+            tlog.info("codegen_tasks.task.skip", index=index)
+            if on_task is not None:
+                on_task(index, total, tid, title, "done", 0)
+            continue
+
+        ok = False
+        attempts = 0
+        while attempts < max(1, max_attempts):
+            attempts += 1
+            status = "running" if attempts == 1 else "retrying"
+            if on_task is not None:
+                on_task(index, total, tid, title, status, attempts)
+            tlog.info("codegen_tasks.task.start", index=index, attempt=attempts)
+            code = run_task(paths, _task_prompt(task), timeout=timeout, tlog=tlog)
+            ok = code == 0 and (index != 0 or pubspec.exists())
+            if ok:
+                break
+            tlog.warning("codegen_tasks.task.attempt_failed", index=index, attempt=attempts)
+
+        if not ok:
+            if on_task is not None:
+                on_task(index, total, tid, title, "failed", attempts)
+            if index == 0 or strict:
+                raise RuntimeError(
+                    f"codegen task {tid!r} failed permanently after {attempts} attempt(s)"
+                )
+            tlog.warning("codegen_tasks.task.failed_lenient", index=index)
+            continue
+
+        tlog.info("codegen_tasks.task.done", index=index, attempts=attempts)
+        if on_task is not None:
+            on_task(index, total, tid, title, "done", attempts)
+        if on_task_done is not None:
+            on_task_done(tid)
 
     if not (pubspec.exists() and main_dart.exists()):
         raise RuntimeError(

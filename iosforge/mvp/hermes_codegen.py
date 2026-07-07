@@ -28,6 +28,7 @@ from pathlib import Path
 
 from iosforge.common.logging import get_logger
 from iosforge.mvp import constitution
+from iosforge.mvp.analyze import stage_archive_context
 from iosforge.mvp.paths import RunPaths
 
 log = get_logger("mvp.hermes_codegen")
@@ -48,6 +49,14 @@ Files here:
 - handoff/         — requirements.md, design.md, tokens.json, features/acceptance.feature,
                      traceability.md (and openapi.yaml if a backend is needed).
 - screens/         — one PNG per target screen. The app must match these 1:1 (iOS-priority).
+- source/<id>.json (OPTIONAL) — EXACT native view hierarchy per screen (frame geometry,
+                     font postscript_name/size/weight, #RRGGBBAA colors, layer props,
+                     asset_ref.media_id). GROUND TRUTH — prefer over eyeballing the PNG.
+- fonts.json / fonts/   (OPTIONAL) — real fonts; bundle the `.ttf`s into assets + pubspec and
+                     set the theme fontFamily to the primary custom family.
+- media.json / media/   (OPTIONAL) — real media (id/role/kind/path). Embed by node
+                     asset_ref.media_id; for SwiftUI splash/paywall backgrounds pick by `role`
+                     (splash_background/paywall_hero) and use as the screen background layer.
 
 How to build:
 1. Execute tasks.json in dependency order to build flutter_app/.
@@ -84,6 +93,14 @@ Files here:
 - handoff/         — requirements.md, design.md, tokens.json, features/acceptance.feature,
                      traceability.md (and openapi.yaml if a backend is needed).
 - screens/         — one PNG per target screen. The app must match these 1:1 (iOS-priority).
+- source/<id>.json (OPTIONAL) — EXACT native view hierarchy per screen (frame geometry,
+                     font postscript_name/size/weight, #RRGGBBAA colors, layer props,
+                     asset_ref.media_id). GROUND TRUTH — prefer over eyeballing the PNG.
+- fonts.json / fonts/   (OPTIONAL) — real fonts; bundle the `.ttf`s into assets + pubspec and
+                     set the theme fontFamily to the primary custom family.
+- media.json / media/   (OPTIONAL) — real media (id/role/kind/path). Embed by node
+                     asset_ref.media_id; for SwiftUI splash/paywall backgrounds pick by `role`
+                     (splash_background/paywall_hero) and use as the screen background layer.
 
 How to build:
 1. Execute tasks.json in dependency order to build flutter_app/. You build the code
@@ -124,6 +141,8 @@ def _prepare_hermes_workspace(paths: RunPaths, orchestration_prompt: str, agents
         shutil.rmtree(ws_handoff)
     if paths.handoff_dir.exists():
         shutil.copytree(paths.handoff_dir, ws_handoff)
+
+    stage_archive_context(paths, ws, include_bytes=True)
 
     spec = json.loads(paths.app_spec_json.read_text())
     (ws / "CONSTITUTION.md").write_text(constitution.render_constitution(spec))

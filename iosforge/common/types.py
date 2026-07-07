@@ -19,6 +19,7 @@ class JobState(StrEnum):
     WALKTHROUGH = "walkthrough"
     ANALYSIS = "analysis"
     CODEGEN = "codegen"
+    GITHUB_UPLOAD = "github_upload"
     DELIVERY = "delivery"
     DONE = "done"
     NEEDS_INPUT = "needs_input"
@@ -39,4 +40,5 @@ class Stage(StrEnum):
     WALKTHROUGH = "walkthrough"
     ANALYSIS = "analysis"
     CODEGEN = "codegen"
+    GITHUB_UPLOAD = "github_upload"
     DELIVERY = "delivery"

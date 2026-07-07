@@ -52,6 +52,13 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+# These modules embed foreign code as string templates (TypeScript Cloud Functions,
+# Firestore-rules DSL) where >100-char lines are not a Python concern.
+[tool.ruff.lint.per-file-ignores]
+"iosforge/mvp/backend_gen.py" = ["E501"]
+"iosforge/mvp/admin_gen.py" = ["E501"]
+"iosforge/mvp/flutter_wiring.py" = ["E501"]
+
 # FastAPI's dependency-injection idiom puts Depends()/Form()/File() in defaults;
 # these are the documented pattern, not the B008 mutable-default footgun.
 [tool.ruff.lint.flake8-bugbear]
@@ -71,7 +78,7 @@ disallow_untyped_decorators = false  # celery_app.task / FastAPI decorators are 
 
 # Firebase provisioning glue talks to untyped SDKs — loosen like admin/worker.
 [[tool.mypy.overrides]]
-module = ["iosforge.mvp.admin_provision"]
+module = ["iosforge.mvp.admin_provision", "iosforge.mvp.content_seed"]
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
 disallow_untyped_calls = false

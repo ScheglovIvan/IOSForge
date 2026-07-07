@@ -25,6 +25,17 @@ class RunPaths:
     run_dir: Path
     screens_dir: Path
     screens_json: Path
+    source_dir: Path
+    fonts_json: Path
+    fonts_dir: Path
+    media_dir: Path
+    network_jsonl: Path
+    json_bodies_jsonl: Path
+    media_json: Path
+    subscriptions_json: Path
+    sdks_json: Path
+    ads_raw_json: Path
+    network_index_json: Path
     ad_screens_dir: Path
     ad_analysis_json: Path
     screen_labels_json: Path
@@ -48,6 +59,17 @@ class RunPaths:
             run_dir=run_dir,
             screens_dir=run_dir / "screens",
             screens_json=run_dir / "screens.json",
+            source_dir=run_dir / "source",
+            fonts_json=run_dir / "fonts.json",
+            fonts_dir=run_dir / "fonts",
+            media_dir=run_dir / "media",
+            network_jsonl=run_dir / "network.jsonl",
+            json_bodies_jsonl=run_dir / "json_bodies.jsonl",
+            media_json=run_dir / "media.json",
+            subscriptions_json=run_dir / "subscriptions.json",
+            sdks_json=run_dir / "sdks.json",
+            ads_raw_json=run_dir / "ads_raw.json",
+            network_index_json=run_dir / "network_index.json",
             ad_screens_dir=run_dir / "ad_screens",
             ad_analysis_json=run_dir / "ad_analysis.json",
             screen_labels_json=run_dir / "screen_labels.json",

@@ -13,6 +13,11 @@
   <p>State: <span class="state">{{ job.state.value }}</span>
      &nbsp;·&nbsp; created {{ job.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</p>
   <p><a class="btn" href="/jobs/{{ job.id }}/artifacts">View artifacts</a></p>
+  <p style="color:#667;font-size:13px;">Analysis → Frontend Build → Code Generation → GitHub Upload run automatically.</p>
+  {% if gen and gen.github_repo_url %}
+  <p class="ok">GitHub repository:
+    <a href="{{ gen.github_repo_url }}" target="_blank" rel="noopener">{{ gen.github_repo_url }}</a></p>
+  {% endif %}
 </div>
 <div class="card">
   <h3>Timeline</h3>

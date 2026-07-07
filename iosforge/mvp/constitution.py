@@ -96,6 +96,11 @@ def render_constitution(spec: dict[str, Any]) -> str:
     else:
         out.append("  - (no screens in spec)")
     out += [
+        "- ALSO register a canonical preview route `/screen/:id` (reachable in a browser at"
+        " `/#/screen/<id>`) that renders the screen for that id standalone — used for headless"
+        " web screen-similarity verification.",
+    ]
+    out += [
         "",
         "## Parallel build discipline (worktree-per-task)",
         "- The screen layer is built **in parallel** — one worker per screen, each in its"

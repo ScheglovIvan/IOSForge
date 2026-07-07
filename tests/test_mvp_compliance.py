@@ -230,3 +230,166 @@ def test_refine_below_floor_returns_report_without_raising(
     report = _run_loop(tmp_path, max_iterations=1)
     assert report["status"] == "below_floor"
     assert report["stop_reason"] == "max_iterations"
+
+
+def test_snap_stage_dir_only_for_snap_binary() -> None:
+    assert compliance._snap_stage_dir("/usr/bin/chromium-real") is None
+    staged = compliance._snap_stage_dir("/snap/bin/chromium")
+    assert staged is not None and staged.exists()
+
+
+def test_render_web_moves_staged_shots_out_of_snap_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = RunPaths.create(tmp_path / "run")
+    paths.screens_json.write_text('{"screens": [{"id": "0000"}, {"id": "0001"}]}')
+    web = paths.flutter_app / "build" / "web"
+    web.mkdir(parents=True)
+    (web / "index.html").write_text("<html></html>")
+
+    stage = tmp_path / "snapstage"
+    stage.mkdir()
+    monkeypatch.setattr(compliance, "_snap_stage_dir", lambda _bin: stage)
+
+    def _fake_run(cmd: list[str], **k: Any) -> Any:
+        for arg in cmd:
+            if arg.startswith("--screenshot="):
+                Path(arg.split("=", 1)[1]).write_bytes(b"\x89PNG\r\n\x1a\n")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(compliance.subprocess, "run", _fake_run)
+
+    result = compliance.render_generated_web(
+        paths, chromium_bin="/snap/bin/chromium", wait_ms=100, window="390,844"
+    )
+    assert len(result["screens"]) == 2
+    # shots were written into the snap stage dir, then moved into generated_screens_dir
+    assert (paths.generated_screens_dir / "0000.png").is_file()
+    assert (paths.generated_screens_dir / "0001.png").is_file()
+    assert not (stage / "0000.png").exists()
+
+
+def test_refine_per_screen_gate_waits_for_weakest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = RunPaths.create(tmp_path / "run")
+    # iteration 1: overall high but one screen weak; iteration 2: all >= 0.80
+    reports = iter(
+        [
+            {
+                "compliance_score": 0.90,
+                "screens": [{"id": "a", "score": 0.95}, {"id": "b", "score": 0.50}],
+            },
+            {
+                "compliance_score": 0.92,
+                "screens": [{"id": "a", "score": 0.95}, {"id": "b", "score": 0.85}],
+            },
+        ]
+    )
+    prepared: list[int] = []
+    monkeypatch.setattr(compliance, "evaluate", lambda *a, **k: next(reports))
+    monkeypatch.setattr(compliance, "diffs_to_tasks", lambda r, i: {"tasks": [{"id": "fix"}]})
+    monkeypatch.setattr(compliance, "apply_corrective", lambda *a, **k: None)
+
+    report = compliance._refine(
+        paths,
+        lambda: prepared.append(1),
+        threshold=0.80,
+        soft_floor=0.80,
+        max_iterations=5,
+        weights=ComplianceWeights(visual=0.5, coverage=0.3, flows=0.2),
+        timeout=1,
+        per_screen=True,
+    )
+    # weakest screen gate: did NOT stop at iteration 1 (min 0.50), stopped at iteration 2 (min 0.85)
+    assert len(prepared) == 2
+    assert report["stop_reason"] == "all_screens_met"
+
+
+def test_refine_overall_gate_stops_early(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    paths = RunPaths.create(tmp_path / "run")
+    reports = iter(
+        [
+            {
+                "compliance_score": 0.90,
+                "screens": [{"id": "a", "score": 0.95}, {"id": "b", "score": 0.50}],
+            }
+        ]
+    )
+    prepared: list[int] = []
+    monkeypatch.setattr(compliance, "evaluate", lambda *a, **k: next(reports))
+
+    report = compliance._refine(
+        paths,
+        lambda: prepared.append(1),
+        threshold=0.80,
+        soft_floor=0.80,
+        max_iterations=5,
+        weights=ComplianceWeights(visual=0.5, coverage=0.3, flows=0.2),
+        timeout=1,
+        per_screen=False,
+    )
+    # overall 0.90 >= 0.80 -> stops immediately despite screen b being 0.50
+    assert len(prepared) == 1
+    assert report["stop_reason"] == "threshold_met"
+
+
+def test_refine_freeze_locks_passed_screens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = RunPaths.create(tmp_path / "run")
+    # iter1: a passes (0.9), b fails (0.5). iter2: judge NOISE drops a to 0.4, b now 0.85.
+    reports = iter(
+        [
+            {
+                "compliance_score": 0.7,
+                "coverage": 1.0,
+                "flows": 0.9,
+                "screens": [
+                    {"id": "a", "score": 0.9, "diffs": []},
+                    {"id": "b", "score": 0.5, "diffs": ["x"]},
+                ],
+            },
+            {
+                "compliance_score": 0.6,
+                "coverage": 1.0,
+                "flows": 0.9,
+                "screens": [
+                    {"id": "a", "score": 0.4, "diffs": ["regressed"]},
+                    {"id": "b", "score": 0.85, "diffs": []},
+                ],
+            },
+        ]
+    )
+    monkeypatch.setattr(compliance, "evaluate", lambda *a, **k: next(reports))
+    monkeypatch.setattr(
+        compliance,
+        "diffs_to_tasks",
+        lambda r, i: {
+            "tasks": [
+                {"id": f"fix-{i}-{s['id']}"}
+                for s in r["screens"]
+                if float(s.get("score", 0)) < 0.80
+            ]
+        },
+    )
+    fixed: list[str] = []
+    monkeypatch.setattr(
+        compliance, "apply_corrective", lambda p, c, **k: fixed.extend(t["id"] for t in c["tasks"])
+    )
+
+    report = compliance._refine(
+        paths,
+        lambda: None,
+        threshold=0.80,
+        soft_floor=0.80,
+        max_iterations=5,
+        weights=ComplianceWeights(visual=0.5, coverage=0.3, flows=0.2),
+        timeout=1,
+        per_screen=True,
+        freeze_passed=True,
+    )
+    # 'a' frozen at 0.9 (iter2 noise ignored) -> gate = min(0.9, 0.85) = 0.85 -> all_screens_met
+    assert report["stop_reason"] == "all_screens_met"
+    # only the failing 'b' was corrected; the passed 'a' was never re-fixed
+    assert fixed == ["fix-1-b"]

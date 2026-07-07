@@ -46,10 +46,47 @@ Inputs in this directory:
   clickable `elements` (text / resource_id / bounds), and `from`/`tapped`/
   `navigates_to` links showing how screens connect.
 - `screens/` — one PNG screenshot per screen. LOOK at every screenshot (vision).
+- `network_index.json` (OPTIONAL — present only for dynamic captures with real
+  traffic): per-screen OBSERVED network — `requests` (method / host / path /
+  status / mime), `bodies` (json response body ids), `media` (content URLs).
+- `json_bodies.jsonl` (OPTIONAL): raw JSON response bodies keyed by `request_id`
+  — the real API response shapes behind those requests.
+- `source/<id>.json` (OPTIONAL — rich native capture): the EXACT native view
+  hierarchy for screen `<id>`. A recursive node tree; each node has `frame`
+  (x/y/w/h in points, origin top-left), optional `text`, `font`
+  (postscript_name / family / point_size / weight / italic), `colors`
+  (text / background / tint as #RRGGBBAA), `layer` (corner_radius / border /
+  opacity / shadow), `content_mode`, `kind` (image|video|animation) and
+  `asset_ref` (a media join). This is GROUND TRUTH for layout, typography and
+  color — trust it over eyeballing the screenshot.
+- `fonts.json` (OPTIONAL): the real fonts the app uses — `postscript_name` /
+  `family`, and whether each is a bundled custom font (`file`) or a system font.
+- `media.json` (OPTIONAL): the real media assets present, each with `id`,
+  `role` (splash_background | paywall_hero | onboarding | icon | thumbnail | …),
+  `kind`, and `source` (network | bundle | runtime-snapshot). Byte-backed entries
+  have a `path`. This tells you which screens have real background media/video.
+- `subscriptions.json` (OPTIONAL): OBSERVED StoreKit — `products` (id / price /
+  period) and `purchase_attempts`. When non-empty this is the REAL monetization
+  catalog; when empty, entitlements may still be in RevenueCat traffic
+  (`api.revenuecat.com`) inside network.jsonl / json_bodies.jsonl.
+- `sdks.json` (OPTIONAL): OBSERVED third-party SDKs — each `{sdk, evidence:[host]}`
+  detected from real traffic (e.g. AppLovin, AppsFlyer, Firebase, Google AdMob).
+- `ads_raw.json` (OPTIONAL): OBSERVED ad-SDK hooks — `ready_hooks.adblock` names
+  the ad classes actually invoked (e.g. `GADInterstitialAd` / `GADRewardedAd` →
+  AdMob interstitial / rewarded), `ready_hooks.storekit` the StoreKit calls.
 
 Method:
 1. Study every screenshot together with screens.json to understand each screen,
-   its components and the navigation graph.
+   its components and the navigation graph. When `source/<id>.json` exists, read
+   it and treat its geometry, typography and colors as EXACT — describe each
+   screen's `components`, `layout_notes` and states from the real node tree, not
+   from a guess off the screenshot.
+2b. Fill `design_tokens` from ground truth when present: `design_tokens.font`
+   from the real families in `fonts.json`; `design_tokens.color` from the real
+   #RRGGBBAA values in `source/*.json` (background/tint/text); radii/borders from
+   `layer`. Record real media in `content.content_inventory` and note per-screen
+   background media/video by `media.json` `role` (splash_background/paywall_hero)
+   — these are what makes the clone look right, so surface them explicitly.
 2. Infer the app's identity, domain logic and business model from the UI.
 3. Use web search to research how comparable apps in this category are built
    (features, monetization, content, conventions) and cite sources. If web
@@ -64,6 +101,28 @@ Method:
    trigger / screen_context / frequency) from the app's own paywall, rewards and
    "watch ad for coins" screens that ARE present, and keep `ad_networks`
    best-effort (only name a network when on-screen creative/store chrome shows it).
+6. If `network_index.json` is present, treat it as OBSERVED ground truth for the
+   backend — do NOT guess where you can read: derive `backend.apis` from the real
+   endpoints (method + host + path), `content.data_model` (entities / fields) from
+   the JSON response shapes in `json_bodies.jsonl`, `backend.auth` from observed
+   auth headers/hosts, and subscription/entitlement facts from any RevenueCat
+   traffic (`api.revenuecat.com`) or equivalent. Set `backend.backend_needed`
+   accordingly. Record which backend facts came from observed traffic vs were
+   inferred under `analysis_quality` (the backend fields are plain lists with no
+   per-item `source`). When these files are ABSENT, infer the backend from the UI.
+7. Make monetization, ads and integrations EVIDENCE-BASED when the observed files
+   are present — prefer them over guessing from screenshots:
+   - `monetization.packages` from `subscriptions.json` `products` (id / price /
+     period) when non-empty; otherwise from RevenueCat subscriber traffic. Derive
+     `monetization.model` accordingly.
+   - `monetization.ad_networks` from `sdks.json` (name a network only with real
+     host evidence) and `monetization.ad_placements` formats from
+     `ads_raw.json` `ready_hooks.adblock` (e.g. `GADInterstitialAd` → an AdMob
+     interstitial placement) — still tie each placement's trigger/screen_context
+     to the rewards/paywall screens that ARE present.
+   - `integrations` and `backend`/`analytics` facts from `sdks.json` evidence
+     (e.g. Firebase, AppsFlyer). Set each affected `source`/`analysis_quality`
+     note to reflect that it came from observed SDK traffic, not inference.
 
 Write a single file `app_spec.json` with this schema (ALL top-level keys are
 REQUIRED; use [] / {} / "" when a section does not apply, never omit a key):
@@ -213,6 +272,47 @@ Output ONLY the file `tasks.json`. Do not generate any app code.
 """
 
 
+def _json_len(path: Path) -> int:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return 0
+    return len(data) if isinstance(data, list) else 0
+
+
+def stage_archive_context(paths: RunPaths, ws: Path, *, include_bytes: bool) -> dict[str, int]:
+    """Stage the Frida v1.1 archive context (rich source / fonts / media) into ``ws``.
+
+    Copies ``source/<id>.json`` (rich native view hierarchy — geometry, typography,
+    colors, ``asset_ref`` media joins), ``fonts.json`` and ``media.json`` so the
+    generator can work from ground truth instead of eyeballing screenshots. When
+    ``include_bytes`` is set, also copies the font ``.ttf`` and ``media/`` byte
+    files so codegen can embed them as Flutter assets; analysis only needs the
+    metadata. A no-op for legacy (v1.0 / apk) runs where these do not exist.
+    """
+    summary = {"source": 0, "fonts": 0, "media": 0}
+    if paths.source_dir.exists():
+        dst = ws / "source"
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(paths.source_dir, dst)
+        summary["source"] = len(list(dst.glob("*.json")))
+    if paths.fonts_json.exists():
+        shutil.copy2(paths.fonts_json, ws / "fonts.json")
+        summary["fonts"] = _json_len(paths.fonts_json)
+    if paths.media_json.exists():
+        shutil.copy2(paths.media_json, ws / "media.json")
+        summary["media"] = _json_len(paths.media_json)
+    if include_bytes:
+        for src_dir in (paths.fonts_dir, paths.media_dir):
+            if src_dir.exists():
+                dst = ws / src_dir.name
+                if dst.exists():
+                    shutil.rmtree(dst)
+                shutil.copytree(src_dir, dst)
+    return summary
+
+
 def _prepare_analysis_workspace(paths: RunPaths) -> None:
     """Stage the screenshots, screens.json and the analysis prompt into claude_ws/."""
     paths.claude_ws.mkdir(parents=True, exist_ok=True)
@@ -221,6 +321,16 @@ def _prepare_analysis_workspace(paths: RunPaths) -> None:
         shutil.rmtree(ws_screens)
     shutil.copytree(paths.screens_dir, ws_screens)
     shutil.copy2(paths.screens_json, paths.claude_ws / "screens.json")
+    for extra in (
+        paths.network_index_json,
+        paths.json_bodies_jsonl,
+        paths.subscriptions_json,
+        paths.sdks_json,
+        paths.ads_raw_json,
+    ):
+        if extra.exists():
+            shutil.copy2(extra, paths.claude_ws / extra.name)
+    stage_archive_context(paths, paths.claude_ws, include_bytes=False)
     (paths.claude_ws / "ANALYZE_PROMPT.md").write_text(ANALYZE_PROMPT)
 
 

@@ -1,16 +1,26 @@
 {% extends "base.html" %}
-{% block title %}Upload screen recording · IOSForge Admin{% endblock %}
+{% block title %}Create app clone · IOSForge Admin{% endblock %}
 {% block content %}
 <p><a href="/jobs">← Jobs</a></p>
 <div class="card" style="max-width:480px;">
-  <h2>Upload screen recording</h2>
+  <h2>Create app clone</h2>
   {% if error %}<div class="err">{{ error }}</div>{% endif %}
   <form method="post" action="/jobs" enctype="multipart/form-data">
     <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-    <p><input type="file" name="video" accept="video/*,.mp4,.m4v,.mov,.webm,.mkv" required></p>
-    <p><button class="btn" type="submit">Upload &amp; queue job</button></p>
+    <p>
+      <label for="appstore_url">App Store link</label><br>
+      <input type="url" id="appstore_url" name="appstore_url"
+             placeholder="https://apps.apple.com/us/app/…/id1234567890"
+             pattern="https?://.*apple\.com/.*" required style="width:100%;">
+    </p>
+    <p>
+      <label for="archive">Data archive (Frida)</label><br>
+      <input type="file" id="archive" name="archive" accept=".zip,.tar.gz,.tgz,.tar" required>
+    </p>
+    <p><button class="btn" type="submit">Create &amp; queue job</button></p>
   </form>
-  <p style="color:#667;font-size:13px;">The video is stored in object storage and a job is queued
-  (QUEUED). A worker slices it into screens with ffmpeg and generates a Flutter app.</p>
+  <p style="color:#667;font-size:13px;">The App Store link identifies the source app —
+  the worker resolves its name, description and screenshots from the store. The data
+  archive is stored in object storage and a job is queued (QUEUED).</p>
 </div>
 {% endblock %}

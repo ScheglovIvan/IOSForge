@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from iosforge.common.logging import get_logger
-from iosforge.mvp import ad_scaffold
+from iosforge.mvp import ad_scaffold, backend_gen
 
 log = get_logger("mvp.admin_gen")
 
@@ -57,21 +57,49 @@ def _has_video(spec: dict[str, Any], collections: dict[str, dict[str, str]]) -> 
 
 
 def _firestore_rules(collections: dict[str, dict[str, str]]) -> str:
+    """Real per-entity rules: owner-scoped user data, ledger writes only via
+    Cloud Functions (admin SDK bypasses rules), public-read catalog."""
     lines = [
         "rules_version = '2';",
         "service cloud.firestore {",
         "  match /databases/{database}/documents {",
-        "    function signedIn() { return request.auth != null; }",
-        "    function isAdmin() { return signedIn() && request.auth.token.admin == true; }",
+        "    function isSignedIn() { return request.auth != null; }",
+        "    function isOwner(uid) { return isSignedIn() && request.auth.uid == uid; }",
+        "    function ownsDoc() { return isSignedIn() && resource.data.userId == request.auth.uid; }",
         "",
     ]
     for name in collections:
-        private = name.lower() in _PRIVATE_ENTITIES
-        read = "signedIn()" if private else "true"
-        lines.append(f"    match /{name}/{{id}} {{")
-        lines.append(f"      allow read: if {read};")
-        lines.append("      allow write: if isAdmin();")
-        lines.append("    }")
+        low = name.lower()
+        if low.endswith("user"):
+            lines += [
+                f"    match /{name}/{{uid}} {{",
+                "      allow read: if isOwner(uid);",
+                "      allow write: if false;  // coins/pro mutated only by Cloud Functions",
+                "      match /unlocks/{ep} { allow read: if isOwner(uid); allow write: if false; }",
+                "    }",
+            ]
+        elif any(low.endswith(e) for e in ("transaction", "subscription", "rewardtask", "wallet")):
+            lines += [
+                f"    match /{name}/{{id}} {{",
+                "      allow read: if ownsDoc();",
+                "      allow write: if false;  // ledger — Cloud Functions only",
+                "    }",
+            ]
+        elif low.endswith("watchlistentry"):
+            lines += [
+                f"    match /{name}/{{id}} {{",
+                "      allow read: if ownsDoc();",
+                "      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;",
+                "      allow update, delete: if ownsDoc();",
+                "    }",
+            ]
+        else:  # catalog: public read, content written by admin SDK / functions only
+            lines += [
+                f"    match /{name}/{{id}} {{",
+                "      allow read: if true;",
+                "      allow write: if false;",
+                "    }",
+            ]
     lines += [
         "    match /{document=**} { allow read, write: if false; }",
         "  }",
@@ -205,11 +233,28 @@ def _seed_script(collections: dict[str, dict[str, str]]) -> str:
     )
 
 
-def generate_admin(spec: dict[str, Any], out_dir: Path) -> Path:
-    """Write the ``admin/`` deliverable into ``out_dir``; return it."""
+def generate_admin(
+    spec: dict[str, Any],
+    out_dir: Path,
+    *,
+    collection_prefix: str = "",
+    project_id: str = "app",
+) -> Path:
+    """Write the ``admin/`` deliverable into ``out_dir``; return it.
+
+    ``collection_prefix`` namespaces every Firestore collection (multi-tenant
+    shared-project mode) so unrelated apps don't collide in one project.
+    ``project_id`` is baked into the deployable ``firebase.json``/``.firebaserc``.
+    """
     collections = _collections(spec)
+    if collection_prefix:
+        collections = {f"{collection_prefix}{name}": fields for name, fields in collections.items()}
     has_video = _has_video(spec, collections)
     has_ads = _has_ads(spec)
+    functions_dir = backend_gen.generate_backend(
+        spec, out_dir, collection_prefix=collection_prefix, project_id=project_id
+    )
+    has_backend = functions_dir is not None
     app_name = str(spec.get("app_name", "app"))
 
     (out_dir / "firestore").mkdir(parents=True, exist_ok=True)
@@ -282,6 +327,8 @@ def generate_admin(spec: dict[str, Any], out_dir: Path) -> Path:
         "generated_at": datetime.now(UTC).isoformat(),
         "includes_video_stream": has_video,
         "includes_ads": has_ads,
+        "includes_backend": has_backend,
+        "collection_prefix": collection_prefix,
         "collections": list(collections),
         "provision_ready": False,
     }

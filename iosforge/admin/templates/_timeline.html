@@ -14,4 +14,34 @@
   {% endfor %}
   </tbody>
 </table>
+{% if codegen_tasks %}
+  {% set total = codegen_tasks[0].total %}
+  {% set done = codegen_tasks | selectattr('status', 'equalto', 'done') | list | length %}
+  {% set failed = codegen_tasks | selectattr('status', 'equalto', 'failed') | list | length %}
+  <h4 style="margin-top:16px;">Code Generation</h4>
+  <p><strong>Generated {{ total }} implementation tasks.</strong>
+     &nbsp;{{ done }}/{{ total }} completed · {{ total - done }} remaining</p>
+  <table>
+    <thead><tr><th>Task</th><th>Title</th><th>Status</th><th>Attempts</th></tr></thead>
+    <tbody>
+    {% for t in codegen_tasks %}
+      <tr>
+        <td>{{ t.idx + 1 }}/{{ t.total }}</td>
+        <td>{{ t.title }}</td>
+        <td>
+          {% if t.status == 'running' %}Running…
+          {% elif t.status == 'retrying' %}Failed — retrying…
+          {% elif t.status == 'failed' %}Failed permanently
+          {% else %}Completed{% endif %}
+        </td>
+        <td>{{ t.attempts }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if failed %}<div class="err">Task failed permanently. Pipeline stopped.</div>
+  {% elif total and done == total %}<div class="ok">All implementation tasks completed successfully.</div>{% endif %}
+{% endif %}
+{% if gen and gen.github_repo_url %}<div class="ok">Push completed successfully. Repository:
+  <a href="{{ gen.github_repo_url }}" target="_blank" rel="noopener">{{ gen.github_repo_url }}</a></div>{% endif %}
 {% if job.state.value == 'failed' %}<div class="err">Job failed — see the stage error above.</div>{% endif %}
