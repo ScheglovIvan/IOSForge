@@ -69,12 +69,21 @@ def _create(
 
 
 def provision(
-    spec: dict[str, Any], *, settings: Settings, timeout: float = 30.0
+    spec: dict[str, Any],
+    *,
+    settings: Settings,
+    bundle_id: str | None = None,
+    app_name: str | None = None,
+    use_test_store: bool | None = None,
+    timeout: float = 30.0,
 ) -> dict[str, Any] | None:
     """Create an RC app (+ products/entitlement/offering) for this clone.
 
-    Returns a config dict (``app_id``, ``apple_public_key``, ``entitlement``,
-    ``offering``, ``products``, ``bundle_id``) for codegen to wire, or ``None`` when
+    ``bundle_id`` / ``app_name`` override the values derived from ``spec`` (the
+    build-profile identity). ``use_test_store`` selects the store mode: True → the
+    Test Store public key (virtual purchases); False → the per-clone App Store key.
+    When any is ``None`` the previous derive-from-spec / key-presence behaviour is
+    kept (backwards compatible). Returns a config dict for codegen, or ``None`` when
     RC is disabled/unconfigured or the app+key could not be created.
     """
     if not settings.revenuecat_provision:
@@ -84,9 +93,11 @@ def provision(
         return None
 
     pid = settings.revenuecat_project_id
-    app_name = str(spec.get("app_name") or "App")
+    app_name = str(app_name or spec.get("app_name") or "App")
     slug = _slug(app_name)
-    bundle_id = bundle_id_for(spec, settings)
+    bundle_id = bundle_id or bundle_id_for(spec, settings)
+    if use_test_store is None:
+        use_test_store = bool(settings.revenuecat_test_store_key)
     bound = log.bind(stage="revenuecat", project_id=pid, bundle_id=bundle_id)
 
     headers = {
@@ -186,9 +197,9 @@ def provision(
             "app_id": app_id,
             "apple_public_key": apple_public_key,
             # The key codegen configures the SDK with: the Test Store key (testable now,
-            # no Apple signing) when provided, else the per-clone App Store key.
-            "sdk_key": test_key or apple_public_key,
-            "mode": "test_store" if test_key else "app_store",
+            # no Apple signing) for the test profile, else the per-clone App Store key.
+            "sdk_key": (test_key or apple_public_key) if use_test_store else apple_public_key,
+            "mode": "test_store" if use_test_store else "app_store",
             "bundle_id": bundle_id,
             "entitlement": entitlement if packages else "",
             "offering": offering if packages else "",

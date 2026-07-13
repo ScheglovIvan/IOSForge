@@ -53,7 +53,7 @@ def test_integrate_orchestrates_and_saves_ids(
     monkeypatch.setattr(
         cm,
         "ensure_codemagic_yaml",
-        lambda settings, tok, full, branch: created.append(True) or True,
+        lambda settings, tok, full, branch, **k: created.append(True) or True,
     )
     monkeypatch.setattr(cm, "find_app", lambda settings, tok, url: None)  # no existing app
     monkeypatch.setattr(
@@ -132,6 +132,87 @@ def test_builtin_template_targets_ios_13() -> None:
     # bump the deployment target before pod install or the iOS build fails to compile
     assert "IPHONEOS_DEPLOYMENT_TARGET = 13.0" in cm._CODEMAGIC_YAML
     assert "platform :ios, '13.0'" in cm._CODEMAGIC_YAML
+
+
+def test_rendered_codemagic_yaml_is_valid_yaml() -> None:
+    # the identity/signing steps embed shell — guard against a broken block scalar
+    import yaml
+
+    rendered = cm._render_yaml(None, "com.acme.demo", "Demo App")
+    doc = yaml.safe_load(rendered)
+    assert "ios-unsigned" in doc["workflows"]
+
+
+def test_builtin_template_has_identity_step_with_placeholders() -> None:
+    y = cm._CODEMAGIC_YAML
+    assert "Set display name and Android identity" in y
+    assert "__BUNDLE_ID__" in y and "__APP_NAME__" in y
+    # display name (iOS) + applicationId/label (Android); iOS bundle id stays default
+    assert "CFBundleDisplayName" in y and "applicationId" in y and "android:label" in y
+    assert "PRODUCT_BUNDLE_IDENTIFIER =" not in y  # not changed for the unsigned build
+
+
+def test_render_yaml_fills_bundle_id_and_app_name() -> None:
+    out = cm._render_yaml(None, "com.acme.demo", "Demo App")
+    assert "__BUNDLE_ID__" not in out and "__APP_NAME__" not in out
+    assert "com.acme.demo" in out
+    assert "Demo App" in out
+
+
+class _R:
+    def __init__(self, status: int, payload: Any = None) -> None:
+        self.status_code = status
+        self._p = payload or {}
+
+    def json(self) -> Any:
+        return self._p
+
+
+def test_ensure_codemagic_yaml_upserts_when_content_differs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import base64
+
+    puts: list[dict[str, Any]] = []
+    # repo already has a codemagic.yaml with a DIFFERENT (old) bundle id
+    old = base64.b64encode(cm._render_yaml(None, "com.old.id", "Old").encode()).decode()
+    monkeypatch.setattr(cm.httpx, "get", lambda *a, **k: _R(200, {"content": old, "sha": "sha1"}))
+
+    def _put(url: str, **k: Any) -> _R:
+        puts.append(k["json"])
+        return _R(200)
+
+    monkeypatch.setattr(cm.httpx, "put", _put)
+    wrote = cm.ensure_codemagic_yaml(
+        Settings(codemagic_template_repo=""),
+        "gh",
+        "o/r",
+        "main",
+        bundle_id="com.new.id",
+        app_name="New",
+    )
+    assert wrote is True
+    assert puts and puts[0]["sha"] == "sha1"  # updates in place with the existing sha
+    assert "com.new.id" in base64.b64decode(puts[0]["content"]).decode()
+
+
+def test_ensure_codemagic_yaml_skips_when_identical(monkeypatch: pytest.MonkeyPatch) -> None:
+    import base64
+
+    same = base64.b64encode(cm._render_yaml(None, "com.same.id", "Same").encode()).decode()
+    monkeypatch.setattr(cm.httpx, "get", lambda *a, **k: _R(200, {"content": same, "sha": "s"}))
+    monkeypatch.setattr(
+        cm.httpx, "put", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not PUT"))
+    )
+    wrote = cm.ensure_codemagic_yaml(
+        Settings(codemagic_template_repo=""),
+        "gh",
+        "o/r",
+        "main",
+        bundle_id="com.same.id",
+        app_name="Same",
+    )
+    assert wrote is False
 
 
 def test_render_yaml_substitutes_bundle_and_falls_back() -> None:

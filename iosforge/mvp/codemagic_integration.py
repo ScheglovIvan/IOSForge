@@ -38,7 +38,7 @@ workflows:
     instance_type: mac_mini_m2
     max_build_duration: 60
     environment:
-      flutter: stable
+      flutter: 3.44.4
       xcode: latest
       cocoapods: default
     scripts:
@@ -53,18 +53,41 @@ workflows:
           sed -i '' "s/platform :ios, '[0-9.]*'/platform :ios, '13.0'/" ios/Podfile || true
           perl -0pi -e "s/flutter_additional_ios_build_settings\\(target\\)/flutter_additional_ios_build_settings(target)\\n      target.build_configurations.each { |c| c.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '13.0' }/g" ios/Podfile || true
           sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*/IPHONEOS_DEPLOYMENT_TARGET = 13.0/g" ios/Runner.xcodeproj/project.pbxproj || true
+      - name: Set display name and Android identity
+        script: |
+          # Display name (user-visible) + Android applicationId/label are written from
+          # the build profile. The iOS PRODUCT_BUNDLE_IDENTIFIER is intentionally left
+          # at the flutter-create default (com.example.*): a custom iOS bundle id makes
+          # Xcode automatic-signing demand a Development Team even for --no-codesign, so
+          # the real iOS bundle id is applied together with signing (real profile, once
+          # Apple credentials are configured). __APP_NAME__ / __BUNDLE_ID__ are per-job.
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName __APP_NAME__" ios/Runner/Info.plist \
+            || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string __APP_NAME__" ios/Runner/Info.plist
+          sed -i '' 's/applicationId "[^"]*"/applicationId "__BUNDLE_ID__"/' android/app/build.gradle || true
+          sed -i '' 's/android:label="[^"]*"/android:label="__APP_NAME__"/' android/app/src/main/AndroidManifest.xml || true
       - name: Get Flutter packages
         script: flutter pub get
       - name: Install CocoaPods
         script: find . -name Podfile -execdir pod install \\; || true
       - name: Build unsigned iOS
-        script: flutter build ios --release --no-codesign
+        script: |
+          # `flutter build ios --no-codesign` still fails on this CI ("requires a
+          # Development Team") for release. Configure with flutter, then build via
+          # xcodebuild with signing disabled on the command line (highest precedence,
+          # overrides the project's automatic-signing settings) — a true unsigned .app.
+          flutter build ios --release --no-codesign --config-only
+          xcodebuild -workspace ios/Runner.xcworkspace -scheme Runner \
+            -configuration Release -sdk iphoneos -derivedDataPath build/ios_dd \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="" PROVISIONING_PROFILE_SPECIFIER="" \
+            build
       - name: Package unsigned IPA
         script: |
-          cd build/ios/iphoneos
-          mkdir -p Payload
-          cp -r Runner.app Payload/
-          zip -r app-unsigned.ipa Payload
+          APP="$(find build/ios_dd -path '*/Release-iphoneos/Runner.app' -type d | head -1)"
+          if [ -z "$APP" ]; then APP="$(find build -name Runner.app -type d | head -1)"; fi
+          mkdir -p build/ios/iphoneos/Payload
+          cp -R "$APP" build/ios/iphoneos/Payload/
+          cd build/ios/iphoneos && zip -r app-unsigned.ipa Payload
     artifacts:
       - build/ios/iphoneos/*.ipa
       - build/ios/iphoneos/Runner.app
@@ -129,17 +152,27 @@ def _reference_yaml(settings: Settings, gh_token: str) -> str | None:
     return base64.b64decode(resp.json()["content"]).decode()
 
 
-def _render_yaml(reference: str | None, bundle_id: str) -> str:
-    """Reuse the reference config, substituting only the per-app bundle id.
+def _render_yaml(reference: str | None, bundle_id: str, app_name: str = "App") -> str:
+    """Render the effective config, substituting the per-job bundle id + display name.
 
-    Falls back to the built-in iOS template when no reference is available.
+    Falls back to the built-in iOS template when no reference is available. Both the
+    built-in (``__BUNDLE_ID__`` / ``__APP_NAME__``) and reference (``com.batteam.trimvo``)
+    placeholders are filled so the built binary gets the job's identity.
     """
-    if reference is None:
-        return _CODEMAGIC_YAML
-    return re.sub(r"com\.batteam\.trimvo", bundle_id, reference)
+    content = _CODEMAGIC_YAML if reference is None else reference
+    content = re.sub(r"com\.batteam\.trimvo", bundle_id, content)
+    content = content.replace("__BUNDLE_ID__", bundle_id).replace("__APP_NAME__", app_name)
+    return content
 
 
-def resolved_workflow_id(settings: Settings, gh_token: str, full_name: str) -> str:
+def resolved_workflow_id(
+    settings: Settings,
+    gh_token: str,
+    full_name: str,
+    *,
+    bundle_id: str | None = None,
+    app_name: str = "App",
+) -> str:
     """The workflow id of the effective codemagic.yaml (reference repo or built-in).
 
     Rendered locally so it is reliable even right after a force-push (the GitHub
@@ -148,39 +181,61 @@ def resolved_workflow_id(settings: Settings, gh_token: str, full_name: str) -> s
     """
     from iosforge.mvp import codemagic_build
 
-    content = _render_yaml(_reference_yaml(settings, gh_token), _bundle_id(settings, full_name))
+    bid = bundle_id or _bundle_id(settings, full_name)
+    content = _render_yaml(_reference_yaml(settings, gh_token), bid, app_name)
     return codemagic_build.first_workflow_id(content) or "ios-unsigned"
 
 
-def ensure_codemagic_yaml(settings: Settings, gh_token: str, full_name: str, branch: str) -> bool:
-    """Commit an iOS ``codemagic.yaml`` if the repo has none. Returns True if created.
+def ensure_codemagic_yaml(
+    settings: Settings,
+    gh_token: str,
+    full_name: str,
+    branch: str,
+    *,
+    bundle_id: str | None = None,
+    app_name: str = "App",
+) -> bool:
+    """Upsert the iOS ``codemagic.yaml`` (bundle id + display name for this job).
 
-    The config mirrors the proven reference project (``codemagic_template_repo``);
-    only the per-app bundle id is substituted. An existing file is never overwritten.
+    Creates the file when absent and UPDATES it when the rendered content differs
+    (e.g. the build profile / bundle id / name changed) so identity changes reach the
+    build; a matching file is left untouched. Returns True when it wrote the file.
     """
     base = settings.github_api_base
     path = "codemagic.yaml"
+    bid = bundle_id or _bundle_id(settings, full_name)
+    content = _render_yaml(_reference_yaml(settings, gh_token), bid, app_name)
+    encoded = base64.b64encode(content.encode()).decode()
+
     check = httpx.get(
         f"{base}/repos/{full_name}/contents/{path}",
         headers=_gh_headers(gh_token),
         params={"ref": branch},
         timeout=30.0,
     )
+    sha: str | None = None
     if check.status_code == 200:
-        return False  # already present — never overwrite
-    if check.status_code != 404:
+        body = check.json()
+        existing = base64.b64decode(body["content"]).decode()
+        if existing == content:
+            return False  # already up to date
+        sha = body["sha"]
+    elif check.status_code != 404:
         raise CodeMagicIntegrationError(
             f"codemagic.yaml check {check.status_code}: {check.text[:200]}"
         )
-    content = _render_yaml(_reference_yaml(settings, gh_token), _bundle_id(settings, full_name))
+
+    payload: dict[str, Any] = {
+        "message": "Set codemagic.yaml (iOS build config)",
+        "content": encoded,
+        "branch": branch,
+    }
+    if sha is not None:
+        payload["sha"] = sha
     put = httpx.put(
         f"{base}/repos/{full_name}/contents/{path}",
         headers=_gh_headers(gh_token),
-        json={
-            "message": "Add codemagic.yaml (iOS build config)",
-            "content": base64.b64encode(content.encode()).decode(),
-            "branch": branch,
-        },
+        json=payload,
         timeout=30.0,
     )
     if put.status_code not in (200, 201):
@@ -247,8 +302,19 @@ def wait_for_sync(settings: Settings, cm_token: str, app_id: str) -> list[str]:
     return []
 
 
-def integrate(settings: Settings, *, repo_full_name: str, repo_html_url: str) -> dict[str, Any]:
-    """Connect ``repo_full_name`` to CodeMagic; return the saved identifiers."""
+def integrate(
+    settings: Settings,
+    *,
+    repo_full_name: str,
+    repo_html_url: str,
+    bundle_id: str | None = None,
+    app_name: str = "App",
+) -> dict[str, Any]:
+    """Connect ``repo_full_name`` to CodeMagic; return the saved identifiers.
+
+    ``bundle_id`` / ``app_name`` (from the build profile) are written into the
+    committed codemagic.yaml so the built binary gets the job's identity.
+    """
     cm_token = load_token(settings)
     if not cm_token:
         raise CodeMagicIntegrationError("no CodeMagic token (set codemagic_token_path)")
@@ -274,8 +340,15 @@ def integrate(settings: Settings, *, repo_full_name: str, repo_html_url: str) ->
     clone_url = str(repo.get("clone_url") or f"https://github.com/{repo_full_name}.git")
     log.info("codemagic.repo_found", repo=repo_full_name, branch=default_branch)
 
-    created_yaml = ensure_codemagic_yaml(settings, gh_token, repo_full_name, default_branch)
-    log.info("codemagic.codemagic_yaml", created=created_yaml)
+    created_yaml = ensure_codemagic_yaml(
+        settings,
+        gh_token,
+        repo_full_name,
+        default_branch,
+        bundle_id=bundle_id,
+        app_name=app_name,
+    )
+    log.info("codemagic.codemagic_yaml", created=created_yaml, bundle_id=bundle_id)
 
     app = find_app(settings, cm_token, repo_html_url)
     if app is None:

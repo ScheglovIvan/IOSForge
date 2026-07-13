@@ -794,3 +794,66 @@ def build_check(flutter_app: Path) -> bool:
     ok = res.returncode == 0
     log.info("claude_gen.build_check", ok=ok, tail=res.stdout[-500:])
     return ok
+
+
+_COMPILE_FIX_PROMPT = """The Flutter app under `flutter_app/` does not compile. Below is the
+`flutter analyze` output listing the errors. Fix ONLY these compile errors with the smallest
+possible edits: correct imports (e.g. `CupertinoPageTransitionsBuilder`, `CupertinoIcons` and
+other Cupertino symbols live in `package:flutter/cupertino.dart`, not `material.dart`), add
+missing arguments, fix typos and undefined references. Do NOT change the design, layout,
+colours, fonts, navigation or add features. Output ONLY changes under `flutter_app/`.
+
+flutter analyze errors:
+{errors}
+"""
+
+
+def analyze_errors(flutter_app: Path) -> list[str]:
+    """`flutter analyze` ERROR-severity lines (empty list = compiles). Runs pub get first."""
+    flutter = "/opt/flutter/bin/flutter"
+    if not Path(flutter).exists():
+        log.warning("claude_gen.flutter_missing", path=flutter)
+        return []
+    subprocess.run(
+        [flutter, "pub", "get"], cwd=flutter_app, capture_output=True, text=True, check=False
+    )
+    res = subprocess.run(
+        [flutter, "analyze", "--no-pub"],
+        cwd=flutter_app,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    errors: list[str] = []
+    for line in res.stdout.splitlines():
+        parts = line.split("•")
+        if len(parts) >= 2 and parts[0].strip() == "error":
+            errors.append(line.strip())
+    return errors
+
+
+def ensure_compiles(paths: RunPaths, *, attempts: int = 2, timeout: int = 1800) -> list[str]:
+    """Compile gate: run `flutter analyze` and, if it reports errors, run a bounded rework
+    fix loop so non-compiling code never reaches GitHub/CodeMagic. Returns the errors still
+    present after the loop (empty = clean). Best-effort: a missing Flutter toolchain is a no-op.
+    """
+    bound = log.bind(stage="compile_gate", run_dir=str(paths.run_dir))
+    if not paths.flutter_app.exists():
+        return []
+    errors = analyze_errors(paths.flutter_app)
+    tries = 0
+    while errors and tries < attempts:
+        tries += 1
+        bound.warning("compile_gate.errors", attempt=tries, count=len(errors), sample=errors[:5])
+        try:
+            rework(
+                paths,
+                _COMPILE_FIX_PROMPT.format(errors="\n".join(errors[:80])),
+                timeout=timeout,
+            )
+        except Exception as exc:
+            bound.warning("compile_gate.fix_failed", attempt=tries, error=str(exc))
+            break
+        errors = analyze_errors(paths.flutter_app)
+    bound.info("compile_gate.done", ok=not errors, remaining=len(errors))
+    return errors

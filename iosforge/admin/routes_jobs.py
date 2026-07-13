@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
@@ -97,7 +98,11 @@ async def jobs_create(
         id=job_id,
         state=JobState.QUEUED,
         source_app_ref=parsed.url,
-        source_app_metadata={"app_id": parsed.app_id, "country": parsed.country},
+        source_app_metadata={
+            "app_id": parsed.app_id,
+            "country": parsed.country,
+            "build_profile": "test",
+        },
         created_by_id=uuid.UUID(user.user_id),
         submission_kind="appstore",
     )
@@ -191,6 +196,54 @@ def jobs_rework(
         log.info("jobs.rework_requested", job_id=str(job_id))
     except Exception as exc:
         log.error("jobs.rework_enqueue_failed", job_id=str(job_id), error=str(exc))
+    return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
+
+
+@router.post("/jobs/{job_id}/build-settings")
+def jobs_build_settings(
+    request: Request,
+    job_id: uuid.UUID,
+    csrf_token: str = Form(...),
+    build_profile: str = Form("test"),
+    bundle_id: str = Form(""),
+    app_name: str = Form(""),
+    user: SessionData = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Save the build profile / bundle id / display name, then rebuild."""
+    if not csrf.verify(user.csrf_token, csrf_token):
+        return Response("Invalid request (CSRF).", status_code=400)
+    job = db.get(Job, job_id)
+    if job is None:
+        return Response("Not found", status_code=404)
+    profile = "real" if build_profile == "real" else "test"
+    bundle_id = (bundle_id or "").strip()
+    app_name = (app_name or "").strip()
+    if bundle_id and not re.fullmatch(r"[A-Za-z0-9.]{1,80}", bundle_id):
+        return Response("Invalid bundle id.", status_code=400)
+    if app_name and not re.fullmatch(r"[\w .\-]{1,50}", app_name):
+        return Response("Invalid app name.", status_code=400)
+
+    meta = dict(job.source_app_metadata or {})
+    meta["build_profile"] = profile
+    meta["override_bundle_id"] = bundle_id if profile == "real" else ""
+    meta["override_app_name"] = app_name
+    job.source_app_metadata = meta  # reassign so SQLAlchemy persists the JSONB change
+    db.commit()
+
+    gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
+    try:
+        if gen is not None:
+            from iosforge.worker.run_job import rework_frontend
+
+            rework_frontend.apply_async(
+                args=[str(job_id), ""], kwargs={"augment": True}, queue="codegen"
+            )
+        else:
+            _enqueue_build(job_id)
+        log.info("jobs.build_settings_saved", job_id=str(job_id), profile=profile)
+    except Exception as exc:
+        log.error("jobs.build_settings_enqueue_failed", job_id=str(job_id), error=str(exc))
     return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
 
 

@@ -119,6 +119,28 @@ def test_product_store_ids_are_appstore_safe(monkeypatch: pytest.MonkeyPatch) ->
     assert rc._store_slug("Weekly Pro!") == "weekly_pro"
 
 
+def test_provision_use_test_store_param_overrides_key_presence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rc.httpx, "Client", _FakeClient)
+    # key is present, but the real profile forces App Store mode + per-clone key
+    out = rc.provision(
+        _SPEC, settings=_settings(revenuecat_test_store_key="test_K"), use_test_store=False
+    )
+    assert out is not None
+    assert out["mode"] == "app_store"
+    assert out["sdk_key"] == "appl_PUBLICKEY"
+
+
+def test_provision_honours_identity_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rc.httpx, "Client", _FakeClient)
+    out = rc.provision(_SPEC, settings=_settings(), bundle_id="com.acme.demo", app_name="Demo App")
+    assert out is not None
+    assert out["bundle_id"] == "com.acme.demo"
+    assert all(p.startswith("com.acme.demo.") for p in out["products"])
+    assert out["entitlement"] == "premium_demo-app"
+
+
 def test_provision_disabled_returns_none() -> None:
     assert rc.provision(_SPEC, settings=_settings(revenuecat_provision=False)) is None
 

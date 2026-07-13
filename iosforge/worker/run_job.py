@@ -542,6 +542,8 @@ def build_frontend(self, job_id: str) -> str:
     """
     from iosforge.mvp import (
         analyze,
+        build_profile,
+        claude_gen,
         codegen,
         codegen_checkpoint,
         codemagic_integration,
@@ -600,11 +602,26 @@ def build_frontend(self, job_id: str) -> str:
                             "build_frontend.archive_reingest_failed", job_id=job_id, error=str(exc)
                         )
 
+                # Build profile (test/real) → bundle id + display name + store mode.
+                spec_data = json.loads(paths.app_spec_json.read_text())
+                ident = build_profile.resolve_identity(job.source_app_metadata, spec_data, settings)
+                log.info(
+                    "build_frontend.identity",
+                    job_id=job_id,
+                    profile=ident.profile,
+                    bundle_id=ident.bundle_id,
+                    app_name=ident.app_name,
+                )
+
                 # RevenueCat: provision one app per clone (+ products/entitlement/
                 # offering) and inject its public SDK key into codegen. Best-effort —
                 # a failure never blocks the build.
                 rc_config = revenuecat_provision.provision(
-                    json.loads(paths.app_spec_json.read_text()), settings=settings
+                    spec_data,
+                    settings=settings,
+                    bundle_id=ident.bundle_id,
+                    app_name=ident.app_name,
+                    use_test_store=ident.use_test_store,
                 )
                 if rc_config:
                     paths.rc_config_json.write_text(json.dumps(rc_config, indent=2))
@@ -684,6 +701,20 @@ def build_frontend(self, job_id: str) -> str:
                 )
                 if resumable:
                     codegen_checkpoint.clear(storage, job_id)
+
+                # Compile gate: `flutter analyze` + bounded fix loop so non-compiling code
+                # never reaches GitHub / the CodeMagic iOS build.
+                if settings.codegen_compile_gate:
+                    remaining = claude_gen.ensure_compiles(
+                        paths, attempts=settings.codegen_compile_gate_attempts
+                    )
+                    if remaining:
+                        log.warning(
+                            "build_frontend.compile_gate_unresolved",
+                            job_id=job_id,
+                            count=len(remaining),
+                            sample=remaining[:5],
+                        )
 
                 # Web screen-similarity verification (non-fatal: never loses the
                 # generated frontend if the build/render/judge fails). The single-pass
@@ -801,6 +832,8 @@ def build_frontend(self, job_id: str) -> str:
                                 settings,
                                 repo_full_name=gh_result["full_name"],
                                 repo_html_url=gh_result["url"],
+                                bundle_id=ident.bundle_id,
+                                app_name=ident.app_name,
                             )
                             gen.codemagic = cm_result
                             log.info(
@@ -885,9 +918,10 @@ def run_codemagic_build(self, job_id: str) -> str:
     """
     import time
 
-    from iosforge.mvp import codemagic_build, codemagic_integration, github_publish
+    from iosforge.mvp import build_profile, codemagic_build, codemagic_integration, github_publish
 
     settings = get_settings()
+    storage = S3ArtifactStorage()
     maker = get_sessionmaker()
     with maker() as db:
         job = db.get(Job, uuid.UUID(job_id))
@@ -906,6 +940,16 @@ def run_codemagic_build(self, job_id: str) -> str:
         repo_url = str(cm_meta.get("repository_url") or (gen.github_repo_url if gen else "") or "")
         full_name = repo_url.rstrip("/").split("github.com/")[-1] if repo_url else ""
 
+        # Build profile identity (bundle id + display name) — from the current job
+        # metadata, so admin-changed settings reach the rebuild.
+        try:
+            spec_data = json.loads(
+                storage.get(build_key(job_id=job_id, kind="app_spec", name="app_spec.json"))
+            )
+        except Exception:
+            spec_data = {}
+        ident = build_profile.resolve_identity(job.source_app_metadata, spec_data, settings)
+
         token = codemagic_build.resolve_token(settings)
         gh_token = github_publish.load_token(settings)
 
@@ -915,16 +959,27 @@ def run_codemagic_build(self, job_id: str) -> str:
         # and drops the separately-committed codemagic.yaml, so also restore it in the
         # repo (best-effort) for the UI / future builds.
         try:
-            workflow_id = codemagic_integration.resolved_workflow_id(settings, gh_token, full_name)
+            workflow_id = codemagic_integration.resolved_workflow_id(
+                settings, gh_token, full_name, bundle_id=ident.bundle_id, app_name=ident.app_name
+            )
         except Exception as exc:
             log.warning("codemagic_build.workflow_lookup_failed", job_id=job_id, error=str(exc))
             workflow_id = "ios-unsigned"
         if gh_token and full_name:
             try:
                 if codemagic_integration.ensure_codemagic_yaml(
-                    settings, gh_token, full_name, branch
+                    settings,
+                    gh_token,
+                    full_name,
+                    branch,
+                    bundle_id=ident.bundle_id,
+                    app_name=ident.app_name,
                 ):
-                    log.info("codemagic_build.codemagic_yaml_restored", job_id=job_id)
+                    log.info(
+                        "codemagic_build.codemagic_yaml_updated",
+                        job_id=job_id,
+                        bundle_id=ident.bundle_id,
+                    )
             except Exception as exc:
                 log.warning(
                     "codemagic_build.codemagic_yaml_restore_failed",
@@ -1017,6 +1072,7 @@ def rework_frontend(self, job_id: str, instructions: str = "", augment: bool = F
     import zipfile
 
     from iosforge.mvp import (
+        build_profile,
         claude_gen,
         compliance,
         frida_ingest,
@@ -1073,8 +1129,16 @@ def rework_frontend(self, job_id: str, instructions: str = "", augment: bool = F
 
                 mode = "augment" if augment else "rework"
                 if augment:
+                    spec_data = json.loads(paths.app_spec_json.read_text())
+                    ident = build_profile.resolve_identity(
+                        job.source_app_metadata, spec_data, settings
+                    )
                     rc_config = revenuecat_provision.provision(
-                        json.loads(paths.app_spec_json.read_text()), settings=settings
+                        spec_data,
+                        settings=settings,
+                        bundle_id=ident.bundle_id,
+                        app_name=ident.app_name,
+                        use_test_store=ident.use_test_store,
                     )
                     if rc_config:
                         paths.rc_config_json.write_text(json.dumps(rc_config, indent=2))
@@ -1087,6 +1151,18 @@ def rework_frontend(self, job_id: str, instructions: str = "", augment: bool = F
                     claude_gen.augment(paths)
                 else:
                     claude_gen.rework(paths, instructions)
+
+                if settings.codegen_compile_gate:
+                    remaining = claude_gen.ensure_compiles(
+                        paths, attempts=settings.codegen_compile_gate_attempts
+                    )
+                    if remaining:
+                        log.warning(
+                            "rework_frontend.compile_gate_unresolved",
+                            job_id=job_id,
+                            count=len(remaining),
+                            sample=remaining[:5],
+                        )
 
                 # Single-pass verify_web (not the Stage VERIFY loop) by design.
                 selftest: dict[str, object] = {"mode": mode}

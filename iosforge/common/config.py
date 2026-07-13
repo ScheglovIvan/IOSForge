@@ -112,6 +112,11 @@ class Settings(BaseSettings):
     # or render failure never loses the generated frontend. chromium_bin empty =
     # auto-discover (chromium / chromium-browser / google-chrome).
     verify_frontend_web: bool = Field(default=True)
+    # Compile gate: after codegen (and augment/rework) run `flutter analyze`; if it reports
+    # ERROR-severity issues, run a bounded rework fix loop so non-compiling code never reaches
+    # GitHub / the CodeMagic iOS build (which would otherwise waste a full build to surface it).
+    codegen_compile_gate: bool = Field(default=True)
+    codegen_compile_gate_attempts: int = Field(default=2, ge=0, le=5)
     # Frontend web-verify pass bar. Distinct from the SPEC ≥0.95 iOS-compliance goal
     # (compliance_threshold): a headless web render of a Flutter app compared to
     # native iOS screenshots has an inherent ceiling, so the frontend MVP passes at
@@ -216,6 +221,12 @@ class Settings(BaseSettings):
     # Auto-trigger the CodeMagic iOS build at the end of the pipeline (instead of the
     # manual button). Every run spends CodeMagic minutes; the template is UNSIGNED.
     codemagic_auto_build: bool = Field(default=True)
+    # App Store Connect API key for a future SIGNED "real" build (Apple Dev account
+    # required). Empty for now — the "real" profile still produces an unsigned but
+    # correctly-branded build (real bundle id / name) until these are provided.
+    appstore_connect_key_path: str = Field(default="")
+    appstore_connect_key_id: str = Field(default="")
+    appstore_connect_issuer_id: str = Field(default="")
     # Seed placeholder CONTENT (series/episodes + tiny dummy videos in Storage) so
     # the generated app is visually reviewable; swap for real content later.
     seed_placeholder_content: bool = Field(default=True)
