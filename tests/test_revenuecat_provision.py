@@ -95,6 +95,61 @@ def test_provision_creates_app_and_returns_public_key(monkeypatch: pytest.Monkey
     assert any(u.endswith("/offerings") for u in urls)
 
 
+class _Conflict409:
+    """POST /apps -> 409 (already exists); GET /apps -> the existing matching app."""
+
+    def __init__(self, *a: Any, **k: Any) -> None:
+        self.calls: list[tuple[str, str, Any]] = []
+        _Conflict409.last = self
+
+    def __enter__(self) -> _Conflict409:
+        return self
+
+    def __exit__(self, *a: Any) -> None:
+        return None
+
+    def post(self, url: str, json: Any = None) -> _Resp:
+        self.calls.append(("POST", url, json))
+        if url.endswith("/apps"):
+            import httpx
+
+            raise httpx.HTTPStatusError(
+                "conflict",
+                request=None,  # type: ignore[arg-type]
+                response=_Resp({"error": "app exists"}, status=409),  # type: ignore[arg-type]
+            )
+        return _Resp({"id": "x"})
+
+    def get(self, url: str) -> _Resp:
+        self.calls.append(("GET", url, None))
+        if "/public_api_keys" in url:
+            return _Resp({"items": [{"key": "appl_EXISTING"}]})
+        if url.endswith("/apps"):
+            return _Resp(
+                {
+                    "items": [
+                        {"id": "other", "app_store": {"bundle_id": "com.other.x"}},
+                        {
+                            "id": "existing_app",
+                            "app_store": {"bundle_id": "com.batteam.soundsforcarplay"},
+                        },
+                    ]
+                }
+            )
+        return _Resp({"items": []})
+
+
+def test_provision_reuses_existing_app_on_409(monkeypatch: pytest.MonkeyPatch) -> None:
+    # a re-provision must recover the existing RevenueCat app (not return None), so
+    # rc_config.json is still written and the paywall stays wired to real RevenueCat.
+    monkeypatch.setattr(rc.httpx, "Client", _Conflict409)
+    out = rc.provision(_SPEC, settings=_settings())
+    assert out is not None
+    assert out["app_id"] == "existing_app"
+    assert out["sdk_key"] == "appl_EXISTING"
+    assert out["entitlement"] == "premium_sounds-for-carplay"
+
+
 def test_provision_uses_test_store_key_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rc.httpx, "Client", _FakeClient)
     out = rc.provision(_SPEC, settings=_settings(revenuecat_test_store_key="test_KEY"))

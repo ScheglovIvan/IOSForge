@@ -68,6 +68,25 @@ def _create(
         return None
 
 
+def _find_app_id(client: httpx.Client, bound: Any, pid: str, bundle_id: str) -> str | None:
+    """Return the existing RevenueCat app id whose App Store bundle id matches.
+
+    On a re-provision the app already exists (create returns 409 Conflict); recover
+    its id so the sdk_key/entitlement can still be resolved instead of skipping
+    RevenueCat entirely (which would revert the paywall to a local stand-in).
+    """
+    try:
+        resp = client.get(f"/projects/{pid}/apps")
+        resp.raise_for_status()
+        for item in resp.json().get("items", []):
+            store = item.get("app_store") or {}
+            if store.get("bundle_id") == bundle_id:
+                return str(item.get("id") or "") or None
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        bound.warning("revenuecat.app_list_failed", error=str(exc))
+    return None
+
+
 def provision(
     spec: dict[str, Any],
     *,
@@ -105,6 +124,7 @@ def provision(
         "Content-Type": "application/json",
     }
     with httpx.Client(base_url=settings.revenuecat_api_base, headers=headers, timeout=timeout) as c:
+        app_id = ""
         try:
             app = c.post(
                 f"/projects/{pid}/apps",
@@ -116,6 +136,14 @@ def provision(
             )
             app.raise_for_status()
             app_id = str(app.json()["id"])
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 409:
+                app_id = _find_app_id(c, bound, pid, bundle_id) or ""
+                if app_id:
+                    bound.info("revenuecat.app_reused", app_id=app_id)
+            if not app_id:
+                bound.warning("revenuecat.app_create_failed", error=str(exc))
+                return None
         except (httpx.HTTPError, KeyError, ValueError) as exc:
             bound.warning("revenuecat.app_create_failed", error=str(exc))
             return None
