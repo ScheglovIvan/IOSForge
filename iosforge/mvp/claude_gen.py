@@ -164,7 +164,7 @@ Rules:
 - REAL FUNCTIONALITY: when a reported item is a decorative stub (fake button, static map,
   mock data, frozen clock, a permission "asked" by a plain button), replace it with the
   real implementation per the REAL FUNCTIONALITY note below.
-{_REAL_FUNCTIONALITY_NOTE}
+{_REAL_FUNCTIONALITY_NOTE}{_RC_NOTE}
 Output ONLY changes under `flutter_app/`. Do not run the app.
 """
 
@@ -325,6 +325,11 @@ RevenueCat. Read `rc_config.json` (fields: `sdk_key`, `entitlement`, `offering`,
   `Purchases.purchasePackage(pkg)`, restore with `Purchases.restorePurchases()`, and
   unlock premium when `customerInfo.entitlements.active` is non-empty (or contains
   `<entitlement>`).
+- NO LOCAL STAND-IN: if the app currently fakes purchases (a hardcoded catalog, an
+  entitlement service that "succeeds locally", a bool flag), REPLACE that with the real
+  `Purchases` calls above — the actual buy / restore / unlock MUST go through RevenueCat,
+  never a local flag. You MAY keep the source app's displayed prices/copy on the paywall,
+  but the purchase and the entitlement check must be real RevenueCat.
 Testable via the RevenueCat Test Store / StoreKit sandbox (no live App Store link yet).
 """
 

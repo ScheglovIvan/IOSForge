@@ -1128,26 +1128,29 @@ def rework_frontend(self, job_id: str, instructions: str = "", augment: bool = F
                     z.extractall(paths.flutter_app)
 
                 mode = "augment" if augment else "rework"
+                # Provision RevenueCat for BOTH modes: without rc_config.json in the
+                # workspace the codegen agent skips RevenueCat (the _RC_NOTE is gated on
+                # that file) and reverts the paywall to a local stand-in, so real test
+                # purchases stop working after a plain rework.
+                spec_data = json.loads(paths.app_spec_json.read_text())
+                ident = build_profile.resolve_identity(job.source_app_metadata, spec_data, settings)
+                rc_config = revenuecat_provision.provision(
+                    spec_data,
+                    settings=settings,
+                    bundle_id=ident.bundle_id,
+                    app_name=ident.app_name,
+                    use_test_store=ident.use_test_store,
+                )
+                if rc_config:
+                    paths.rc_config_json.write_text(json.dumps(rc_config, indent=2))
+                    log.info(
+                        "rework.revenuecat_provisioned",
+                        job_id=job_id,
+                        mode=mode,
+                        app_id=rc_config.get("app_id"),
+                        store_mode=rc_config.get("mode"),
+                    )
                 if augment:
-                    spec_data = json.loads(paths.app_spec_json.read_text())
-                    ident = build_profile.resolve_identity(
-                        job.source_app_metadata, spec_data, settings
-                    )
-                    rc_config = revenuecat_provision.provision(
-                        spec_data,
-                        settings=settings,
-                        bundle_id=ident.bundle_id,
-                        app_name=ident.app_name,
-                        use_test_store=ident.use_test_store,
-                    )
-                    if rc_config:
-                        paths.rc_config_json.write_text(json.dumps(rc_config, indent=2))
-                        log.info(
-                            "augment.revenuecat_provisioned",
-                            job_id=job_id,
-                            app_id=rc_config.get("app_id"),
-                            mode=rc_config.get("mode"),
-                        )
                     claude_gen.augment(paths)
                 else:
                     claude_gen.rework(paths, instructions)
