@@ -91,6 +91,13 @@ workflows:
           print("applied", len(data), "iOS permission key(s)")
           PY
           fi
+      - name: Pin RevenueCat SDK
+        script: |
+          # purchases_flutter < 8 fails to compile on current Xcode with
+          # "'SubscriptionPeriod' is ambiguous". Codegen sometimes writes an older
+          # constraint from the source app; force a known-good one at build time so no
+          # regeneration can reintroduce the break. No-op if the package isn't used.
+          sed -i '' -E "s/^([[:space:]]*purchases_flutter:).*/\\1 ^8.0.0/" pubspec.yaml || true
       - name: Get Flutter packages
         script: flutter pub get
       - name: Install CocoaPods

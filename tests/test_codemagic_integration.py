@@ -143,6 +143,20 @@ def test_rendered_codemagic_yaml_is_valid_yaml() -> None:
     assert "ios-unsigned" in doc["workflows"]
 
 
+def test_builtin_template_pins_revenuecat_before_pub_get() -> None:
+    # purchases_flutter < 8 breaks on current Xcode ("SubscriptionPeriod is ambiguous");
+    # the template must force a known-good constraint before pub get regardless of codegen.
+    import yaml
+
+    doc = yaml.safe_load(cm._render_yaml(None, "com.acme.demo", "Demo App"))
+    steps = doc["workflows"]["ios-unsigned"]["scripts"]
+    names = [s["name"] for s in steps]
+    assert "Pin RevenueCat SDK" in names
+    assert names.index("Pin RevenueCat SDK") < names.index("Get Flutter packages")
+    pin = next(s for s in steps if s["name"] == "Pin RevenueCat SDK")["script"]
+    assert "purchases_flutter" in pin and "^8.0.0" in pin
+
+
 def test_builtin_template_injects_ios_permissions() -> None:
     # real iOS permissions crash without NS*UsageDescription in Info.plist; the build must
     # apply the generator's ios_permissions.json after flutter create regenerated ios/.
