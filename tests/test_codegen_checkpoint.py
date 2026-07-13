@@ -8,6 +8,10 @@ from iosforge.mvp import claude_gen, codegen_checkpoint
 from iosforge.mvp.paths import RunPaths
 
 
+def _stub_prompt(task: dict, no_ads: bool = True, diverge_content: bool = True) -> str:
+    return str(task.get("id"))
+
+
 class _MemStorage:
     def __init__(self) -> None:
         self.blobs: dict[str, bytes] = {}
@@ -42,6 +46,23 @@ def test_checkpoint_save_load_roundtrip(tmp_path: Path) -> None:
     assert completed == {"scaffold", "state-catalog"}
     assert dst.tasks_json.exists()
     assert (dst.claude_ws / "flutter_app" / "pubspec.yaml").read_text() == "name: app"
+
+
+def test_checkpoint_excludes_git_and_worktrees(tmp_path: Path) -> None:
+    storage = _MemStorage()
+    src = RunPaths.create(tmp_path / "run1")
+    _seed_workspace(src)
+    ws = src.claude_ws / "flutter_app"
+    (ws / ".git").mkdir()
+    (ws / ".git" / "HEAD").write_text("ref: refs/heads/base")
+    (src.claude_ws / "wt" / "t-a").mkdir(parents=True)
+    codegen_checkpoint.save(storage, "job1", src, {"scaffold"}, work_dir=tmp_path)
+
+    dst = RunPaths.create(tmp_path / "run2")
+    codegen_checkpoint.load(storage, "job1", dst, work_dir=tmp_path)
+    restored = dst.claude_ws / "flutter_app"
+    assert (restored / "pubspec.yaml").exists()
+    assert not (restored / ".git").exists()
 
 
 def test_load_returns_none_without_checkpoint(tmp_path: Path) -> None:
@@ -92,7 +113,7 @@ def test_generate_from_tasks_skips_completed(tmp_path: Path, monkeypatch) -> Non
         return 0
 
     monkeypatch.setattr(claude_gen, "run_task", _fake_run_task)
-    monkeypatch.setattr(claude_gen, "_task_prompt", lambda task: str(task.get("id")))
+    monkeypatch.setattr(claude_gen, "_task_prompt", _stub_prompt)
 
     done_cb: list[str] = []
     claude_gen.generate_from_tasks(paths, completed={"t1"}, on_task_done=done_cb.append)
@@ -122,7 +143,7 @@ def test_progress_callbacks_and_retry(tmp_path, monkeypatch) -> None:
         '{"id": "t1", "type": "screen", "title": "Home", "deps": ["scaffold"]}]}',
     )
     monkeypatch.setattr(claude_gen, "_prepare_task_workspace", lambda p: None)
-    monkeypatch.setattr(claude_gen, "_task_prompt", lambda task: str(task.get("id")))
+    monkeypatch.setattr(claude_gen, "_task_prompt", _stub_prompt)
 
     codes = {"scaffold": [0], "t1": [1, 0]}  # t1 fails once then succeeds on retry
 
@@ -157,7 +178,7 @@ def test_permanent_failure_stops_pipeline(tmp_path, monkeypatch) -> None:
         '{"id": "t1", "type": "screen", "title": "Home", "deps": ["scaffold"]}]}',
     )
     monkeypatch.setattr(claude_gen, "_prepare_task_workspace", lambda p: None)
-    monkeypatch.setattr(claude_gen, "_task_prompt", lambda task: str(task.get("id")))
+    monkeypatch.setattr(claude_gen, "_task_prompt", _stub_prompt)
     monkeypatch.setattr(
         claude_gen, "run_task", lambda p, prompt, timeout, tlog: 0 if prompt == "scaffold" else 1
     )
@@ -175,3 +196,33 @@ def test_permanent_failure_stops_pipeline(tmp_path, monkeypatch) -> None:
             strict=True,
         )
     assert (1, "failed") in failed
+
+
+def test_rework_prompt_and_runner(tmp_path, monkeypatch) -> None:
+    from iosforge.mvp import claude_gen
+
+    # prompt carries the instructions + in-place discipline
+    p = claude_gen._rework_prompt("Fix the paywall button")
+    assert "Fix the paywall button" in p
+    assert "EDIT IT IN PLACE" in p and "flutter_app/" in p
+
+    # runner edits the existing app in place (mocked claude), moves it back
+    paths = RunPaths.create(tmp_path / "run")
+    app = paths.flutter_app
+    (app / "lib").mkdir(parents=True, exist_ok=True)
+    (app / "pubspec.yaml").write_text("name: app")
+    (app / "lib" / "main.dart").write_text("void main() {}")
+    paths.app_spec_json.write_text("{}")
+    monkeypatch.setattr(claude_gen, "_prepare_rework_workspace", lambda pth: None)
+
+    def _fake_run(workspace, prompt, timeout, tlog) -> int:
+        ws = workspace / "flutter_app"
+        (ws / "lib").mkdir(parents=True, exist_ok=True)
+        (ws / "pubspec.yaml").write_text("name: app")
+        (ws / "lib" / "main.dart").write_text("void main() { /* fixed */ }")
+        return 0
+
+    monkeypatch.setattr(claude_gen, "run_task", _fake_run)
+    out = claude_gen.rework(paths, "Fix the paywall button")
+    assert out == paths.flutter_app
+    assert "fixed" in (paths.flutter_app / "lib" / "main.dart").read_text()

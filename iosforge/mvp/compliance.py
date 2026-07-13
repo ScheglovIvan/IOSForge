@@ -21,6 +21,7 @@ from __future__ import annotations
 import functools
 import http.server
 import json
+import re
 import shutil
 import subprocess
 import threading
@@ -40,6 +41,18 @@ log = get_logger("mvp.compliance")
 FLUTTER_BIN = "/opt/flutter/bin/flutter"
 _CHROMIUM_CANDIDATES = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
 
+_GOROUTE_HEAD_RE = re.compile(r"GoRoute\(")
+_PATH_ATTR_RE = re.compile(r"""path:\s*['"]([^'"]+)['"]""")
+_NAME_ATTR_RE = re.compile(r"""name:\s*['"]([^'"]+)['"]""")
+_NAV_CALL_RES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"""context\.go\(['"]([^'"]+)"""), "go"),
+    (re.compile(r"""context\.push\(['"]([^'"]+)"""), "push"),
+    (re.compile(r"""context\.(?:goNamed|pushNamed)\(['"]([^'"]+)"""), "named"),
+    (re.compile(r"""GoRouter\.of\(context\)\.go\(['"]([^'"]+)"""), "go"),
+    (re.compile(r"""GoRouter\.of\(context\)\.push\(['"]([^'"]+)"""), "push"),
+)
+_GOROUTE_WINDOW = 240
+
 JUDGE_PROMPT = """\
 You are judging how faithfully a generated Flutter app reproduces an original
 Android app, screen by screen, from screenshots.
@@ -50,21 +63,32 @@ In this directory:
   deep link `iosforge://screen/<id>`. A missing file means that screen failed to
   render.
 
+This clone DELIBERATELY uses a different visual design (new palette, gradients,
+fonts, button styles) while keeping the SAME structure. So do NOT reward visual
+similarity — reward STRUCTURAL fidelity and penalise looking like a clone.
+
 For every id listed below, compare `screens/<id>.png` against
-`generated_screens/<id>.png` (LOOK at both) and rate the visual fidelity.
+`generated_screens/<id>.png` (LOOK at both) and rate two independent things.
 
 Write a single file `judge.json` with EXACTLY this schema:
 
 {
   "screens": [
-    { "id": str, "score": float (0.0-1.0), "diffs": [str] }
+    { "id": str, "structure_score": float (0.0-1.0),
+      "divergence_score": float (0.0-1.0), "diffs": [str] }
   ],
   "flows_score": float (0.0-1.0)
 }
 
-- `score` 1.0 = pixel-faithful layout/content; 0.0 = absent or unrecognisable.
-- `diffs` = concrete, actionable differences (missing widgets, wrong colors,
-  wrong text, wrong layout) a developer can fix.
+- `structure_score` 1.0 = SAME blocks in the SAME positions/order/hierarchy
+  (app bars, lists, cards, buttons, sections), IGNORING colour/font/styling;
+  0.0 = absent or a completely different layout.
+- `divergence_score` 1.0 = CLEARLY different from the original across style
+  (palette, gradients, fonts, button shapes), ICONOGRAPHY (different icon style,
+  no reused brand marks/logo) and COPY (wording paraphrased, not verbatim); 0.0 =
+  looks like a copy.
+- `diffs` = concrete, actionable LAYOUT differences (missing/misplaced blocks,
+  wrong order/hierarchy) a developer can fix — NOT colour/font differences.
 - `flows_score` = holistic judgement of whether navigation/flows are reproduced.
 
 Ids to judge:
@@ -76,18 +100,27 @@ Output ONLY the file `judge.json`.
 
 @dataclass(frozen=True)
 class ComplianceWeights:
-    """Weights for the compliance score (sum to 1.0 by convention)."""
+    """Weights for the compliance score (structure/coverage/flows/divergence sum to 1.0).
 
-    visual: float
+    ``divergence_min`` is not a weight but a hard floor carried alongside the
+    weights so it reaches :func:`aggregate` without threading a new parameter
+    through every driver: a screen whose divergence is below it is a clone risk.
+    """
+
+    structure: float
     coverage: float
     flows: float
+    divergence: float
+    divergence_min: float = 0.0
 
     @classmethod
     def from_settings(cls, settings: Settings) -> ComplianceWeights:
         return cls(
-            visual=settings.compliance_weight_visual,
+            structure=settings.compliance_weight_structure,
             coverage=settings.compliance_weight_coverage,
             flows=settings.compliance_weight_flows,
+            divergence=settings.compliance_weight_divergence,
+            divergence_min=settings.compliance_divergence_min,
         )
 
 
@@ -320,26 +353,40 @@ def aggregate(
         str(s["id"]): s for s in judge.get("screens", []) if isinstance(s, dict) and "id" in s
     }
     screens: list[dict[str, Any]] = []
-    scores: list[float] = []
+    structure_scores: list[float] = []
+    divergence_scores: list[float] = []
     matched = 0
     for oid, gen in matches:
         if gen is None:
-            score = 0.0
+            s_score = 0.0
+            d_score = 0.0
             diffs = ["screen not rendered in generated app"]
         else:
             matched += 1
             entry = judge_by_id.get(oid, {})
-            score = float(entry.get("score", 0.0))
+            s_score = float(entry.get("structure_score", entry.get("score", 0.0)))
+            d_score = float(entry.get("divergence_score", 0.0))
             raw_diffs = entry.get("diffs", [])
             diffs = [str(d) for d in raw_diffs] if isinstance(raw_diffs, list) else []
-        scores.append(score)
-        screens.append({"id": oid, "generated": gen, "score": score, "diffs": diffs})
+            divergence_scores.append(d_score)
+        structure_scores.append(s_score)
+        screens.append(
+            {"id": oid, "generated": gen, "score": s_score, "divergence": d_score, "diffs": diffs}
+        )
 
-    visual = sum(scores) / len(scores) if scores else 0.0
+    structure = sum(structure_scores) / len(structure_scores) if structure_scores else 0.0
+    divergence = sum(divergence_scores) / len(divergence_scores) if divergence_scores else 0.0
     coverage = matched / len(matches) if matches else 0.0
     flows = float(judge.get("flows_score", 0.0))
-    compliance_score = weights.visual * visual + weights.coverage * coverage + weights.flows * flows
-    if compliance_score >= threshold:
+    compliance_score = (
+        weights.structure * structure
+        + weights.coverage * coverage
+        + weights.flows * flows
+        + weights.divergence * divergence
+    )
+    if matched > 0 and divergence < weights.divergence_min:
+        status = "clone_risk"
+    elif compliance_score >= threshold:
         status = "pass"
     elif compliance_score >= soft_floor:
         status = "soft_pass"
@@ -349,16 +396,19 @@ def aggregate(
     return {
         "iteration": iteration,
         "compliance_score": compliance_score,
-        "visual": visual,
+        "structure": structure,
+        "divergence": divergence,
+        "divergence_min": weights.divergence_min,
         "coverage": coverage,
         "flows": flows,
         "status": status,
         "threshold": threshold,
         "soft_floor": soft_floor,
         "weights": {
-            "visual": weights.visual,
+            "structure": weights.structure,
             "coverage": weights.coverage,
             "flows": weights.flows,
+            "divergence": weights.divergence,
         },
         "screens": screens,
     }
@@ -445,40 +495,204 @@ def diffs_to_tasks(report: dict[str, Any], iteration: int) -> dict[str, Any]:
         if score >= threshold:
             continue
         diffs = [str(d) for d in screen.get("diffs", [])]
-        headline = diffs[0] if diffs else "visual mismatch"
+        headline = diffs[0] if diffs else "layout mismatch"
         tasks.append(
             {
                 "id": f"fix-{iteration}-{sid}",
                 "type": "fix",
-                "title": f"Fix screen {sid}: {headline}",
+                "title": f"Fix screen {sid} layout: {headline}",
                 "screens": [sid],
                 "diffs": diffs,
                 "deps": [],
             }
         )
+
+    divergence_min = float(report.get("divergence_min", 0.0))
+    if divergence_min > 0.0 and float(report.get("divergence", 1.0)) < divergence_min:
+        for screen in report.get("screens", []):
+            sid = str(screen["id"])
+            if float(screen.get("divergence", 1.0)) >= divergence_min:
+                continue
+            tasks.append(
+                {
+                    "id": f"diverge-{iteration}-{sid}",
+                    "type": "diverge",
+                    "title": f"Restyle screen {sid} to look less like the original",
+                    "screens": [sid],
+                    "deps": [],
+                }
+            )
+
+    structural = report.get("structural")
+    if isinstance(structural, dict):
+        for finding in structural.get("missing_screens", []):
+            sid = str(finding.get("id"))
+            route = str(finding.get("expected_route") or f"/{sid}")
+            tasks.append(
+                {
+                    "id": f"add-{iteration}-{sid}",
+                    "type": "add_screen",
+                    "title": f"Add missing screen {sid} at {route}",
+                    "screens": [sid],
+                    "expected_route": route,
+                    "deps": [],
+                }
+            )
+        for finding in structural.get("blank_screens", []):
+            sid = str(finding.get("id"))
+            tasks.append(
+                {
+                    "id": f"blank-{iteration}-{sid}",
+                    "type": "fix_blank",
+                    "title": f"Implement blank screen {sid}",
+                    "screens": [sid],
+                    "deps": [],
+                }
+            )
+        for idx, finding in enumerate(structural.get("dead_links", [])):
+            target = str(finding.get("target"))
+            file = str(finding.get("file"))
+            kind = str(finding.get("kind"))
+            tasks.append(
+                {
+                    "id": f"deadlink-{iteration}-{idx}",
+                    "type": "fix_dead_link",
+                    "title": f"Resolve dead link to {target}",
+                    "target": target,
+                    "file": file,
+                    "kind": kind,
+                    "deps": [],
+                }
+            )
+        for idx, finding in enumerate(structural.get("missing_edges", [])):
+            frm = str(finding.get("from"))
+            to = str(finding.get("to"))
+            via = finding.get("via_element")
+            tasks.append(
+                {
+                    "id": f"edge-{iteration}-{idx}",
+                    "type": "add_edge",
+                    "title": f"Wire navigation {frm} -> {to}",
+                    "from": frm,
+                    "to": to,
+                    "via_element": via,
+                    "deps": [],
+                }
+            )
     return {"tasks": tasks}
 
 
+def _add_screen_prompt(task: dict[str, Any]) -> str:
+    sid = str(task.get("screens", ["?"])[0]) if task.get("screens") else "?"
+    route = str(task.get("expected_route") or f"/{sid}")
+    return f"""\
+You are extending the Flutter app under `flutter_app/` to add a MISSING screen.
+
+Screen id: {sid}
+Reference screenshot: `screens/{sid}.png` (LOOK at it and reproduce its layout).
+
+Do all of the following, editing files under `flutter_app/lib/` in place:
+- Create the screen widget faithful to `screens/{sid}.png`.
+- Register a concrete route `GoRoute(path: '{route}')` that renders it.
+- Keep the canonical preview route `/#/screen/:id` reachable for every screen.
+- Keep the whole app compiling. Output ONLY changes under `flutter_app/`.
+"""
+
+
+def _fix_blank_prompt(task: dict[str, Any]) -> str:
+    sid = str(task.get("screens", ["?"])[0]) if task.get("screens") else "?"
+    return f"""\
+You are fixing a BLANK screen in the Flutter app under `flutter_app/`.
+
+Screen id: {sid}
+The preview route `/#/screen/{sid}` currently renders (near-)blank.
+
+LOOK at `screens/{sid}.png` (the ORIGINAL target) and implement the screen UI so
+`/#/screen/{sid}` renders that content. EDIT files under `flutter_app/lib/` in place;
+keep the app compiling. Output ONLY changes under `flutter_app/`.
+"""
+
+
+def _fix_dead_link_prompt(task: dict[str, Any]) -> str:
+    target = str(task.get("target", "?"))
+    file = str(task.get("file", "?"))
+    return f"""\
+You are fixing a DEAD navigation link in the Flutter app under `flutter_app/`.
+
+A navigation call to `{target}` in `{file}` resolves to NO registered route.
+
+Either register a matching `GoRoute` for `{target}`, OR correct the call to point at
+an existing route. EDIT files under `flutter_app/lib/` in place; keep the app
+compiling. Output ONLY changes under `flutter_app/`.
+"""
+
+
+def _add_edge_prompt(task: dict[str, Any]) -> str:
+    frm = str(task.get("from", "?"))
+    to = str(task.get("to", "?"))
+    via = task.get("via_element")
+    via_text = f"the `{via}` element" if via else "the appropriate control"
+    return f"""\
+You are wiring a MISSING navigation edge in the Flutter app under `flutter_app/`.
+
+From screen `{frm}`, {via_text} must navigate to screen `{to}`.
+
+EDIT the source of screen `{frm}` under `flutter_app/lib/` so {via_text} calls
+`context.go(...)` targeting the route of screen `{to}` (its registered `GoRoute`
+path, e.g. `/{to}`). Keep the app compiling. Output ONLY changes under `flutter_app/`.
+"""
+
+
+def _diverge_prompt(task: dict[str, Any]) -> str:
+    sid = str(task.get("screens", ["?"])[0]) if task.get("screens") else "?"
+    return f"""\
+Screen `{sid}` of the Flutter app under `flutter_app/` still LOOKS TOO MUCH like
+the original app — it must be visually distinct to avoid a clone complaint.
+
+Restyle ONLY the appearance of screen `{sid}` using the app's design system:
+apply the divergent theme, `lib/ui/components/` widgets, the `design_tokens`
+palette/gradients/fonts and button styles. Change colours, gradients, fonts,
+button/card shapes and spacing so it reads as a different product.
+
+Do NOT change the LAYOUT — keep the same blocks in the same positions, the same
+navigation and the same content/text. EDIT files under `flutter_app/lib/` in
+place; keep the app compiling. Output ONLY changes under `flutter_app/`.
+"""
+
+
 def _corrective_prompt(task: dict[str, Any]) -> str:
+    kind = str(task.get("type", "fix"))
+    if kind == "add_screen":
+        return _add_screen_prompt(task)
+    if kind == "fix_blank":
+        return _fix_blank_prompt(task)
+    if kind == "fix_dead_link":
+        return _fix_dead_link_prompt(task)
+    if kind == "add_edge":
+        return _add_edge_prompt(task)
+    if kind == "diverge":
+        return _diverge_prompt(task)
     sid = str(task.get("screens", ["?"])[0]) if task.get("screens") else "?"
     diffs = task.get("diffs", [])
-    diff_lines = "\n".join(f"- {d}" for d in diffs) or "- (close the visual gap)"
+    diff_lines = "\n".join(f"- {d}" for d in diffs) or "- (close the layout gap)"
     return f"""\
-You are correcting one screen of the Flutter app under `flutter_app/` so it more
-faithfully matches the original Android app.
+You are correcting the LAYOUT of one screen of the Flutter app under `flutter_app/`
+so its structure matches the original app (block placement/order/hierarchy).
 
 Screen id: {sid}
 
-Compare these two screenshots (LOOK at both):
-- `screens/{sid}.png` — the ORIGINAL (target).
+Compare these two screenshots (LOOK at both) for STRUCTURE, not styling:
+- `screens/{sid}.png` — the ORIGINAL (target) layout.
 - `generated_screens/{sid}.png` — the CURRENT generated render.
 
-Differences to fix:
+Layout differences to fix:
 {diff_lines}
 
-EDIT the relevant files under `flutter_app/lib/` in place to close these
-differences. Keep the deep-link routing (`iosforge://screen/<id>`) and the rest
-of the app intact and compiling. Output ONLY changes under `flutter_app/`.
+EDIT the relevant files under `flutter_app/lib/` in place, composing from
+`lib/ui/components/`. Fix placement/order/hierarchy only — keep the DIVERGENT
+design (new palette/fonts/gradients); do NOT copy the original's colours or fonts.
+Keep the deep-link routing (`iosforge://screen/<id>`) and the app compiling.
+Output ONLY changes under `flutter_app/`.
 """
 
 
@@ -520,7 +734,7 @@ def apply_corrective(
     for task in tasks:
         tlog = bound.bind(task_id=str(task.get("id")))
         tlog.info("compliance.apply_corrective.task")
-        claude_gen.run_task(paths, _corrective_prompt(task), timeout=timeout, tlog=tlog)
+        claude_gen.run_task(paths.claude_ws, _corrective_prompt(task), timeout=timeout, tlog=tlog)
 
     pubspec = ws_app / "pubspec.yaml"
     main_dart = ws_app / "lib" / "main.dart"
@@ -558,11 +772,13 @@ def _apply_freeze(
             frozen[sid] = float(screen["score"])
     scores = [float(s.get("score", 0.0)) for s in report.get("screens", [])]
     if scores:
-        visual = sum(scores) / len(scores)
+        structure = sum(scores) / len(scores)
+        report["structure"] = structure
         report["compliance_score"] = (
-            weights.visual * visual
+            weights.structure * structure
             + weights.coverage * float(report.get("coverage", 0.0))
             + weights.flows * float(report.get("flows", 0.0))
+            + weights.divergence * float(report.get("divergence", 0.0))
         )
 
 
@@ -577,18 +793,28 @@ def _refine(
     timeout: int,
     per_screen: bool = False,
     freeze_passed: bool = False,
+    audit: Callable[[], dict[str, Any]] | None = None,
+    structural_gate: bool = True,
 ) -> dict[str, Any]:
     """Platform-agnostic refine loop: ``prepare`` builds + renders one iteration.
 
     The gate metric is the overall compliance score, or — when ``per_screen`` — the
     weakest individual screen, so the loop keeps correcting until EVERY screen meets
     the threshold. When ``freeze_passed``, a screen that reaches the threshold is
-    locked (never re-corrected or regressed by judge/render noise). Stops on
-    gate>=threshold, iteration>=max_iterations, or improvement<=0.01.
+    locked (never re-corrected or regressed by judge/render noise).
+
+    When ``audit`` is given, a structural report is merged into ``report["structural"]``
+    each iteration and the composite gate additionally requires ``structural["ok"]``
+    (when ``structural_gate``). ``no_improvement`` then fires only if the visual gate
+    stalled AND the number of open structural findings did not decrease — the loop
+    keeps running while it is still closing structural gaps. Stops on the composite
+    pass (``all_closed`` with an audit, else ``all_screens_met``/``threshold_met``),
+    ``max_iterations``, or ``no_improvement``.
     """
     bound = log.bind(stage="compliance", run_dir=str(paths.run_dir))
     history: list[float] = []
     frozen: dict[str, float] = {}
+    prev_open: int | None = None
     report: dict[str, Any] = {}
     for iteration in range(1, max_iterations + 1):
         prepare()
@@ -603,17 +829,35 @@ def _refine(
         )
         if freeze_passed:
             _apply_freeze(report, frozen, threshold, weights)
+        structural: dict[str, Any] | None = None
+        open_count = 0
+        structural_ok = True
+        if audit is not None:
+            structural = audit()
+            report["structural"] = structural
+            open_count = _structural_open_count(structural)
+            if structural_gate:
+                structural_ok = bool(structural.get("ok"))
         gate = _min_screen_score(report) if per_screen else float(report["compliance_score"])
-        if gate >= threshold:
-            report["stop_reason"] = "all_screens_met" if per_screen else "threshold_met"
+        divergence_ok = float(report.get("divergence", 0.0)) >= weights.divergence_min
+        if gate >= threshold and structural_ok and divergence_ok:
+            if audit is not None:
+                report["stop_reason"] = "all_closed"
+            else:
+                report["stop_reason"] = "all_screens_met" if per_screen else "threshold_met"
             break
         if iteration >= max_iterations:
             report["stop_reason"] = "max_iterations"
             break
-        if history and (gate - history[-1]) <= 0.01:
+        visual_stalled = bool(history) and (gate - history[-1]) <= 0.01
+        structural_closing = (
+            structural is not None and prev_open is not None and open_count < prev_open
+        )
+        if visual_stalled and not structural_closing:
             report["stop_reason"] = "no_improvement"
             break
         history.append(gate)
+        prev_open = open_count
         corrective = diffs_to_tasks(report, iteration)
         paths.corrective_tasks_json.write_text(json.dumps(corrective, indent=2, ensure_ascii=False))
         apply_corrective(paths, corrective, timeout=timeout)
@@ -713,4 +957,259 @@ def verify_web(
         threshold=threshold,
         soft_floor=soft_floor,
         history=[],
+    )
+
+
+def _dart_sources(paths: RunPaths) -> list[tuple[Path, str]]:
+    lib = paths.flutter_app / "lib"
+    sources: list[tuple[Path, str]] = []
+    if not lib.is_dir():
+        return sources
+    for path in sorted(lib.rglob("*.dart")):
+        try:
+            sources.append((path, path.read_text(encoding="utf-8", errors="replace")))
+        except OSError:
+            continue
+    return sources
+
+
+def _goroute_windows(text: str) -> list[str]:
+    return [text[m.start() : m.start() + _GOROUTE_WINDOW] for m in _GOROUTE_HEAD_RE.finditer(text)]
+
+
+def _expected_route(screen: dict[str, Any]) -> str:
+    sid = str(screen.get("id", ""))
+    return str(screen.get("route") or f"/{sid}")
+
+
+def _param_route_matches(pattern: str, target: str) -> bool:
+    pat_parts = pattern.strip("/").split("/")
+    tgt_parts = target.strip("/").split("/")
+    if len(pat_parts) != len(tgt_parts):
+        return False
+    for pat, tgt in zip(pat_parts, tgt_parts, strict=True):
+        if pat.startswith(":"):
+            if not tgt:
+                return False
+            continue
+        if pat != tgt:
+            return False
+    return True
+
+
+def _structural_open_count(structural: dict[str, Any]) -> int:
+    keys = ("missing_screens", "blank_screens", "dead_links", "missing_edges")
+    return sum(len(structural.get(key, [])) for key in keys)
+
+
+def nav_audit(paths: RunPaths) -> dict[str, Any]:
+    """Static navigation audit of the generated ``flutter_app/lib/`` (no build/render).
+
+    Regex-scans the Dart sources for registered ``GoRoute(path: ...)`` routes and
+    ``context.go/push/goNamed`` / ``GoRouter.of(context).go/push`` navigation calls,
+    then cross-references them against the original nav graph in ``screens.json``
+    (``id``/``route``/``navigates_to[]={to, via_element}``). Parametric routes
+    (containing ``:``, e.g. the ``/screen/:id`` preview route) are tracked separately
+    and excluded from the concrete-route existence set, but still used to cover
+    parametric nav targets (``/screen/123`` is covered by ``/screen/:id``).
+
+    Findings:
+    - ``missing_screens``: a spec screen whose expected route (its ``route`` field
+      else ``/{id}``, mirroring ``constitution._routes``) is not registered.
+    - ``dead_links``: a go/push target matching no concrete route and no parametric
+      route, or a named target with no ``name -> path`` entry.
+    - ``missing_edges``: an original ``navigates_to`` edge with no matching nav call
+      originating from the source screen's file. A screen's file is located via its
+      feature dir ``lib/features/<id>/`` or the file registering its route; the
+      shared ``lib/core/router/`` is always included in the nav-call scan. Edges
+      whose source file cannot be confidently located are SKIPPED (no false positive).
+
+    Honest failure modes (per the locked design):
+    - Dynamically-built route strings (string interpolation/concatenation) are not
+      matched → false negatives (a real route may be reported missing/dead). Nav
+      targets containing ``$`` (Dart interpolation) are skipped rather than reported
+      as dead links, and a ``?query`` suffix is stripped before route matching.
+    - Named-route indirection is best-effort: the ``name -> path`` map is parsed from
+      a bounded window after each ``GoRoute(``, so unusual formatting can miss.
+    - Shared-widget navigation is only mitigated by also scanning ``lib/core/router/``;
+      nav wired through other shared widgets may be misattributed or skipped.
+    """
+    sources = _dart_sources(paths)
+
+    concrete_routes: set[str] = set()
+    parametric_routes: set[str] = set()
+    name_map: dict[str, str] = {}
+    route_files: dict[str, set[Path]] = {}
+    nav_calls: list[tuple[str, Path, str]] = []
+
+    for path, text in sources:
+        for window in _goroute_windows(text):
+            pm = _PATH_ATTR_RE.search(window)
+            if pm is None:
+                continue
+            route = pm.group(1)
+            if ":" in route:
+                parametric_routes.add(route)
+            else:
+                concrete_routes.add(route)
+            route_files.setdefault(route, set()).add(path)
+            nm = _NAME_ATTR_RE.search(window)
+            if nm is not None:
+                name_map[nm.group(1)] = route
+        for pattern, call_kind in _NAV_CALL_RES:
+            for m in pattern.finditer(text):
+                nav_calls.append((m.group(1), path, call_kind))
+
+    data = json.loads(paths.screens_json.read_text())
+    screens = data.get("screens", []) if isinstance(data, dict) else []
+    screen_route: dict[str, str] = {}
+    for screen in screens:
+        if isinstance(screen, dict) and "id" in screen:
+            screen_route[str(screen["id"])] = _expected_route(screen)
+
+    def _route_present(route: str) -> bool:
+        return (
+            route in concrete_routes
+            or route in parametric_routes
+            or any(_param_route_matches(pattern, route) for pattern in parametric_routes)
+        )
+
+    missing_screens: list[dict[str, Any]] = []
+    for sid, route in screen_route.items():
+        if not _route_present(route):
+            missing_screens.append({"id": sid, "expected_route": route})
+
+    dead_links: list[dict[str, Any]] = []
+    for target, path, call_kind in nav_calls:
+        if "$" in target:
+            continue
+        clean = target.split("?", 1)[0]
+        if call_kind == "named":
+            resolved = clean in name_map
+        else:
+            resolved = clean in concrete_routes or any(
+                _param_route_matches(pattern, clean) for pattern in parametric_routes
+            )
+        if not resolved:
+            dead_links.append({"target": target, "file": path.name, "kind": call_kind})
+
+    router_files = {
+        path for path, _ in sources if "core/router" in path.as_posix().replace("\\", "/")
+    }
+
+    def _source_files(sid: str, route: str) -> set[Path] | None:
+        feature_marker = f"/features/{sid}/"
+        located: set[Path] = {
+            path for path, _ in sources if feature_marker in path.as_posix().replace("\\", "/")
+        }
+        located |= route_files.get(route, set())
+        if not located:
+            return None
+        return located | router_files
+
+    missing_edges: list[dict[str, Any]] = []
+    for screen in screens:
+        if not isinstance(screen, dict) or "id" not in screen:
+            continue
+        sid = str(screen["id"])
+        src_files = _source_files(sid, screen_route.get(sid, f"/{sid}"))
+        if src_files is None:
+            continue
+        for edge in screen.get("navigates_to", []) or []:
+            if not isinstance(edge, dict):
+                continue
+            to = str(edge.get("to", ""))
+            if not to:
+                continue
+            via = edge.get("via_element")
+            to_route = screen_route.get(to, f"/{to}")
+            reproduced = False
+            for target, path, call_kind in nav_calls:
+                if path not in src_files:
+                    continue
+                if call_kind == "named":
+                    if name_map.get(target) == to_route:
+                        reproduced = True
+                        break
+                elif target == to_route:
+                    reproduced = True
+                    break
+            if not reproduced:
+                missing_edges.append({"from": sid, "to": to, "via_element": via})
+
+    ok = not (missing_screens or dead_links or missing_edges)
+    return {
+        "ok": ok,
+        "routes_registered": sorted(concrete_routes | parametric_routes),
+        "missing_screens": missing_screens,
+        "dead_links": dead_links,
+        "missing_edges": missing_edges,
+    }
+
+
+def blank_screens(paths: RunPaths, *, max_bytes: int) -> list[dict[str, Any]]:
+    """Flag generated screenshots that are likely blank, by PNG byte size (no Pillow).
+
+    A near-uniform image compresses to a tiny zlib stream, so any generated
+    ``generated_screens/<id>.png`` under ``max_bytes`` is flagged as
+    ``{"id": <stem>, "bytes": <size>, "reason": "near_uniform"}``.
+
+    Failure mode: a minimal-but-intentional screen (a solid splash) can be a
+    false positive; a complex-but-wrong screen is not caught. Acceptable for the
+    MVP with zero image dependencies.
+    """
+    flagged: list[dict[str, Any]] = []
+    for png in sorted(paths.generated_screens_dir.glob("*.png")):
+        size = png.stat().st_size
+        if size < max_bytes:
+            flagged.append({"id": png.stem, "bytes": size, "reason": "near_uniform"})
+    return flagged
+
+
+def refine_web_until_complete(
+    paths: RunPaths,
+    *,
+    threshold: float,
+    soft_floor: float,
+    max_iterations: int,
+    weights: ComplianceWeights,
+    chromium_bin: str = "",
+    wait_ms: int,
+    window: str,
+    blank_max_bytes: int,
+    timeout: int = 1800,
+    structural_gate: bool = True,
+) -> dict[str, Any]:
+    """Web refine loop with a structural gate (Stage VERIFY).
+
+    Mirrors :func:`refine_until_compliant_web` (per-screen visual gate, freeze passed
+    screens) but also runs :func:`nav_audit` + :func:`blank_screens` each iteration.
+    The composite ``ok`` requires the three nav-audit lists AND ``blank_screens`` to be
+    empty. When ``structural_gate`` is False the findings are still recorded (and drive
+    corrective tasks) but do not block the composite gate.
+    """
+    chromium = _discover_chromium(chromium_bin)
+
+    def _prepare() -> None:
+        build_web(paths, timeout=timeout)
+        render_generated_web(paths, chromium_bin=chromium, wait_ms=wait_ms, window=window)
+
+    def _audit() -> dict[str, Any]:
+        structural = nav_audit(paths)
+        structural["blank_screens"] = blank_screens(paths, max_bytes=blank_max_bytes)
+        structural["ok"] = bool(structural["ok"]) and not structural["blank_screens"]
+        return structural
+
+    return _refine(
+        paths,
+        _prepare,
+        threshold=threshold,
+        soft_floor=soft_floor,
+        max_iterations=max_iterations,
+        weights=weights,
+        timeout=timeout,
+        per_screen=True,
+        freeze_passed=True,
+        audit=_audit,
+        structural_gate=structural_gate,
     )

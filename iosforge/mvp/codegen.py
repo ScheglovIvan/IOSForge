@@ -62,4 +62,7 @@ def generate(
         on_task=on_task,
         max_attempts=settings.codegen_task_max_attempts,
         strict=True,
+        no_ads=settings.no_ads,
+        diverge_content=settings.design_content_divergence,
+        max_parallel=settings.codegen_max_parallel,
     )

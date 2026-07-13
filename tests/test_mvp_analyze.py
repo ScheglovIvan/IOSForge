@@ -234,6 +234,13 @@ def test_analyze_writes_and_validates_app_spec(
     assert spec["provenance"]["source_crawl_sha256"]
     assert spec["provenance"]["screen_count"] == 3
     assert spec["requirements"][0]["id"] == "REQ-add-task"
+    # design divergence (default on): palette rewritten, gradients added, source stashed
+    assert spec["design_tokens"]["color"]["primary"]["$value"] != "#3366FF"
+    assert "gradient" in spec["design_tokens"]
+    stash = spec["design_tokens"]["$extensions"]["com.iosforge.source_tokens"]
+    assert stash["color"]["primary"]["$value"] == "#3366FF"
+    tokens = json.loads((rp.handoff_dir / "tokens.json").read_text())
+    assert "gradient" in tokens
 
 
 def test_analyze_rejects_empty_screens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -268,6 +275,40 @@ def test_decompose_validates_tasks_and_deps(
     assert tasks[0]["type"] == "scaffold"
     assert tasks[0]["deps"] == []
     assert (rp.claude_ws / "app_spec.json").exists()
+
+
+def test_topo_layers_groups_independent_tasks() -> None:
+    tasks: list[dict[str, Any]] = [
+        {"id": "s", "type": "scaffold", "deps": []},
+        {"id": "lib", "type": "component_library", "deps": ["s"]},
+        {"id": "a", "type": "screen", "deps": ["lib"]},
+        {"id": "b", "type": "screen", "deps": ["lib"]},
+    ]
+    layers = analyze.topo_layers(tasks)
+    assert [t["id"] for t in layers[0]] == ["s"]
+    assert [t["id"] for t in layers[1]] == ["lib"]
+    assert {t["id"] for t in layers[2]} == {"a", "b"}
+    # topo_order stays a deterministic flattening
+    assert [t["id"] for t in analyze.topo_order(tasks)] == ["s", "lib", "a", "b"]
+
+
+def test_decompose_accepts_component_library(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rp = _make_paths(tmp_path)
+    rp.app_spec_json.write_text(json.dumps(_VALID_APP_SPEC))
+    tasks = {
+        "tasks": [
+            {"id": "s", "type": "scaffold", "title": "S", "screens": [], "deps": []},
+            {"id": "lib", "type": "component_library", "title": "L", "screens": [], "deps": ["s"]},
+            {"id": "h", "type": "screen", "title": "H", "screens": ["0000"], "deps": ["lib"]},
+        ]
+    }
+    monkeypatch.setattr(analyze.subprocess, "run", _fake_claude("tasks.json", tasks))
+    out = analyze.decompose(rp)
+    saved = json.loads(out.read_text())["tasks"]
+    assert saved[1]["type"] == "component_library"
+    assert saved[2]["deps"] == ["lib"]
 
 
 def test_decompose_requires_app_spec(tmp_path: Path) -> None:

@@ -43,9 +43,9 @@ def test_defaults_match_decisions() -> None:
     assert settings.debug is False
     assert settings.compliance_threshold == 0.95
     assert settings.compliance_soft_floor == 0.80
-    assert settings.compliance_weight_visual == 0.5
+    assert settings.compliance_weight_structure == 0.4
     assert settings.compliance_weight_coverage == 0.3
-    assert settings.compliance_weight_flows == 0.2
+    assert settings.compliance_weight_flows == 0.1
     assert settings.walkthrough_max_screens == 40
     assert settings.walkthrough_max_depth == 6
     assert settings.walkthrough_job_timeout_s == 1200

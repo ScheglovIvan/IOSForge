@@ -144,7 +144,9 @@ def test_task_prompt_wires_fonts_media_and_source() -> None:
     scaffold = claude_gen._task_prompt(
         {"id": "t0", "type": "scaffold", "title": "x", "screens": []}
     )
-    assert "assets/fonts/" in scaffold and "ThemeData.fontFamily" in scaffold
+    # divergent design: fonts come from google_fonts using the substituted families,
+    # not by bundling the original app's .ttf files
+    assert "google_fonts" in scaffold and "design_tokens.font" in scaffold
 
     screen = claude_gen._task_prompt(
         {"id": "t1", "type": "screen", "title": "Splash", "screens": ["0000"]}
@@ -152,3 +154,28 @@ def test_task_prompt_wires_fonts_media_and_source() -> None:
     assert "source/0000.json" in screen
     assert "asset_ref.media_id" in screen
     assert "splash_background" in screen
+
+
+def test_task_prompt_no_ads_toggle() -> None:
+    on = claude_gen._task_prompt({"id": "t", "type": "screen", "title": "x", "screens": []}, True)
+    off = claude_gen._task_prompt({"id": "t", "type": "screen", "title": "x", "screens": []}, False)
+    assert "NO ADS" in on and "google_mobile_ads" in on
+    assert "NO ADS" not in off
+
+
+def test_strip_ads_empties_monetization() -> None:
+    from iosforge.mvp.analyze import _strip_ads
+
+    spec = {
+        "monetization": {
+            "model": "freemium",
+            "ad_networks": [{"name": "AdMob"}],
+            "ad_placements": [{"format": "banner"}],
+            "ads": ["banner bottom"],
+            "packages": [{"name": "Weekly"}],
+        }
+    }
+    _strip_ads(spec)
+    m = spec["monetization"]
+    assert m["ad_networks"] == [] and m["ad_placements"] == [] and m["ads"] == []
+    assert m["packages"] == [{"name": "Weekly"}]  # paywalls/subscriptions preserved

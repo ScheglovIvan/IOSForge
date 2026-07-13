@@ -25,9 +25,32 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+from iosforge.common.config import Settings, get_settings
 from iosforge.common.logging import get_logger
-from iosforge.mvp import handoff, spec_contract
+from iosforge.mvp import design, handoff, spec_contract
 from iosforge.mvp.paths import RunPaths
+
+_NO_ADS_NOTE = """
+
+NO ADS (build policy): this clone ships WITHOUT any advertising. Set
+`monetization.ad_networks`, `monetization.ad_placements` and `monetization.ads`
+to empty. When a screen shows an ad (banner / interstitial / native slot /
+"watch ad" block), describe that screen AS IF THE AD WERE NOT THERE: omit the ad
+entirely and let the remaining content REFLOW to fill the space — never describe
+an empty banner strip, a reserved gap or an ad placeholder, and note in
+`layout_notes` that the ad region collapses. Do NOT reproduce ad creatives you
+see in the screenshots. Keep subscriptions/paywalls (those are not ads).
+"""
+
+
+def _strip_ads(spec: dict[str, object]) -> None:
+    """Deterministically remove all advertising from the spec (no-ads policy)."""
+    mon = spec.get("monetization")
+    if isinstance(mon, dict):
+        mon["ad_networks"] = []
+        mon["ad_placements"] = []
+        mon["ads"] = []
+
 
 log = get_logger("mvp.analyze")
 
@@ -63,8 +86,11 @@ Inputs in this directory:
   `family`, and whether each is a bundled custom font (`file`) or a system font.
 - `media.json` (OPTIONAL): the real media assets present, each with `id`,
   `role` (splash_background | paywall_hero | onboarding | icon | thumbnail | …),
-  `kind`, and `source` (network | bundle | runtime-snapshot). Byte-backed entries
-  have a `path`. This tells you which screens have real background media/video.
+  `kind` (image | video | animation | **audio**), and `source` (network | bundle |
+  runtime-snapshot). Byte-backed entries have a `path`. This tells you which screens
+  have real background media/video AND which sounds the app ships (`kind:"audio"` —
+  often the app's core feature: engine sounds, alerts, SFX). When a media entry has a
+  `screen`/`trigger` it says where/when it plays.
 - `subscriptions.json` (OPTIONAL): OBSERVED StoreKit — `products` (id / price /
   period) and `purchase_attempts`. When non-empty this is the REAL monetization
   catalog; when empty, entitlements may still be in RevenueCat traffic
@@ -87,6 +113,16 @@ Method:
    `layer`. Record real media in `content.content_inventory` and note per-screen
    background media/video by `media.json` `role` (splash_background/paywall_hero)
    — these are what makes the clone look right, so surface them explicitly.
+2c. AUDIO — when `media.json` has any `kind:"audio"` entries, sound is (often) the
+   app's core feature, so model it explicitly. Add `content.audio` = a list of
+   `{ "id": str, "name": str, "role": str, "trigger": str, "path": str,
+   "source": "observed"|"inferred" }` where `trigger` is the screen id or action
+   that plays the sound (e.g. "tap car brand X on the catalog screen",
+   "screen:0003 on appear"). Use the media entry's `screen`/`trigger`/`role`/`url`
+   as ground truth; infer the trigger from the matching screen/UI when the capture
+   did not attribute it (mark such rows `source:"inferred"`). Every audio file that
+   ships MUST appear in `content.audio`; the clone is expected to play the same
+   sounds on the same actions.
 2. Infer the app's identity, domain logic and business model from the UI.
 3. Use web search to research how comparable apps in this category are built
    (features, monetization, content, conventions) and cite sources. If web
@@ -178,6 +214,9 @@ REQUIRED; use [] / {} / "" when a section does not apply, never omit a key):
     "color":   { "primary": {"$value": "#RRGGBB", "$type": "color", "$description": str} },
     "font":    { "body":    {"$value": str, "$type": "fontFamily"} },
     "dimension": { "radius_md": {"$value": "8px", "$type": "dimension"} },
+    "gradient": { "primary": {"$type": "gradient", "$value": {   // only if the UI uses gradients
+      "angle": 135, "stops": [ {"color": "#RRGGBB", "pos": 0.0}, {"color": "#RRGGBB", "pos": 1.0} ]
+    }} },
     "dark_mode": bool,
     "ios_adaptation": [str]
   },
@@ -186,6 +225,8 @@ REQUIRED; use [] / {} / "" when a section does not apply, never omit a key):
     "data_model": [ {"entity": str, "fields": [str], "relations": [str]} ],
     "content_inventory": [str],         // sticker packs / presets / filters / templates / sounds
     "content_to_seed": [ {"item": str, "amount": str, "format": str, "example": str} ],
+    "audio": [ {"id": str, "name": str, "role": str, "trigger": str,
+                "path": str, "source": "observed"} ],   // every kind:"audio" file -> trigger->sound
     "persistence": str                  // local / cloud / offline / sync
   },
   "monetization": {
@@ -251,7 +292,7 @@ Write a single file `tasks.json` in this directory with EXACTLY this schema:
   "tasks": [
     {
       "id": str,
-      "type": "scaffold" | "screen" | "flow" | "state" | "polish",
+      "type": "scaffold" | "component_library" | "screen" | "flow" | "state" | "audio" | "polish",
       "title": str,
       "screens": [str],
       "deps": [str]
@@ -262,11 +303,18 @@ Write a single file `tasks.json` in this directory with EXACTLY this schema:
 Rules:
 1. The FIRST task MUST be a single "scaffold" task (Flutter project + theme +
    routing) with `"deps": []`.
-2. Every "screen" task MUST depend on the scaffold task.
-3. `deps` may only reference ids of tasks defined earlier in the list; the
+2. The SECOND task MUST be a single "component_library" task (shared reusable UI
+   widgets / design system that every screen composes from) depending ONLY on the
+   scaffold task.
+3. Every "screen" task MUST depend on the component_library task (which itself
+   depends on the scaffold) — screens are built ON TOP of the frozen design system.
+4. `deps` may only reference ids of tasks defined earlier in the list; the
    dependency graph MUST be acyclic.
-4. Every task MUST have a unique non-empty `id`, a `type` from the set above,
+5. Every task MUST have a unique non-empty `id`, a `type` from the set above,
    and a `title`.
+6. If `content.audio` is non-empty, add exactly one `"audio"` task ("Audio wiring:
+   bundle sounds + play on triggers", depends on the scaffold and the screens that
+   trigger sound) — the app's sounds are a core feature and must be wired.
 
 Output ONLY the file `tasks.json`. Do not generate any app code.
 """
@@ -313,7 +361,7 @@ def stage_archive_context(paths: RunPaths, ws: Path, *, include_bytes: bool) -> 
     return summary
 
 
-def _prepare_analysis_workspace(paths: RunPaths) -> None:
+def _prepare_analysis_workspace(paths: RunPaths, prompt: str = ANALYZE_PROMPT) -> None:
     """Stage the screenshots, screens.json and the analysis prompt into claude_ws/."""
     paths.claude_ws.mkdir(parents=True, exist_ok=True)
     ws_screens = paths.claude_ws / "screens"
@@ -331,7 +379,7 @@ def _prepare_analysis_workspace(paths: RunPaths) -> None:
         if extra.exists():
             shutil.copy2(extra, paths.claude_ws / extra.name)
     stage_archive_context(paths, paths.claude_ws, include_bytes=False)
-    (paths.claude_ws / "ANALYZE_PROMPT.md").write_text(ANALYZE_PROMPT)
+    (paths.claude_ws / "ANALYZE_PROMPT.md").write_text(prompt)
 
 
 def _prepare_decompose_workspace(paths: RunPaths) -> None:
@@ -469,17 +517,20 @@ def _crawl_screen_ids(screens_json: Path) -> set[str]:
     return {str(s["id"]) for s in screens if isinstance(s, dict) and "id" in s}
 
 
-def analyze(paths: RunPaths, timeout: int = 1800) -> Path:
+def analyze(paths: RunPaths, timeout: int = 1800, settings: Settings | None = None) -> Path:
     """Stage B: derive a validated app_spec.json (+ SPEC.md) from the crawl.
 
     Runs the local Claude CLI (vision + web research), injects provenance and
     ``spec_version``, then enforces the App Spec v3 contract
-    (:func:`iosforge.mvp.spec_contract.validate_spec`) before persisting.
+    (:func:`iosforge.mvp.spec_contract.validate_spec`) before persisting. With
+    ``settings.no_ads`` (default) all advertising is stripped from the result.
     """
+    settings = settings or get_settings()
     bound = log.bind(stage="analyze", run_dir=str(paths.run_dir))
-    _prepare_analysis_workspace(paths)
-    bound.info("analyze.invoking", workdir=str(paths.claude_ws))
-    _run_claude(ANALYZE_PROMPT, paths.claude_ws, timeout, tools=ANALYZE_TOOLS)
+    prompt = ANALYZE_PROMPT + (_NO_ADS_NOTE if settings.no_ads else "")
+    _prepare_analysis_workspace(paths, prompt)
+    bound.info("analyze.invoking", workdir=str(paths.claude_ws), no_ads=settings.no_ads)
+    _run_claude(prompt, paths.claude_ws, timeout, tools=ANALYZE_TOOLS)
 
     produced = paths.claude_ws / "app_spec.json"
     if not produced.exists():
@@ -505,7 +556,12 @@ def analyze(paths: RunPaths, timeout: int = 1800) -> Path:
         screen_count=len(crawl_ids),
     )
 
+    if settings.no_ads:
+        _strip_ads(payload)
     spec = spec_contract.validate_spec(payload)
+    if settings.design_divergence:
+        spec = design.apply_divergence(spec, settings=settings)
+        spec = spec_contract.validate_spec(spec)
     uncovered = spec_contract.uncovered_screens(spec, crawl_ids)
     if uncovered:
         bound.warning("analyze.coverage_gap", uncovered=uncovered, crawled=len(crawl_ids))
@@ -528,13 +584,13 @@ def analyze(paths: RunPaths, timeout: int = 1800) -> Path:
     return paths.app_spec_json
 
 
-def topo_order(tasks: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Return tasks in dependency order (deps before dependents).
+def topo_layers(tasks: list[dict[str, object]]) -> list[list[dict[str, object]]]:
+    """Return tasks grouped into dependency LAYERS (ready-sets).
 
-    Kahn's algorithm. Raises RuntimeError if a task references an unknown
-    dependency id or if the graph contains a cycle. Among tasks that become
-    ready together the original input order is preserved, so the result is
-    deterministic. Shared by the tasks.json acyclic check and the task runner.
+    Kahn's algorithm: layer N contains every task whose deps are all satisfied by
+    layers < N. Raises RuntimeError on an unknown dependency id or a cycle. Order
+    within a layer preserves the input order, so the result is deterministic.
+    Tasks in the same layer are mutually independent (safe to build in parallel).
     """
     by_id: dict[str, dict[str, object]] = {str(t["id"]): t for t in tasks}
     ids = set(by_id)
@@ -548,7 +604,7 @@ def topo_order(tasks: list[dict[str, object]]) -> list[dict[str, object]]:
             raise RuntimeError(f"task {t['id']!r} depends on unknown ids: {sorted(missing)}")
         deps[str(t["id"])] = {str(d) for d in task_deps}
 
-    ordered: list[dict[str, object]] = []
+    layers: list[list[dict[str, object]]] = []
     resolved: set[str] = set()
     remaining = [str(t["id"]) for t in tasks]
     while remaining:
@@ -557,10 +613,20 @@ def topo_order(tasks: list[dict[str, object]]) -> list[dict[str, object]]:
             raise RuntimeError(
                 f"tasks.json dependency graph has a cycle among: {sorted(remaining)}"
             )
+        layers.append([by_id[tid] for tid in ready])
         resolved.update(ready)
-        ordered.extend(by_id[tid] for tid in ready)
         remaining = [tid for tid in remaining if tid not in resolved]
-    return ordered
+    return layers
+
+
+def topo_order(tasks: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Return tasks in dependency order (deps before dependents).
+
+    Deterministic flattening of :func:`topo_layers`. Raises RuntimeError if a task
+    references an unknown dependency id or if the graph contains a cycle. Shared by
+    the tasks.json acyclic check and the task runner.
+    """
+    return [task for layer in topo_layers(tasks) for task in layer]
 
 
 def _validate_tasks(payload: object) -> list[dict[str, object]]:

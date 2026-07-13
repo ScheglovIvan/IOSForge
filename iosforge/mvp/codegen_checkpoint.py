@@ -37,6 +37,13 @@ def _workspace(paths: RunPaths) -> Path:
     return paths.claude_ws / "flutter_app"
 
 
+def _exclude_vcs(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+    """Drop git metadata from the checkpoint archive (parallel screen builds init a repo)."""
+    if ".git" in Path(info.name).parts:
+        return None
+    return info
+
+
 def save(
     storage: Any, job_id: str, paths: RunPaths, completed: set[str], *, work_dir: Path
 ) -> None:
@@ -55,10 +62,12 @@ def save(
             )
         ws = _workspace(paths)
         if ws.exists():
-            arch = shutil.make_archive(str(work_dir / "ckpt_ws"), "gztar", str(ws))
+            arch = work_dir / "ckpt_ws.tar.gz"
+            with tarfile.open(arch, "w:gz") as tf:
+                tf.add(str(ws), arcname=".", filter=_exclude_vcs)
             storage.put(
                 _key(job_id, "workspace.tar.gz"),
-                Path(arch).read_bytes(),
+                arch.read_bytes(),
                 content_type="application/gzip",
             )
     except Exception as exc:  # a checkpoint must never fail the build

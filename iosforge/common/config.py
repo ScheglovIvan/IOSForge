@@ -96,9 +96,15 @@ class Settings(BaseSettings):
     # --- Compliance metric (DECISIONS Q1) — overridable via config, no redeploy ---
     compliance_threshold: float = Field(default=0.95, ge=0.0, le=1.0)
     compliance_soft_floor: float = Field(default=0.80, ge=0.0, le=1.0)
-    compliance_weight_visual: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Anti-clone goal (structure-preserving redesign): the score rewards STRUCTURAL
+    # fidelity (same blocks/placement/navigation) and DIVERGENCE (looks unlike the
+    # source), not visual similarity. `divergence_min` is a hard floor — below it a
+    # screen is a clone risk and keeps iterating even if the weighted score passes.
+    compliance_weight_structure: float = Field(default=0.4, ge=0.0, le=1.0)
     compliance_weight_coverage: float = Field(default=0.3, ge=0.0, le=1.0)
-    compliance_weight_flows: float = Field(default=0.2, ge=0.0, le=1.0)
+    compliance_weight_flows: float = Field(default=0.1, ge=0.0, le=1.0)
+    compliance_weight_divergence: float = Field(default=0.2, ge=0.0, le=1.0)
+    compliance_divergence_min: float = Field(default=0.4, ge=0.0, le=1.0)
     compliance_max_iterations: int = Field(default=3, gt=0)
     # Web screen-similarity verification: after frontend codegen, build the app
     # for web and render each screen in headless Chromium via the canonical preview
@@ -114,6 +120,21 @@ class Settings(BaseSettings):
     web_render_wait_ms: int = Field(default=15000, gt=0)
     web_render_window: str = Field(default="390,844")
     chromium_bin: str = Field(default="")
+    # Structural web verification (Stage VERIFY): static audit of the generated
+    # flutter_app/lib against the screens.json nav graph — nav_audit (missing
+    # screens / dead links / missing edges) + blank_screens heuristic. No runtime
+    # browser, no new deps.
+    verify_web_structural: bool = Field(default=True)
+    # Auto end-of-pipeline hard-gated verify loop (build_web → render → evaluate →
+    # nav_audit → fix-tasks → codegen → re-audit) instead of a single-pass
+    # verify_web. Opt-in — the codegen host needs Flutter web + Chromium.
+    pipeline_web_verify_loop: bool = Field(default=False)
+    # On loop exhaustion with structural gaps still open, end the Job in
+    # NEEDS_INPUT (human decides ship/rework) instead of silently DONE.
+    web_verify_hard_gate: bool = Field(default=True)
+    # Blank-render byte threshold: a rendered screen PNG smaller than this for a
+    # 390x844 window is treated as a near-uniform / blank screen (no image lib).
+    web_blank_max_bytes: int = Field(default=6000, gt=0)
 
     # --- Walkthrough limits (DECISIONS Q3) — placeholders, per-job overridable ---
     walkthrough_max_screens: int = Field(default=40, gt=0)
@@ -146,7 +167,17 @@ class Settings(BaseSettings):
     # Generate the backend-connected Flutter app (flutter_wiring) wired to the
     # provisioned project's web config, alongside the static codegen output.
     generate_wired_app: bool = Field(default=True)
+    # RevenueCat v2 provisioning: one app per clone inside a shared project. The v2
+    # secret key (project-scoped) lives in env (never in code); project_id is the
+    # shared container (e.g. proj…). Empty key/project = provisioning is skipped.
     revenuecat_api_key: str = Field(default="")
+    revenuecat_api_base: str = Field(default="https://api.revenuecat.com/v2")
+    revenuecat_project_id: str = Field(default="")
+    revenuecat_provision: bool = Field(default=True)
+    # Test Store PUBLIC SDK key (test_…): when set, the generated app configures the
+    # SDK with it so purchases are testable via RevenueCat's virtual store WITHOUT an
+    # Apple-signed build. Empty = use the per-clone appl_… key (needs store link).
+    revenuecat_test_store_key: str = Field(default="")
     # --- Media hosting: Cloudflare R2 (S3-compatible) — no Firebase Storage/Blaze.
     # Endpoint + access key + secret live in a gitignored env file referenced by
     # r2_secrets_path (e.g. secrets/r2.env with R2_ENDPOINT / R2_ACCESS_KEY_ID /
@@ -168,6 +199,23 @@ class Settings(BaseSettings):
     github_api_base: str = Field(default="https://api.github.com")
     github_repo_private: bool = Field(default=False)
     github_repo_prefix: str = Field(default="")
+    # CodeMagic Integration stage: import the pushed repo as a CodeMagic app and
+    # commit a codemagic.yaml (iOS). No build/sign/IPA/TestFlight here. Token
+    # (x-auth-token) lives in a gitignored env file (codemagic_token_path,
+    # CODEMAGIC_TOKEN=...). Empty token / off = the stage is skipped.
+    codemagic_integration: bool = Field(default=True)
+    codemagic_token_path: str = Field(default="")
+    codemagic_api_base: str = Field(default="https://api.codemagic.io")
+    codemagic_team_id: str = Field(default="")
+    codemagic_sync_timeout_s: int = Field(default=120, gt=0)
+    # Reference codemagic.yaml: when set to a proven project ("owner/repo") its config
+    # is fetched and reused (substituting only the per-app bundle id). Empty (default) →
+    # the built-in UNSIGNED iOS template (sideload / jailbreak, no Apple signing).
+    codemagic_template_repo: str = Field(default="")
+    codemagic_bundle_prefix: str = Field(default="com.batteam")
+    # Auto-trigger the CodeMagic iOS build at the end of the pipeline (instead of the
+    # manual button). Every run spends CodeMagic minutes; the template is UNSIGNED.
+    codemagic_auto_build: bool = Field(default=True)
     # Seed placeholder CONTENT (series/episodes + tiny dummy videos in Storage) so
     # the generated app is visually reviewable; swap for real content later.
     seed_placeholder_content: bool = Field(default=True)
@@ -178,13 +226,27 @@ class Settings(BaseSettings):
     # screens and emit a structured ad model (networks best-effort + placements).
     # Off by default to save vision tokens; ad frames are always kept/marked.
     analyze_ads: bool = Field(default=False)
+    # Build clones WITHOUT any advertising (owner policy): analyze strips
+    # ad_networks/ad_placements/ads from app_spec and instructs no ad slots;
+    # codegen adds no ad SDKs/widgets. Set False to reproduce the app's ads.
+    no_ads: bool = Field(default=True)
     # Stage 3 codegen orchestration: "claude" = single local Claude CLI task runner;
     # "hermes" = Hermes Agent orchestrates, local Claude CLI executes (Variant A);
     # "cloud" = the local Claude Code agent orchestrates AND builds directly.
     codegen_orchestrator: str = Field(default="claude")
-    # Max concurrent screen-build workers when the Hermes orchestrator parallelizes
-    # the screen layer (worktree-per-task). Caps rate-limit / subscription pressure.
+    # Max concurrent screen-build workers when the orchestrator parallelizes the
+    # screen layer (worktree-per-task). Caps rate-limit / subscription pressure.
     codegen_max_parallel: int = Field(default=4, gt=0)
+    # Design divergence (anti-clone): after analysis, rewrite app_spec design_tokens
+    # into a NEW visual language (hue-rotated palette + gradients + shifted radii)
+    # while preserving structure/navigation. Set False to reproduce a faithful clone.
+    design_divergence: bool = Field(default=True)
+    # Swap captured fonts for similar-but-different families (same typographic class).
+    design_font_substitution: bool = Field(default=True)
+    # Content-level anti-clone: codegen paraphrases user-facing copy (same meaning,
+    # different wording), diverges icon style and drops the source app's brand marks
+    # (logo/wordmark). Photographic content assets are kept. False = verbatim copy.
+    design_content_divergence: bool = Field(default=True)
 
     # --- Admin panel (SPEC §7) — internet-facing behind a TLS reverse proxy ---
     # Secret for signing session ids / CSRF tokens. MUST be set via env in prod.

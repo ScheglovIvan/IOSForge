@@ -45,6 +45,7 @@ class RunPaths:
     spec_md: Path
     handoff_dir: Path
     tasks_json: Path
+    rc_config_json: Path
     apk: Path
     generated_screens_dir: Path
     generated_screens_json: Path
@@ -79,6 +80,7 @@ class RunPaths:
             spec_md=run_dir / "SPEC.md",
             handoff_dir=run_dir / "handoff",
             tasks_json=run_dir / "tasks.json",
+            rc_config_json=run_dir / "rc_config.json",
             apk=run_dir / "generated.apk",
             generated_screens_dir=run_dir / "generated_screens",
             generated_screens_json=run_dir / "generated_screens.json",

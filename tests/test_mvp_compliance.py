@@ -18,7 +18,7 @@ from iosforge.mvp import compliance
 from iosforge.mvp.compliance import ComplianceWeights
 from iosforge.mvp.paths import RunPaths
 
-_WEIGHTS = ComplianceWeights(visual=0.5, coverage=0.3, flows=0.2)
+_WEIGHTS = ComplianceWeights(structure=0.5, coverage=0.3, flows=0.2, divergence=0.0)
 
 
 def test_match_screens_pairs_by_id_with_missing_and_surplus() -> None:
@@ -48,7 +48,7 @@ def test_aggregate_weights_and_pass_status() -> None:
     report = compliance.aggregate(
         judge, matches, weights=_WEIGHTS, threshold=0.95, soft_floor=0.80, iteration=1
     )
-    assert report["visual"] == pytest.approx(0.95)
+    assert report["structure"] == pytest.approx(0.95)
     assert report["coverage"] == pytest.approx(1.0)
     assert report["flows"] == pytest.approx(1.0)
     assert report["compliance_score"] == pytest.approx(0.5 * 0.95 + 0.3 * 1.0 + 0.2 * 1.0)
@@ -61,12 +61,13 @@ def test_aggregate_missing_screen_penalises_visual_and_coverage() -> None:
     report = compliance.aggregate(
         judge, matches, weights=_WEIGHTS, threshold=0.95, soft_floor=0.80, iteration=2
     )
-    assert report["visual"] == pytest.approx(0.5)
+    assert report["structure"] == pytest.approx(0.5)
     assert report["coverage"] == pytest.approx(0.5)
     assert report["screens"][1] == {
         "id": "0001",
         "generated": None,
         "score": 0.0,
+        "divergence": 0.0,
         "diffs": ["screen not rendered in generated app"],
     }
 
@@ -107,8 +108,71 @@ def test_diffs_to_tasks_targets_below_threshold_and_missing() -> None:
     assert [t["id"] for t in tasks] == ["fix-1-0001", "fix-1-0002"]
     assert all(t["type"] == "fix" for t in tasks)
     assert tasks[0]["screens"] == ["0001"]
-    assert tasks[0]["title"] == "Fix screen 0001: button missing"
-    assert tasks[1]["title"].startswith("Fix screen 0002:")
+    assert tasks[0]["title"] == "Fix screen 0001 layout: button missing"
+    assert tasks[1]["title"].startswith("Fix screen 0002 layout:")
+
+
+_DIVERGE_WEIGHTS = ComplianceWeights(
+    structure=0.4, coverage=0.3, flows=0.1, divergence=0.2, divergence_min=0.4
+)
+
+
+def test_aggregate_structure_and_divergence_scores() -> None:
+    judge = {
+        "screens": [
+            {"id": "0000", "structure_score": 1.0, "divergence_score": 0.9, "diffs": []},
+            {"id": "0001", "structure_score": 0.8, "divergence_score": 0.7, "diffs": ["moved"]},
+        ],
+        "flows_score": 1.0,
+    }
+    matches = [("0000", "g0"), ("0001", "g1")]
+    report = compliance.aggregate(
+        judge, matches, weights=_DIVERGE_WEIGHTS, threshold=0.95, soft_floor=0.80, iteration=1
+    )
+    assert report["structure"] == pytest.approx(0.9)
+    assert report["divergence"] == pytest.approx(0.8)
+    assert report["screens"][0]["divergence"] == pytest.approx(0.9)
+    assert report["compliance_score"] == pytest.approx(
+        0.4 * 0.9 + 0.3 * 1.0 + 0.1 * 1.0 + 0.2 * 0.8
+    )
+
+
+def test_aggregate_flags_clone_risk_below_divergence_floor() -> None:
+    judge = {
+        "screens": [{"id": "0000", "structure_score": 1.0, "divergence_score": 0.1, "diffs": []}],
+        "flows_score": 1.0,
+    }
+    report = compliance.aggregate(
+        judge,
+        [("0000", "g0")],
+        weights=_DIVERGE_WEIGHTS,
+        threshold=0.5,
+        soft_floor=0.3,
+        iteration=1,
+    )
+    assert report["compliance_score"] >= 0.5  # would otherwise "pass"
+    assert report["status"] == "clone_risk"
+
+
+def test_diffs_to_tasks_emits_diverge_when_below_floor() -> None:
+    report = {
+        "threshold": 0.95,
+        "divergence": 0.2,
+        "divergence_min": 0.4,
+        "screens": [
+            {"id": "0000", "score": 1.0, "divergence": 0.1, "diffs": []},
+            {"id": "0001", "score": 1.0, "divergence": 0.9, "diffs": []},
+        ],
+    }
+    tasks = compliance.diffs_to_tasks(report, iteration=2)["tasks"]
+    assert [t["id"] for t in tasks] == ["diverge-2-0000"]
+    assert tasks[0]["type"] == "diverge"
+
+
+def test_corrective_diverge_prompt_forbids_layout_change() -> None:
+    prompt = compliance._corrective_prompt({"type": "diverge", "screens": ["0001"]})
+    assert "Do NOT change the LAYOUT" in prompt
+    assert "design system" in prompt
 
 
 def _make_paths(tmp_path: Path) -> RunPaths:
@@ -138,7 +202,7 @@ def test_evaluate_uses_judge_json_and_writes_report(
     report = compliance.evaluate(
         rp, 1, weights=_WEIGHTS, threshold=0.95, soft_floor=0.80, history=[]
     )
-    assert report["visual"] == pytest.approx(0.9)
+    assert report["structure"] == pytest.approx(0.9)
     assert report["compliance_score"] == pytest.approx(0.5 * 0.9 + 0.3 * 1.0 + 0.2 * 0.8)
     assert report["status"] == "soft_pass"
     assert rp.selftest_report_json.exists()
@@ -297,7 +361,7 @@ def test_refine_per_screen_gate_waits_for_weakest(
         threshold=0.80,
         soft_floor=0.80,
         max_iterations=5,
-        weights=ComplianceWeights(visual=0.5, coverage=0.3, flows=0.2),
+        weights=ComplianceWeights(structure=0.5, coverage=0.3, flows=0.2, divergence=0.0),
         timeout=1,
         per_screen=True,
     )
@@ -325,7 +389,7 @@ def test_refine_overall_gate_stops_early(tmp_path: Path, monkeypatch: pytest.Mon
         threshold=0.80,
         soft_floor=0.80,
         max_iterations=5,
-        weights=ComplianceWeights(visual=0.5, coverage=0.3, flows=0.2),
+        weights=ComplianceWeights(structure=0.5, coverage=0.3, flows=0.2, divergence=0.0),
         timeout=1,
         per_screen=False,
     )
@@ -384,7 +448,7 @@ def test_refine_freeze_locks_passed_screens(
         threshold=0.80,
         soft_floor=0.80,
         max_iterations=5,
-        weights=ComplianceWeights(visual=0.5, coverage=0.3, flows=0.2),
+        weights=ComplianceWeights(structure=0.5, coverage=0.3, flows=0.2, divergence=0.0),
         timeout=1,
         per_screen=True,
         freeze_passed=True,
