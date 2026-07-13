@@ -17,7 +17,9 @@ def test_job_state_members() -> None:
         "WALKTHROUGH": "walkthrough",
         "ANALYSIS": "analysis",
         "CODEGEN": "codegen",
+        "VERIFY": "verify",
         "GITHUB_UPLOAD": "github_upload",
+        "CODEMAGIC_INTEGRATION": "codemagic_integration",
         "DELIVERY": "delivery",
         "DONE": "done",
         "NEEDS_INPUT": "needs_input",
@@ -35,7 +37,9 @@ def test_stage_members() -> None:
         "WALKTHROUGH": "walkthrough",
         "ANALYSIS": "analysis",
         "CODEGEN": "codegen",
+        "VERIFY": "verify",
         "GITHUB_UPLOAD": "github_upload",
+        "CODEMAGIC_INTEGRATION": "codemagic_integration",
         "DELIVERY": "delivery",
     }
     assert {m.name: m.value for m in Stage} == expected

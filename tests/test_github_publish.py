@@ -64,3 +64,51 @@ def test_publish_orchestrates_repo_and_git(tmp_path: Path, monkeypatch: pytest.M
     assert verbs == ["init", "config", "config", "add", "commit", "push"]
     # the token never appears in the recorded (sanitized) command list
     assert not any("ghp_xyz" in " ".join(c) for c in git_calls if c[0] != "push")
+
+
+def test_clean_project_prunes_artifacts_and_keeps_assets(tmp_path: Path) -> None:
+    from iosforge.mvp.github_publish import _clean_project
+
+    proj = tmp_path / "app"
+    (proj / "build" / "web").mkdir(parents=True)
+    (proj / ".dart_tool").mkdir()
+    (proj / "assets" / "media").mkdir(parents=True)
+    (proj / "assets" / "media" / "clip.mp4").write_bytes(b"x")
+    (proj / "lib").mkdir()
+    (proj / "lib" / "main.dart").write_text("void main() {}")
+    (proj / "app_spec.json").write_text("{}")
+    (proj / "TASK.md").write_text("internal")
+    (proj / "pubspec.yaml").write_text("name: app")
+
+    _clean_project(proj)
+
+    assert not (proj / "build").exists()
+    assert not (proj / ".dart_tool").exists()
+    assert not (proj / "app_spec.json").exists()
+    assert not (proj / "TASK.md").exists()
+    assert (proj / "assets" / "media" / "clip.mp4").exists()  # embedded assets kept
+    assert (proj / "lib" / "main.dart").exists()
+    assert (proj / ".gitignore").read_text().find("build/") != -1
+
+
+def test_push_existing_force_pushes_new_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proj = tmp_path / "app"
+    (proj / "lib").mkdir(parents=True)
+    (proj / "pubspec.yaml").write_text("name: app")
+    tokf = tmp_path / "github.env"
+    tokf.write_text("GITHUB_TOKEN=ghp_zzz\n")
+    s = Settings(github_token_path=str(tokf))
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        github_publish, "_run_git", lambda args, cwd, token_url=None: calls.append(args)
+    )
+    res = github_publish.push_existing(s, proj, full_name="me/app", message="Rework v2")
+
+    assert res["url"] == "https://github.com/me/app"
+    verbs = [c[0] for c in calls]
+    assert verbs == ["init", "config", "config", "add", "commit", "push"]
+    assert calls[-1][:2] == ["push", "--force"]  # snapshot force-push
+    assert calls[-2] == ["commit", "-m", "Rework v2"]

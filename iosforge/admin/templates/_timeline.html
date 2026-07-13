@@ -3,7 +3,7 @@
   <tbody>
   {% for row in timeline %}
     <tr>
-      <td>{{ row.stage.value }}</td>
+      <td>{{ 'Verify (web)' if row.stage.value == 'verify' else row.stage.value }}</td>
       <td>{{ row.started_at.strftime('%H:%M:%S') if row.started_at else '—' }}</td>
       <td>{{ row.finished_at.strftime('%H:%M:%S') if row.finished_at else '—' }}</td>
       <td>{{ (row.duration_ms ~ ' ms') if row.duration_ms is not none else '—' }}</td>
@@ -44,4 +44,8 @@
 {% endif %}
 {% if gen and gen.github_repo_url %}<div class="ok">Push completed successfully. Repository:
   <a href="{{ gen.github_repo_url }}" target="_blank" rel="noopener">{{ gen.github_repo_url }}</a></div>{% endif %}
+{% if gen and gen.codemagic and gen.codemagic.get('application_id') %}<div class="ok">CodeMagic integration completed —
+  <a href="https://codemagic.io/app/{{ gen.codemagic.get('application_id') }}" target="_blank" rel="noopener">{{ gen.codemagic.get('project_name') }}</a>
+  (app id {{ gen.codemagic.get('application_id') }}, branch {{ gen.codemagic.get('default_branch') }})</div>{% endif %}
+{% if job.state.value == 'needs_input' %}<div style="background:#fff6e5;color:#8a5a00;padding:10px 12px;border-radius:6px;margin:10px 0;">Needs input — structural web verification finished with open gaps. Review the audit and choose to ship or rework.</div>{% endif %}
 {% if job.state.value == 'failed' %}<div class="err">Job failed — see the stage error above.</div>{% endif %}

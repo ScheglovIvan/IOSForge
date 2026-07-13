@@ -112,6 +112,9 @@ class Job(Base):
     codegen_tasks: Mapped[list[CodegenTask]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
+    codemagic_builds: Mapped[list[CodemagicBuild]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
     timeline: Mapped[list[StageTimeline]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
@@ -275,6 +278,9 @@ class GenerationResult(Base):
     selftest_report: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     # Public GitHub repository the generated project was pushed to (GitHub Upload stage).
     github_repo_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # CodeMagic Integration identifiers (application_id / repository_id / repository_url /
+    # default_branch / project_name) saved for later build stages.
+    codemagic: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     prompt_version_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("prompt_versions.id", ondelete="SET NULL"), nullable=True
     )
@@ -283,6 +289,34 @@ class GenerationResult(Base):
 
     job: Mapped[Job] = relationship(back_populates="generation_results")
     prompt_version: Mapped[PromptVersion | None] = relationship()
+
+
+class CodemagicBuild(Base):
+    """One CodeMagic iOS build of a job (status / logs / artifacts, live-polled)."""
+
+    __tablename__ = "codemagic_builds"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    build_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    build_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    application_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    workflow_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    branch: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    started_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    finished_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    artifacts: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    log_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[dt.datetime] = _ts_col()
+    updated_at: Mapped[dt.datetime] = _ts_col(onupdate=True)
+
+    job: Mapped[Job] = relationship(back_populates="codemagic_builds")
 
 
 class CodegenTask(Base):
@@ -404,6 +438,7 @@ __all__ = [
     "AuditLog",
     "Candidate",
     "CodegenTask",
+    "CodemagicBuild",
     "DataArchiveArtifact",
     "GenerationResult",
     "Job",

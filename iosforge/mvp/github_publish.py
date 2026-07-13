@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,79 @@ log = get_logger("mvp.github_publish")
 
 _COMMITTER_NAME = "IOSForge"
 _COMMITTER_EMAIL = "bot@iosforge.dev"
+
+# Build/tool artifacts and any IOSForge orchestration leftovers that must never
+# reach the published repo — only a clean, buildable Flutter project ships.
+_PRUNE = (
+    "build",
+    ".dart_tool",
+    ".flutter-plugins",
+    ".flutter-plugins-dependencies",
+    ".packages",
+    ".claude",
+    "claude_ws",
+    "handoff",
+    "TASK.md",
+    "PROMPT.md",
+    "ANALYZE_PROMPT.md",
+    "DECOMPOSE_PROMPT.md",
+    "CONSTITUTION.md",
+    "AGENTS.md",
+    "app_spec.json",
+    "tasks.json",
+    "screens.json",
+    "network_index.json",
+    "selftest_report.json",
+    "corrective_tasks.json",
+)
+
+_GITIGNORE = """\
+# Flutter / Dart
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# iOS / Xcode
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+**/*.mode1v3
+**/*.pbxuser
+**/xcuserdata/
+
+# Android
+android/.gradle/
+android/local.properties
+**/*.keystore
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+*.log
+"""
+
+
+def _clean_project(project_dir: Path) -> None:
+    """Prune build artifacts + any orchestration leftovers; ensure a Flutter .gitignore.
+
+    Only a clean, buildable Flutter project ships — build/, .dart_tool/, caches, logs
+    and IOSForge internal files are removed before ``git add``. Legit ``assets/`` (fonts
+    and media embedded into the app) are preserved.
+    """
+    for name in _PRUNE:
+        target = project_dir / name
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+        elif target.exists():
+            target.unlink()
+    (project_dir / ".gitignore").write_text(_GITIGNORE)
 
 
 class GitHubPublishError(RuntimeError):
@@ -107,6 +181,7 @@ def publish(
     full_name: str = repo["full_name"]
     push_url = clone_url.replace("https://", f"https://x-access-token:{token}@")
 
+    _clean_project(project_dir)
     _run_git(["init", "-b", "main"], project_dir)
     _run_git(["config", "user.name", _COMMITTER_NAME], project_dir)
     _run_git(["config", "user.email", _COMMITTER_EMAIL], project_dir)
@@ -116,3 +191,27 @@ def publish(
 
     log.info("github_publish.done", repo=full_name, url=html_url)
     return {"name": repo["name"], "url": html_url, "full_name": full_name}
+
+
+def push_existing(
+    settings: Settings, project_dir: Path, *, full_name: str, message: str
+) -> dict[str, str]:
+    """Push a reworked project as a fresh snapshot commit to an EXISTING repo."""
+    token = load_token(settings)
+    if not token:
+        raise GitHubPublishError("no GitHub token (set github_token_path / GITHUB_TOKEN)")
+    if not project_dir.is_dir():
+        raise GitHubPublishError(f"project dir not found: {project_dir}")
+    push_url = f"https://x-access-token:{token}@github.com/{full_name}.git"
+
+    _clean_project(project_dir)
+    _run_git(["init", "-b", "main"], project_dir)
+    _run_git(["config", "user.name", _COMMITTER_NAME], project_dir)
+    _run_git(["config", "user.email", _COMMITTER_EMAIL], project_dir)
+    _run_git(["add", "-A"], project_dir)
+    _run_git(["commit", "-m", message[:200] or "Rework"], project_dir)
+    _run_git(["push", "--force", push_url, "main"], project_dir, token_url=push_url)
+
+    url = f"https://github.com/{full_name}"
+    log.info("github_publish.pushed_existing", repo=full_name, url=url)
+    return {"url": url, "full_name": full_name}

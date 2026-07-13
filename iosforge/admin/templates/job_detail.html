@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Job · IOSForge Admin{% endblock %}
 {% block head %}
-  {% if job.state.value not in ['done', 'failed', 'cancelled'] %}
+  {% set build_running = build and build.status not in ['finished', 'failed', 'canceled', 'cancelled', 'timeout', 'skipped'] %}
+  {% if job.state.value not in ['done', 'failed', 'cancelled'] or build_running %}
   <meta http-equiv="refresh" content="3">
   {% endif %}
 {% endblock %}
@@ -23,4 +24,89 @@
   <h3>Timeline</h3>
   {% include "_timeline.html" %}
 </div>
+
+{% if gen %}
+<div class="card">
+  <h3>Rework (fix bugs / apply changes)</h3>
+  <p style="color:#667;font-size:13px;">Version {{ job.result_version }}. Describe the bugs
+    or paste an updated spec — the existing app is edited in place, re-pushed to the same repo
+    and rebuilt. Runs only when the pipeline is idle.</p>
+  {% set busy = job.state.value not in ['done', 'failed', 'cancelled'] %}
+  <form method="post" action="/jobs/{{ job.id }}/rework">
+    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+    <textarea name="instructions" rows="6" style="width:100%;box-sizing:border-box;"
+      placeholder="e.g. On the Sounds tab the slot cards overflow; the paywall Continue button does nothing; German locale is missing on Settings → Language."
+      {{ 'disabled' if busy else '' }}></textarea>
+    <div style="margin-top:8px;">
+      <button class="btn" type="submit" {{ 'disabled' if busy else '' }}>Apply rework</button>
+      {% if busy %}<span style="color:#667;font-size:13px;">&nbsp;Pipeline is busy…</span>{% endif %}
+    </div>
+  </form>
+</div>
+{% endif %}
+
+{% if gen %}
+<div class="card">
+  <h3>Re-verify (structural web)</h3>
+  <p style="color:#667;font-size:13px;">Static audit of the generated Flutter app against the
+    navigation graph — missing screens, dead links, missing edges and blank renders — with a
+    fix loop. Runs only when the pipeline is idle.</p>
+  {% set busy = job.state.value not in ['done', 'failed', 'cancelled', 'needs_input'] %}
+  {% if gen.selftest_report and gen.selftest_report.structural %}
+  {% set s = gen.selftest_report.structural %}
+  <p style="font-size:13px;">Last structural audit:
+    <strong>{{ 'ok' if s.ok else 'gaps' }}</strong>
+    &nbsp;·&nbsp; missing screens {{ (s.missing_screens or []) | length }}
+    &nbsp;·&nbsp; blank {{ (s.blank_screens or []) | length }}
+    &nbsp;·&nbsp; dead links {{ (s.dead_links or []) | length }}
+    &nbsp;·&nbsp; missing edges {{ (s.missing_edges or []) | length }}</p>
+  {% endif %}
+  <form method="post" action="/jobs/{{ job.id }}/verify-web">
+    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+    <button class="btn" type="submit" {{ 'disabled' if busy else '' }}>Re-verify (structural web)</button>
+    {% if busy %}<span style="color:#667;font-size:13px;">&nbsp;Pipeline is busy…</span>{% endif %}
+  </form>
+</div>
+{% endif %}
+
+{% if can_ios_build %}
+<div class="card">
+  <h3>iOS Build (CodeMagic)</h3>
+  {% set running = build and build.status not in ['finished', 'failed', 'canceled', 'cancelled', 'timeout', 'skipped'] %}
+  <form method="post" action="/jobs/{{ job.id }}/codemagic-build" style="margin-bottom:10px;">
+    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+    <button class="btn" type="submit" {{ 'disabled' if running else '' }}>Run iOS build</button>
+    {% if running %}<span style="color:#667;font-size:13px;">&nbsp;A build is in progress…</span>{% endif %}
+  </form>
+  {% if build %}
+  <table>
+    <tr><th>Status</th><td><strong>{{ build.status }}</strong>{% if running %} …{% endif %}</td></tr>
+    <tr><th>Build number</th><td>{{ build.build_number if build.build_number is not none else '—' }}</td></tr>
+    <tr><th>Build ID</th><td><code>{{ build.build_id or '—' }}</code></td></tr>
+    <tr><th>Started</th><td>{{ build.started_at or '—' }}</td></tr>
+    <tr><th>Finished</th><td>{{ build.finished_at or '—' }}</td></tr>
+    <tr><th>Duration</th><td>{{ (build.duration_ms // 1000 ~ ' s') if build.duration_ms else '—' }}</td></tr>
+  </table>
+  {% if build.status in ['failed', 'timeout'] and build.message %}
+  <div class="err" style="margin-top:8px;">Reason: {{ build.message }}</div>
+  {% endif %}
+  <h4 style="margin-top:14px;">Artifacts</h4>
+  {% if build.artifacts %}
+  <ul>
+    {% for a in build.artifacts %}
+    <li>{{ a.get('name') }} {% if a.get('size') %}({{ (a.get('size') // 1024) }} KB){% endif %}
+      &nbsp;<a class="btn" href="/jobs/{{ job.id }}/codemagic-build/artifact?i={{ loop.index0 }}">Download</a></li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p style="color:#667;">{{ 'No artifacts produced.' if not running else 'Waiting for artifacts…' }}</p>
+  {% endif %}
+  <p style="margin-top:10px;">
+    <a class="btn" href="/jobs/{{ job.id }}/codemagic-build/logs" target="_blank">View / download logs</a>
+  </p>
+  {% else %}
+  <p style="color:#667;">No build yet — press “Run iOS build”.</p>
+  {% endif %}
+</div>
+{% endif %}
 {% endblock %}

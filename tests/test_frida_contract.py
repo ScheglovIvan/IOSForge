@@ -423,3 +423,24 @@ def test_media_source_capability_validates() -> None:
     m["capabilities"]["media_source"] = ["network", "bundle", "runtime-snapshot"]
     m["counts"].update({"media_bundle": 76, "media_network": 4, "media_runtime": 11})
     assert fc.validate_manifest(m)["schema_version"] == "1.0"
+
+
+def test_audio_media_entry_validates() -> None:
+    # a bundled sound (the core feature of audio apps) validates as a media entry
+    items = [
+        {
+            "id": "a1",
+            "source": "bundle",
+            "kind": "audio",
+            "path": "media/deadbeef.mp3",
+            "sha256": "deadbeef",
+            "bytes": 44100,
+            "role": "car_brand_sound",
+            "screen": "0003",
+            "request_id": None,
+        }
+    ]
+    assert len(fc.validate_media(items)) == 1
+    # and it flows through the full archive validation as media
+    summary = fc.validate_archive(manifest=_manifest(), screens=_screens(), media=items)
+    assert summary["media"] == 1
