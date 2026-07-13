@@ -161,12 +161,56 @@ Rules:
   clone ships ad-free. If you spot a leftover ad slot or an empty gap where an ad used to
   be, remove it and let the layout collapse/reflow so no gap remains. Paywalls/subscriptions
   are fine.
-
+- REAL FUNCTIONALITY: when a reported item is a decorative stub (fake button, static map,
+  mock data, frozen clock, a permission "asked" by a plain button), replace it with the
+  real implementation per the REAL FUNCTIONALITY note below.
+{_REAL_FUNCTIONALITY_NOTE}
 Output ONLY changes under `flutter_app/`. Do not run the app.
 """
 
 
-_AUGMENT_PROMPT = """\
+_REAL_FUNCTIONALITY_NOTE = """
+REAL FUNCTIONALITY — NO DECORATIVE STUBS: reproduce the original app's BEHAVIOUR, not
+just its looks. Every control must do real work; never ship a fake button, a dead toggle,
+a hardcoded value dressed up as live data, or a screen that merely imitates a feature.
+- PRINCIPLE: if a feature exists in the original app AND is reachable through PUBLIC iOS
+  APIs, implement it for real. If it is genuinely NOT possible (private API, App Store
+  policy, or a paid Apple entitlement/token you don't have), do NOT silently fake it —
+  instead (a) implement the CLOSEST working thing the public APIs allow, and (b) record the
+  feature, the exact limitation and your fallback in `CAPABILITIES.md` at the app root, and
+  show an honest short note in the UI where that limited feature lives.
+- REAL PERMISSIONS: use the `permission_handler` package and trigger the ACTUAL iOS system
+  dialog at the natural moment (never a plain button that only pretends to ask). For EVERY
+  permission you use, add its Info.plist usage-description to `ios_permissions.json` at the
+  app root — a flat JSON object mapping the plist key to a short human reason, e.g.:
+  {"NSLocationWhenInUseUsageDescription":"Show your position on the map",
+   "NSAppleMusicUsageDescription":"Play from your Apple Music library",
+   "NSBluetoothAlwaysUsageDescription":"Connect to your car",
+   "NSMotionUsageDescription":"..."}. The iOS build injects these into Info.plist; a
+  permission requested without its key here CRASHES on device. Keep the file in sync.
+- REAL APIs / DEVICE DATA — add these packages to pubspec in the SCAFFOLD task as the app
+  needs them (all build unsigned, no API key required):
+  * Location  -> `geolocator` (real GPS); request permission first via permission_handler.
+  * Maps      -> `apple_maps_flutter` (native Apple MapKit — NO API key). NEVER a static
+                 image or a coloured box. If location is denied, request it, then centre
+                 the real map on the user once granted.
+  * Battery   -> `battery_plus` (real level + charging state).
+  * Network   -> `connectivity_plus` (real reachability: wifi / cellular / offline).
+  * Device / time -> `device_info_plus`; clock via `DateTime.now()` on a ticking `Timer`
+                 (format with `intl`) — a real updating clock, never a frozen string.
+  * Apple Music -> request authorization (permission_handler `Permission.mediaLibrary`
+                 and/or an `SKCloudServiceController` platform channel); then show the
+                 user's REAL library / now-playing and control the system music player.
+                 Full catalog streaming needs a MusicKit developer token + an active Apple
+                 Music subscription — if you can't obtain one, DOCUMENT it in
+                 `CAPABILITIES.md` and fall back to the system Music player / the user's own
+                 library (the closest working thing), not a mock playlist.
+- Any status bar / dashboard readout (battery, time, signal, speed, etc.) MUST bind to the
+  live values above, not mock-ups.
+"""
+
+
+_AUGMENT_PROMPT = f"""\
 You are INCREMENTALLY completing an existing Flutter app under `flutter_app/` — NOT
 regenerating it. It was generated in a previous pass and works; ADD only what is
 MISSING, reusing and preserving all existing working code.
@@ -190,7 +234,12 @@ Do a GAP ANALYSIS and add ONLY the missing pieces:
    `Purchases.getOfferings()` (`offerings.current`), `purchasePackage`, `restorePurchases`
    and unlock premium when `customerInfo.entitlements.active` is non-empty.
 4. Anything else in `app_spec.json` clearly not yet implemented (audio triggers, etc.).
-
+5. REAL FUNCTIONALITY: find features that were shipped as decorative STUBS (fake buttons,
+   dead toggles, static maps, mock data, frozen clocks) and replace them with the real
+   implementation per the REAL FUNCTIONALITY note below — wire real iOS APIs, real
+   permissions and live device data; keep `ios_permissions.json` and `CAPABILITIES.md`
+   in sync.
+{_REAL_FUNCTIONALITY_NOTE}
 Rules: smallest additive change; keep it compiling; do NOT change the divergent design
 or restructure working screens; do NOT add ads. Output ONLY changes under `flutter_app/`.
 """
@@ -346,7 +395,11 @@ Do exactly the work this task describes and nothing more:
   fall back to colors/fonts you see in the screenshots.
   You MAY add `video_player` (for .mp4 backgrounds), `lottie` (for Lottie `.json`)
   and `audioplayers` (for `kind:"audio"` sounds) to pubspec ONLY if archive media
-  needs them; otherwise stay on the Flutter SDK + material widgets.
+  needs them. ALSO add the capability packages the app's real features require per the
+  REAL FUNCTIONALITY note below (`permission_handler`, `geolocator`, `apple_maps_flutter`,
+  `battery_plus`, `connectivity_plus`, `device_info_plus`, `intl`) and create
+  `ios_permissions.json` at the app root listing the Info.plist usage strings for every
+  permission the app will request. Otherwise stay on the Flutter SDK + material widgets.
   The app MUST support deep-link navigation `iosforge://screen/<id>` that routes
   directly to the screen whose id matches `<id>` (the same ids used in
   `app_spec.json` / `screens.json`). Add an `<intent-filter>` with
@@ -408,7 +461,7 @@ Do exactly the work this task describes and nothing more:
   play each sound on its mapped `trigger` (e.g. `AudioPlayer().play(AssetSource(...))`
   on the tap/screen the trigger names). Wire EVERY `content.audio` entry — the clone
   must play the same sounds on the same actions as the original.
-{no_ads_line}{content_divergence_note}{_RC_NOTE}
+{no_ads_line}{content_divergence_note}{_REAL_FUNCTIONALITY_NOTE}{_RC_NOTE}
 Output ONLY changes under `flutter_app/`. Do not run the app.
 """
 

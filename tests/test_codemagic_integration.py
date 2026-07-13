@@ -143,6 +143,30 @@ def test_rendered_codemagic_yaml_is_valid_yaml() -> None:
     assert "ios-unsigned" in doc["workflows"]
 
 
+def test_builtin_template_injects_ios_permissions() -> None:
+    # real iOS permissions crash without NS*UsageDescription in Info.plist; the build must
+    # apply the generator's ios_permissions.json after flutter create regenerated ios/.
+    import ast
+
+    import yaml
+
+    doc = yaml.safe_load(cm._render_yaml(None, "com.acme.demo", "Demo App"))
+    steps = doc["workflows"]["ios-unsigned"]["scripts"]
+    names = [s["name"] for s in steps]
+    assert "Inject iOS permission usage descriptions" in names
+    # runs after flutter create (Scaffold) and before pub get so Info.plist exists
+    assert names.index("Inject iOS permission usage descriptions") > names.index(
+        "Scaffold platform folders"
+    )
+    assert names.index("Inject iOS permission usage descriptions") < names.index(
+        "Get Flutter packages"
+    )
+    inject = next(s for s in steps if s["name"].startswith("Inject"))["script"]
+    assert "ios_permissions.json" in inject
+    body = inject.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    ast.parse(body)  # embedded PlistBuddy driver must be valid python
+
+
 def test_builtin_template_has_identity_step_with_placeholders() -> None:
     y = cm._CODEMAGIC_YAML
     assert "Set display name and Android identity" in y

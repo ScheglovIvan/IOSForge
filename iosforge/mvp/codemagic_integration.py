@@ -65,6 +65,32 @@ workflows:
             || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string __APP_NAME__" ios/Runner/Info.plist
           sed -i '' 's/applicationId "[^"]*"/applicationId "__BUNDLE_ID__"/' android/app/build.gradle || true
           sed -i '' 's/android:label="[^"]*"/android:label="__APP_NAME__"/' android/app/src/main/AndroidManifest.xml || true
+      - name: Inject iOS permission usage descriptions
+        script: |
+          # Real iOS permissions crash at runtime without their NS*UsageDescription in
+          # Info.plist. The generator emits ios_permissions.json (a flat {plist_key: reason}
+          # object, plus optional array values like UIBackgroundModes); apply each here after
+          # flutter create regenerated ios/. No file => nothing to do.
+          if [ -f ios_permissions.json ]; then
+            python3 - <<'PY'
+          import json, subprocess
+          PLIST = "ios/Runner/Info.plist"
+          def buddy(cmd):
+              return subprocess.run(["/usr/libexec/PlistBuddy", "-c", cmd, PLIST]).returncode
+          data = json.load(open("ios_permissions.json"))
+          for key, value in data.items():
+              if isinstance(value, list):
+                  buddy(f"Delete :{key}")
+                  buddy(f"Add :{key} array")
+                  for i, item in enumerate(value):
+                      buddy(f"Add :{key}:{i} string {item}")
+              else:
+                  text = str(value)
+                  if buddy(f"Set :{key} {text}") != 0:
+                      buddy(f"Add :{key} string {text}")
+          print("applied", len(data), "iOS permission key(s)")
+          PY
+          fi
       - name: Get Flutter packages
         script: flutter pub get
       - name: Install CocoaPods
