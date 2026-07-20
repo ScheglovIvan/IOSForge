@@ -1,8 +1,8 @@
-"""Generate the admin/backend deliverable (Firebase + Rowy + RevenueCat + Stream).
+"""Generate the admin/backend deliverable (Firebase + Rowy + Apphud + Stream).
 
 Emitted alongside the Flutter client when ``app_spec.backend.admin_panel_needed``
 is true. Deterministic (no secrets, no network): derives a Firestore schema from
-``content.data_model``, RevenueCat products from ``monetization.packages``, a Rowy
+``content.data_model``, Apphud products from ``monetization.packages``, a Rowy
 table config, security-rules and seed skeletons, and a PROVISION runbook. Actually
 creating the Firebase project (provision mode) is a separate credentialed step.
 """
@@ -134,7 +134,7 @@ def _rowy_config(collections: dict[str, dict[str, str]]) -> dict[str, Any]:
     }
 
 
-def _revenuecat_products(spec: dict[str, Any]) -> dict[str, Any]:
+def _apphud_products(spec: dict[str, Any]) -> dict[str, Any]:
     packages = spec.get("monetization", {}).get("packages", []) or []
     products = []
     for p in packages:
@@ -153,8 +153,8 @@ def _revenuecat_products(spec: dict[str, Any]) -> dict[str, Any]:
             }
         )
     return {
-        "entitlements": ["pro"],
-        "offerings": [{"identifier": "default", "packages": [p["identifier"] for p in products]}],
+        "placement": "main",
+        "paywall": {"identifier": "main", "products": [p["identifier"] for p in products]},
         "products": products,
     }
 
@@ -259,7 +259,7 @@ def generate_admin(
 
     (out_dir / "firestore").mkdir(parents=True, exist_ok=True)
     (out_dir / "rowy").mkdir(parents=True, exist_ok=True)
-    (out_dir / "revenuecat").mkdir(parents=True, exist_ok=True)
+    (out_dir / "apphud").mkdir(parents=True, exist_ok=True)
     (out_dir / "seed").mkdir(parents=True, exist_ok=True)
     (out_dir / "config").mkdir(parents=True, exist_ok=True)
 
@@ -271,13 +271,16 @@ def generate_admin(
     (out_dir / "rowy" / "rowy.config.json").write_text(
         json.dumps(_rowy_config(collections), indent=2, ensure_ascii=False)
     )
-    (out_dir / "revenuecat" / "products.json").write_text(
-        json.dumps(_revenuecat_products(spec), indent=2, ensure_ascii=False)
+    (out_dir / "apphud" / "products.json").write_text(
+        json.dumps(_apphud_products(spec), indent=2, ensure_ascii=False)
     )
-    (out_dir / "revenuecat" / "extension.md").write_text(
-        "# RevenueCat + Firebase\n\nInstall the official RevenueCat Firebase Extension to sync "
-        "subscriber entitlements into Firestore (`customers/{uid}`). Configure products from "
-        "`products.json` in the RevenueCat dashboard and map them to the `pro` entitlement.\n"
+    (out_dir / "apphud" / "setup.md").write_text(
+        "# Apphud setup\n\nApphud has no provisioning API — create the app, its in-app "
+        "products (from `products.json`) and a paywall/placement in the Apphud dashboard, "
+        "then point the app's `apphud_config.json` `placement` at that placement. Configure "
+        "the Server-to-Server webhook (Apphud → Integrations) to the deployed `apphudWebhook` "
+        "function with the `X-Apphud-Token` secret so premium status syncs into Firestore "
+        "(`users/{uid}`).\n"
     )
     (out_dir / "config" / "remote_config.template.json").write_text(
         json.dumps(
@@ -303,7 +306,7 @@ def generate_admin(
             "- `admob.config.json` — placeholder AdMob app ids + one ad unit per placement.\n"
             "- One `ad_units` entry per `monetization.ad_placements` from the App Spec.\n"
             "- Frequency is served from Remote Config (`ads_frequency_interstitial`).\n"
-            "- Ads are disabled for the RevenueCat `pro` entitlement "
+            "- Ads are disabled when the user has Apphud premium access "
             "(`ads_disabled_for_pro`).\n"
             "- `mediation.detected_networks` is best-effort from screen creatives; the exact "
             "mediation SDK requires APK static analysis (not performed).\n"
@@ -336,12 +339,12 @@ def generate_admin(
     (out_dir / "README.md").write_text(
         f"# {app_name} — Admin & Backend deliverable\n\n"
         "Stack: **Firebase** (data/auth/storage/functions/push/analytics) + **Rowy** "
-        "(content admin) + **RevenueCat** (subscriptions) "
+        "(content admin) + **Apphud** (subscriptions) "
         + ("+ **Cloudflare Stream** (video)" if has_video else "")
         + ".\n\n"
         "- `firestore/` — collections schema, security rules, indexes.\n"
         "- `rowy/` — Rowy table config (operator admin UI).\n"
-        "- `revenuecat/` — products + Firebase Extension notes.\n"
+        "- `apphud/` — products + dashboard/webhook setup notes.\n"
         + ("- `stream/` — video delivery notes.\n" if has_video else "")
         + ("- `ads/` — AdMob config + placements + mediation notes.\n" if has_ads else "")
         + "- `config/` — Remote Config template.\n"
@@ -355,8 +358,8 @@ def generate_admin(
         "2. Enable Firestore, Auth, Storage, Cloud Functions, FCM.\n"
         "3. Deploy `firestore/firestore.rules` and `firestore/indexes.json`.\n"
         "4. Point Rowy at the project and import `rowy/rowy.config.json`.\n"
-        "5. Install the RevenueCat Firebase Extension; create products from "
-        "`revenuecat/products.json`.\n"
+        "5. In the Apphud dashboard create the app, products from "
+        "`apphud/products.json` and a paywall/placement; wire the S2S webhook.\n"
         + (
             "6. Set up Cloudflare Stream and a signed-URL Cloud Function (see `stream/`).\n"
             if has_video

@@ -11,7 +11,6 @@ from iosforge.mvp import build_profile as bp
 def _settings(**over: Any) -> Settings:
     base: dict[str, Any] = {
         "codemagic_bundle_prefix": "com.batteam",
-        "revenuecat_test_store_key": "",
     }
     base.update(over)
     return Settings(**base)
@@ -22,30 +21,20 @@ def test_default_profile_is_test_with_derived_bundle_and_spec_name() -> None:
     assert ident.profile == "test"
     assert ident.app_name == "Sounds for CarPlay"
     assert ident.bundle_id == "com.batteam.soundsforcarplay"
-    assert ident.use_test_store is False  # no test store key set
+    assert ident.sandbox is True  # test profile → Apphud sandbox mode
 
 
-def test_test_profile_uses_test_store_when_key_present() -> None:
-    ident = bp.resolve_identity(
-        {}, {"app_name": "X"}, _settings(revenuecat_test_store_key="test_K")
-    )
-    assert ident.profile == "test"
-    assert ident.use_test_store is True
-
-
-def test_real_profile_uses_overrides_and_app_store_mode() -> None:
+def test_real_profile_uses_overrides_and_production_mode() -> None:
     meta = {
         "build_profile": "real",
         "override_bundle_id": "com.acme.demo",
         "override_app_name": "Demo App",
     }
-    ident = bp.resolve_identity(
-        meta, {"app_name": "Ignored"}, _settings(revenuecat_test_store_key="test_K")
-    )
+    ident = bp.resolve_identity(meta, {"app_name": "Ignored"}, _settings())
     assert ident.profile == "real"
     assert ident.bundle_id == "com.acme.demo"  # exact override, not derived
     assert ident.app_name == "Demo App"
-    assert ident.use_test_store is False  # real never uses the test store
+    assert ident.sandbox is False  # real profile → Apphud production mode
 
 
 def test_real_profile_without_override_derives_bundle() -> None:

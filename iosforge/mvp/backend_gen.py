@@ -3,8 +3,8 @@
 Emitted into the ``admin/`` deliverable when the app needs a backend. Unlike the
 static admin scaffold, this is **real, deployable TypeScript**: server-enforced
 wallet/unlock (Firestore transactions the client cannot tamper with), reward
-grants with caps, a signed video-URL resolver, and a RevenueCat webhook that
-syncs subscription entitlements into ``users/{uid}``. Requires Blaze to deploy.
+grants with caps, a signed video-URL resolver, and an Apphud webhook that
+syncs subscription status into ``users/{uid}``. Requires Blaze to deploy.
 
 Deterministic (no LLM): collection names come from ``collection_prefix`` (multi-
 tenant) and are embedded in ``src/config.ts`` so functions read the right paths.
@@ -133,18 +133,22 @@ export const signedVideoUrl = onCall(async (req) => {
   return { url: String(ep.videoUrl ?? "") };
 });
 
-/** RevenueCat webhook: sync subscriber entitlement into users/{uid}. */
-export const revenueCatWebhook = onRequest(async (req, res) => {
-  if (req.get("Authorization") !== "Bearer " + C.revenueCatSecret) {
+/** Apphud webhook: sync subscription status into users/{uid}. */
+export const apphudWebhook = onRequest(async (req, res) => {
+  if (req.get("X-Apphud-Token") !== C.apphudSecret) {
     res.status(401).send("unauthorized");
     return;
   }
-  const event = (req.body?.event ?? {}) as any;
-  const uid = String(event.app_user_id ?? "");
-  if (!uid) { res.status(400).send("no app_user_id"); return; }
-  const pro = ["INITIAL_PURCHASE", "RENEWAL", "PRODUCT_CHANGE", "UNCANCELLATION"].includes(String(event.type));
+  const body = (req.body ?? {}) as any;
+  const uid = String(body.user_id ?? body.app_user_id ?? "");
+  if (!uid) { res.status(400).send("no user_id"); return; }
+  const name = String(body.name ?? body.event ?? "");
+  const pro = [
+    "subscription_started", "subscription_renewed", "subscription_reactivated",
+    "subscription_product_changed", "trial_started", "non_renewing_purchase",
+  ].includes(name);
   await db.collection(C.users).doc(uid).set(
-    { proStatus: pro, proExpiry: event.expiration_at_ms ?? null }, { merge: true },
+    { proStatus: pro, proExpiry: body.expires_at ?? null }, { merge: true },
   );
   res.status(200).send("ok");
 });
@@ -160,7 +164,7 @@ def _config_ts(prefix: str) -> str:
         "series": f"{prefix}Series",
         "transactions": f"{prefix}Transaction",
         "rewardDailyCap": 500,
-        "revenueCatSecret": "SET_ME_REVENUECAT_WEBHOOK_SECRET",
+        "apphudSecret": "SET_ME_APPHUD_WEBHOOK_SECRET",
     }
     return "export const C = " + json.dumps(cfg, indent=2) + " as const;\n"
 

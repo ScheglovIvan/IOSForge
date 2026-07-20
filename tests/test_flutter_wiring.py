@@ -27,7 +27,7 @@ def test_generate_app_wires_backend(tmp_path: Path) -> None:
         "firebase_auth",
         "cloud_functions",
         "video_player",
-        "purchases_flutter",
+        "apphud",
         "google_mobile_ads",
         "flutter_riverpod",
     ):

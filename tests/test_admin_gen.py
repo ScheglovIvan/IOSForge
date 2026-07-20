@@ -1,4 +1,4 @@
-"""Admin/backend deliverable generation (Firebase + Rowy + RevenueCat + Stream)."""
+"""Admin/backend deliverable generation (Firebase + Rowy + Apphud + Stream)."""
 
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ def test_generate_admin_video_app(tmp_path: Path) -> None:
     assert "match /User/{uid}" in rules  # user docs are owner-scoped
     assert "allow read, write: if false;" in rules  # deny-by-default catch-all
 
-    products = json.loads((out / "revenuecat" / "products.json").read_text())
+    products = json.loads((out / "apphud" / "products.json").read_text())
     idents = [p["identifier"] for p in products["products"]]
     assert "weekly_pro" in idents
     sub = next(p for p in products["products"] if p["identifier"] == "weekly_pro")

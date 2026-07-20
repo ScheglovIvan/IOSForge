@@ -2,7 +2,7 @@
 
 Unlike the static-UI codegen, this writes a runnable app wired to the provisioned
 Firebase project: anonymous auth, a Firestore-backed catalog (the seeded
-placeholder series/episodes), a video player for the dummy clips, a RevenueCat
+placeholder series/episodes), a video player for the dummy clips, an Apphud
 paywall and a coin wallet that calls the server ``unlockEpisode`` function. The
 collection prefix + Firebase web config are baked in so the app connects to the
 live project and shows the placeholder content for visual review.
@@ -34,7 +34,7 @@ dependencies:
   go_router: ^14.2.0
   video_player: ^2.9.0
   google_mobile_ads: ^5.1.0
-  purchases_flutter: ^8.0.0
+  apphud: ^3.2.0
 flutter:
   uses-material-design: true
 """
@@ -300,7 +300,7 @@ class PaywallScreen extends StatelessWidget {
             const SizedBox(height: 12),
             const Text('Unlock all episodes, no ads, 1080p'),
             const SizedBox(height: 16),
-            FilledButton(onPressed: () {}, child: const Text('Subscribe (RevenueCat)')),
+            FilledButton(onPressed: () {}, child: const Text('Subscribe (Apphud)')),
           ]),
         ),
       );

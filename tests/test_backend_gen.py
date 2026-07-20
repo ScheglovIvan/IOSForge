@@ -28,7 +28,7 @@ def test_generate_backend_emits_deployable_functions(tmp_path: Path) -> None:
     assert fns is not None
 
     index = (fns / "src" / "index.ts").read_text()
-    for fn in ("unlockEpisode", "grantReward", "signedVideoUrl", "revenueCatWebhook"):
+    for fn in ("unlockEpisode", "grantReward", "signedVideoUrl", "apphudWebhook"):
         assert f"export const {fn}" in index
     assert "runTransaction" in index  # server-enforced wallet, not client-tamperable
 

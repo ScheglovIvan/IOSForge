@@ -145,8 +145,8 @@ def render_constitution(spec: dict[str, Any]) -> str:
             " `admin/ads/flutter/INTEGRATION.md`): banners embedded in-screen, interstitials on"
             " the given triggers (respect `ads_frequency_interstitial` from Remote Config),"
             " rewarded ads on the reward actions.",
-            "- **Disable ads for Pro**: bind `AdService.adsEnabled` to the inverse of the"
-            " RevenueCat `pro` entitlement (`ads_disabled_for_pro`).",
+            "- **Disable ads for Pro**: bind `AdService.adsEnabled` to the inverse of"
+            " Apphud premium access (`ads_disabled_for_pro`).",
         ]
     out += [
         "",

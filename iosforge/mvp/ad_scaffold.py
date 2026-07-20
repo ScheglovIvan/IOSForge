@@ -3,7 +3,7 @@
 Emitted alongside the app when monetization has ads. NOT agentic — a ready drop-in
 ``AdService`` + config + platform snippets driven by ``monetization.ad_placements``,
 so the generated client (or a developer) wires ads at the discovered placements and
-disables them for the RevenueCat ``pro`` entitlement.
+disables them when the user has Apphud premium access.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ import 'ad_config.dart';
 
 /// Central ad service (google_mobile_ads). Initialize in `main()`, then call the
 /// show* methods at the placements listed in INTEGRATION.md. Set [adsEnabled] to
-/// false when the user holds the RevenueCat `pro` entitlement.
+/// false when the user has Apphud premium access.
 class AdService {
   AdService._();
   static final AdService instance = AdService._();
@@ -147,7 +147,7 @@ def _integration_md(placements: list[dict[str, Any]]) -> str:
         "3. Drop `ad_service.dart` + `ad_config.dart` under `lib/services/` and replace the",
         "   placeholder unit ids with the real ones from `admin/ads/admob.config.json`.",
         "4. In `main()`: `await AdService.instance.init();`",
-        "5. Bind the RevenueCat `pro` entitlement: `AdService.instance.adsEnabled = !user.isPro;`",
+        "5. Bind Apphud premium: `adsEnabled = !(await Apphud.hasPremiumAccess());` on AdService.",
         "",
         "## Placements (from the analysis)",
     ]

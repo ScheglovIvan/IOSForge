@@ -8,12 +8,12 @@ migration):
 - ``override_app_name``: display name (empty → the analysed ``app_spec.app_name``).
 
 ``resolve_identity`` folds these + settings into a single :class:`BuildIdentity`
-that the pipeline threads into RevenueCat provisioning and the CodeMagic build so
-the bundle id / display name / store mode stay consistent everywhere.
+that the pipeline threads into Apphud config and the CodeMagic build so the bundle
+id / display name / store mode stay consistent everywhere.
 
-test  → RevenueCat Test Store (virtual purchases, unsigned build).
-real  → per-clone App Store RC app, real bundle id/name written into the binary;
-        the build stays UNSIGNED until Apple signing credentials are configured.
+test  → Apphud sandbox mode (StoreKit sandbox purchases, unsigned build).
+real  → real bundle id/name written into the binary, Apphud production mode; the
+        build stays UNSIGNED until Apple signing credentials are configured.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ class BuildIdentity:
     profile: str
     app_name: str
     bundle_id: str
-    use_test_store: bool
+    sandbox: bool
 
 
 def resolve_identity(
@@ -55,7 +55,5 @@ def resolve_identity(
     override_bundle = str(meta.get("override_bundle_id") or "").strip()
     bundle_id = override_bundle or f"{settings.codemagic_bundle_prefix}.{_bundle_slug(app_name)}"
 
-    use_test_store = profile == _TEST and bool(settings.revenuecat_test_store_key)
-    return BuildIdentity(
-        profile=profile, app_name=app_name, bundle_id=bundle_id, use_test_store=use_test_store
-    )
+    sandbox = profile == _TEST
+    return BuildIdentity(profile=profile, app_name=app_name, bundle_id=bundle_id, sandbox=sandbox)
