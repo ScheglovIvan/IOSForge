@@ -152,7 +152,7 @@ class Settings(BaseSettings):
     # Analysis-only mode: run screen-filter + analyze, then finish (DONE) —
     # skips decompose/codegen/compliance. For inspecting the App Spec cheaply.
     pipeline_stop_after_analyze: bool = Field(default=False)
-    # Admin/backend deliverable (Firebase + Rowy + RevenueCat + Stream): emit an
+    # Admin/backend deliverable (Firebase + Rowy + Apphud + Stream): emit an
     # admin/ scaffold alongside the app when app_spec.backend.admin_panel_needed.
     # provision_admin (opt-in) would create the live Firebase project — needs creds.
     generate_admin: bool = Field(default=True)
@@ -172,17 +172,45 @@ class Settings(BaseSettings):
     # Generate the backend-connected Flutter app (flutter_wiring) wired to the
     # provisioned project's web config, alongside the static codegen output.
     generate_wired_app: bool = Field(default=True)
-    # RevenueCat v2 provisioning: one app per clone inside a shared project. The v2
-    # secret key (project-scoped) lives in env (never in code); project_id is the
-    # shared container (e.g. proj…). Empty key/project = provisioning is skipped.
-    revenuecat_api_key: str = Field(default="")
-    revenuecat_api_base: str = Field(default="https://api.revenuecat.com/v2")
-    revenuecat_project_id: str = Field(default="")
-    revenuecat_provision: bool = Field(default=True)
-    # Test Store PUBLIC SDK key (test_…): when set, the generated app configures the
-    # SDK with it so purchases are testable via RevenueCat's virtual store WITHOUT an
-    # Apple-signed build. Empty = use the per-clone appl_… key (needs store link).
-    revenuecat_test_store_key: str = Field(default="")
+    # Apphud subscriptions. Apphud has no provisioning REST API (apps/products/
+    # paywalls/placements are configured once in the Apphud dashboard), so the
+    # pipeline only injects the public SDK key (app_…) + the spec's product ids into
+    # the generated app; the SDK auto-detects sandbox vs production via StoreKit.
+    # The key lives in env (never in code). Empty key = payment wiring is skipped.
+    apphud_api_key: str = Field(default="")
+    apphud_provision: bool = Field(default=True)
+    # SDK key (appstr_…/app_…) may instead live in a gitignored env file
+    # (APPHUD_API_KEY=…); per-job override goes in Job.source_app_metadata so each
+    # clone gets its own app's key. Path is relative to the worker CWD.
+    apphud_secrets_path: str = Field(default="secrets/apphud.env")
+    # Placement identifier configured in Apphud (Product Hub > Placements) that the
+    # paywall loads via Apphud.placements(); the derived per-clone default is used
+    # when empty so codegen always has a lookup key.
+    apphud_placement: str = Field(default="")
+    # --- Attribution (MMP): Tenjin. Traffic sources (Meta/Google/TikTok/ASA and any
+    # other network) are connected in the Tenjin dashboard — nothing about them is
+    # baked into the app, so a new source needs no rebuild. Only the iOS SDK key is
+    # injected; it lives in a gitignored env file (TENJIN_API_KEY=…). Per-job override
+    # goes in Job.source_app_metadata. Empty key = attribution wiring is skipped.
+    attribution_provision: bool = Field(default=True)
+    tenjin_api_key: str = Field(default="")
+    tenjin_secrets_path: str = Field(default="secrets/tenjin.env")
+    # Consolidated SKAdNetworkItems plist downloaded from the MMP dashboard (the
+    # authoritative, maintained list — public registries go stale). Merged into
+    # Info.plist at build time so a network added later still attributes without an
+    # app update. Missing file = the merge step is a no-op.
+    skadnetwork_ids_path: str = Field(default="configs/skadnetwork_ids.plist")
+    # App Store listing screenshots: the planner studies the source listing for
+    # composition only and picks which of OUR rendered screens backs each claim.
+    # Stock backdrops come from Pexels (commercial use, no attribution required).
+    store_assets_timeout_s: int = Field(default=900, gt=0)
+    pexels_secrets_path: str = Field(default="secrets/pexels.env")
+    # ATT prompt copy (Info.plist NSUserTrackingUsageDescription). Without ATT consent
+    # attribution degrades to SKAN campaign-level aggregates (no keyword/creative).
+    att_usage_description: str = Field(
+        default="Allow tracking so we can measure which ads bring people here "
+        "and keep improving the app for you."
+    )
     # --- Media hosting: Cloudflare R2 (S3-compatible) — no Firebase Storage/Blaze.
     # Endpoint + access key + secret live in a gitignored env file referenced by
     # r2_secrets_path (e.g. secrets/r2.env with R2_ENDPOINT / R2_ACCESS_KEY_ID /

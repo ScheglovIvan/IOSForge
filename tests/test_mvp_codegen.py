@@ -159,8 +159,8 @@ def test_augment_prompt_targets_missing_pieces() -> None:
     p = claude_gen._AUGMENT_PROMPT
     assert "GAP ANALYSIS" in p
     assert "add only the missing pieces" in p.lower()
-    assert "rc_config.json" in p
-    assert "Purchases.configure" in p
+    assert "apphud_config.json" in p
+    assert "Apphud.start" in p
     assert "do NOT rewrite" in p or "do NOT change the divergent design" in p
 
 
@@ -168,7 +168,7 @@ def test_augment_adds_over_existing_app(tmp_path: Path, monkeypatch: pytest.Monk
     rp = RunPaths.create(tmp_path)
     rp.screens_json.write_text(json.dumps({"package": "com.x", "screens": []}))
     rp.app_spec_json.write_text(json.dumps({"app_name": "X", "screens": [{"id": "0000"}]}))
-    rp.rc_config_json.write_text(json.dumps({"sdk_key": "test_K", "mode": "test_store"}))
+    rp.apphud_config_json.write_text(json.dumps({"sdk_key": "app_K", "mode": "sandbox"}))
     # an existing generated app to augment
     (rp.flutter_app / "lib").mkdir(parents=True, exist_ok=True)
     (rp.flutter_app / "pubspec.yaml").write_text("name: app")
@@ -176,7 +176,7 @@ def test_augment_adds_over_existing_app(tmp_path: Path, monkeypatch: pytest.Monk
 
     def _fake_run(workspace: Path, prompt: str, *, timeout: int, tlog: object) -> int:
         assert "GAP ANALYSIS" in prompt  # augment prompt, not from-scratch
-        assert (workspace / "rc_config.json").exists()  # rc_config staged
+        assert (workspace / "apphud_config.json").exists()  # apphud_config staged
         ws_app = workspace / "flutter_app"
         (ws_app / "lib" / "paywall.dart").write_text("// added")
         return 0
@@ -188,14 +188,67 @@ def test_augment_adds_over_existing_app(tmp_path: Path, monkeypatch: pytest.Monk
     assert (out / "lib" / "main.dart").exists()  # existing preserved
 
 
-def test_task_prompt_includes_revenuecat_wiring() -> None:
+def test_prompts_update_stale_sdk_keys_instead_of_skipping() -> None:
+    # the SDK key is baked into the app as a constant and rotates per app; an
+    # "add only if not already configured" prompt leaves the OLD key in place when the
+    # operator pastes a new one, silently reporting to the wrong Apphud/Tenjin account.
+    augment = claude_gen._AUGMENT_PROMPT
+    assert "ALREADY wired" in augment
+    assert "UPDATE" in augment
+    assert "does not already configure" not in augment  # the skip-wording is the bug
+
+    task = claude_gen._task_prompt(
+        {"id": "t", "type": "scaffold", "title": "Scaffold", "screens": []}
+    )
+    assert "ALREADY WIRED" in task
+    assert "single source of truth" in task
+
+
+def test_prompts_match_vendor_sdk_requirements() -> None:
+    # gaps found by auditing our wiring against the Apphud / Tenjin docs — each of these
+    # silently breaks a feature the operator expects to work.
+    task = claude_gen._task_prompt(
+        {"id": "t", "type": "scaffold", "title": "Scaffold", "screens": []}
+    )
+    # Apphud: without paywallShown there are NO paywall analytics and no A/B tests
+    assert "Apphud.paywallShown" in task
+    # trials must be gated on real eligibility, not advertised blindly
+    assert "checkEligibilityForIntroductoryOffer" in task
+    # Tenjin requires initialize+connect on every launch, not just the first
+    assert "EVERY app" in task
+    # Apphud Connections is a paid feature, so revenue is reported app-side to Tenjin —
+    # exactly once per purchase, or ROAS per creative is inflated
+    assert "subscriptionWithStoreKit" in task
+    assert "EXACTLY ONCE per successful purchase" in task
+    # codegen picked the deprecated init(apiKey:) once; the build pins a newer plugin
+    # where that can be gone, so the correct method must be named explicitly
+    assert "TenjinSDK.instance.initialize(sdkKey:" in task
+    assert "DEPRECATED" in task
+    assert "Apphud.paywallShown" in claude_gen._AUGMENT_PROMPT
+
+
+def test_task_prompt_includes_attribution_wiring() -> None:
     prompt = claude_gen._task_prompt(
         {"id": "t", "type": "scaffold", "title": "Scaffold", "screens": []}
     )
-    assert "rc_config.json" in prompt
-    assert "purchases_flutter" in prompt
-    assert "Purchases.configure" in prompt
-    assert "entitlements.active" in prompt
+    assert "attribution_config.json" in prompt
+    assert "tenjin_plugin" in prompt
+    assert "TenjinSDK.instance.connect" in prompt
+    assert "requestTrackingAuthorization" in prompt
+    # the IDFA must reach Apphud or purchases never tie back to a campaign
+    assert "setAdvertisingIdentifier" in prompt
+    # traffic sources live in the dashboard — never baked into the binary
+    assert "NEVER hardcode an ad network" in prompt
+
+
+def test_task_prompt_includes_apphud_wiring() -> None:
+    prompt = claude_gen._task_prompt(
+        {"id": "t", "type": "scaffold", "title": "Scaffold", "screens": []}
+    )
+    assert "apphud_config.json" in prompt
+    assert "apphud" in prompt
+    assert "Apphud.start" in prompt
+    assert "hasPremiumAccess" in prompt
 
 
 def test_content_divergence_toggle_in_screen_prompt() -> None:

@@ -75,14 +75,15 @@
   {% set profile = meta.get('build_profile', 'test') %}
   {% set bs_busy = job.state.value not in ['done', 'failed', 'cancelled', 'needs_input'] %}
   <p style="color:#667;font-size:13px;">
-    <strong>Test</strong> = RevenueCat Test Store (virtual purchases, unsigned build).
-    <strong>Real</strong> = your bundle id + name written into the binary, RevenueCat in App
-    Store mode (still unsigned until Apple signing is configured). Saving rebuilds the app.</p>
+    <strong>Test</strong> = Apphud sandbox mode (StoreKit sandbox, unsigned build).
+    <strong>Real</strong> = your bundle id + name written into the binary, Apphud in
+    production mode (still unsigned until Apple signing is configured). Saving rebuilds
+    the app.</p>
   <form method="post" action="/jobs/{{ job.id }}/build-settings">
     <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
     <p>
       <label><input type="radio" name="build_profile" value="test"
-        {{ 'checked' if profile != 'real' else '' }}> Test (RevenueCat Test Store)</label>
+        {{ 'checked' if profile != 'real' else '' }}> Test (Apphud sandbox)</label>
       &nbsp;&nbsp;
       <label><input type="radio" name="build_profile" value="real"
         {{ 'checked' if profile == 'real' else '' }}> Real (custom bundle id / name)</label>
@@ -94,6 +95,19 @@
       <input type="text" name="bundle_id" value="{{ meta.get('override_bundle_id', '') }}"
         placeholder="e.g. com.acme.speakercleaner" pattern="[A-Za-z0-9.]+"
         style="width:100%;box-sizing:border-box;"></label></p>
+    <p><label>Apphud SDK key<br>
+      <input type="text" name="apphud_api_key" value="{{ meta.get('apphud_api_key', '') }}"
+        placeholder="appstr_… (App settings → Authentication center)"
+        pattern="[A-Za-z0-9_\-]+" style="width:100%;box-sizing:border-box;"></label>
+      <span style="color:#667;font-size:12px;">Apphud issues one key per app — paste this
+        app&#39;s own key. Empty = the shared key from the server secrets file.</span></p>
+    <p><label>Tenjin SDK key (attribution)<br>
+      <input type="text" name="tenjin_api_key" value="{{ meta.get('tenjin_api_key', '') }}"
+        placeholder="32-char key (Configure → App &amp; SDK → SDK Keys)"
+        pattern="[A-Za-z0-9]+" style="width:100%;box-sizing:border-box;"></label>
+      <span style="color:#667;font-size:12px;">Also one key per app. Traffic sources are
+        connected in the Tenjin dashboard — no rebuild needed to add one.
+        Empty = attribution SDK is not wired in.</span></p>
     <button class="btn" type="submit" {{ 'disabled' if bs_busy else '' }}>Save &amp; rebuild</button>
     {% if bs_busy %}<span style="color:#667;font-size:13px;">&nbsp;Pipeline is busy…</span>{% endif %}
   </form>
@@ -136,6 +150,33 @@
   </p>
   {% else %}
   <p style="color:#667;">No build yet — press “Run iOS build”.</p>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if gen %}
+<div class="card">
+  <h3>App Store screenshots</h3>
+  <p style="color:#667;font-size:13px;">
+    Renders the listing at 1290&times;2796 from this app&#39;s own generated screens, in the
+    app&#39;s palette. The source listing is studied for composition only — copy and screens
+    are ours, and no screen is used to claim a feature the app does not have.</p>
+  <form method="post" action="/jobs/{{ job.id }}/store-assets">
+    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+    <button class="btn" type="submit">Generate screenshots</button>
+    {% if store_slides %}<span style="color:#667;font-size:13px;">&nbsp;Re-running replaces
+      the current set.</span>{% endif %}
+  </form>
+  {% if store_slides %}
+  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;">
+    {% for key in store_slides %}
+    <a href="/jobs/{{ job.id }}/artifacts/object?key={{ key }}" target="_blank">
+      <img src="/jobs/{{ job.id }}/artifacts/object?key={{ key }}"
+           style="width:132px;border-radius:8px;border:1px solid #d5d8de;display:block;"></a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p style="color:#667;margin-top:10px;">Nothing rendered yet.</p>
   {% endif %}
 </div>
 {% endif %}

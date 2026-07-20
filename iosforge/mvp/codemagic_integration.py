@@ -46,7 +46,7 @@ workflows:
         script: flutter create --platforms=ios,android .
       - name: Set iOS deployment target 13.0
         script: |
-          # RevenueCat / purchases_flutter use Swift concurrency (iOS 13+); the
+          # Apphud uses StoreKit 2 / Swift concurrency (iOS 13+); the
           # flutter-create default (12.0) fails to compile. Force 13.0 in the Podfile
           # platform AND inside post_install so EVERY pod target is bumped before build.
           sed -i '' "s/^# *platform :ios.*/platform :ios, '13.0'/" ios/Podfile || true
@@ -91,13 +91,32 @@ workflows:
           print("applied", len(data), "iOS permission key(s)")
           PY
           fi
-      - name: Pin RevenueCat SDK
+      - name: Pin SDK versions
         script: |
-          # purchases_flutter < 8 fails to compile on current Xcode with
-          # "'SubscriptionPeriod' is ambiguous". Codegen sometimes writes an older
-          # constraint from the source app; force a known-good one at build time so no
-          # regeneration can reintroduce the break. No-op if the package isn't used.
-          sed -i '' -E "s/^([[:space:]]*purchases_flutter:).*/\\1 ^8.0.0/" pubspec.yaml || true
+          # Force known-good constraints at build time so no regeneration can pin an
+          # incompatible version of the subscription / attribution SDKs. No-op if unused.
+          sed -i '' -E "s/^([[:space:]]*apphud:).*/\\1 ^3.2.0/" pubspec.yaml || true
+          sed -i '' -E "s/^([[:space:]]*tenjin_plugin:).*/\\1 ^1.2.0/" pubspec.yaml || true
+      - name: Merge SKAdNetwork ad network ids
+        script: |
+          # A network whose SKAdNetworkIdentifier is absent from Info.plist gets ZERO SKAN
+          # attribution until the app ships again. The consolidated list is maintained in
+          # the MMP dashboard and staged next to the app; no file => nothing to do.
+          if [ -f skadnetwork_ids.plist ]; then
+            python3 - <<'PY'
+          import plistlib
+          INFO = "ios/Runner/Info.plist"
+          with open("skadnetwork_ids.plist", "rb") as f:
+              items = plistlib.load(f).get("SKAdNetworkItems") or []
+          if items:
+              with open(INFO, "rb") as f:
+                  info = plistlib.load(f)
+              info["SKAdNetworkItems"] = items
+              with open(INFO, "wb") as f:
+                  plistlib.dump(info, f)
+          print("merged", len(items), "SKAdNetwork id(s)")
+          PY
+          fi
       - name: Get Flutter packages
         script: flutter pub get
       - name: Install CocoaPods

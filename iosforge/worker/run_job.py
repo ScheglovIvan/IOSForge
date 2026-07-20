@@ -542,6 +542,8 @@ def build_frontend(self, job_id: str) -> str:
     """
     from iosforge.mvp import (
         analyze,
+        apphud_provision,
+        attribution,
         build_profile,
         claude_gen,
         codegen,
@@ -550,7 +552,6 @@ def build_frontend(self, job_id: str) -> str:
         compliance,
         frida_ingest,
         github_publish,
-        revenuecat_provision,
     )
     from iosforge.mvp.paths import RunPaths
 
@@ -613,24 +614,41 @@ def build_frontend(self, job_id: str) -> str:
                     app_name=ident.app_name,
                 )
 
-                # RevenueCat: provision one app per clone (+ products/entitlement/
-                # offering) and inject its public SDK key into codegen. Best-effort —
-                # a failure never blocks the build.
-                rc_config = revenuecat_provision.provision(
+                # Apphud: derive the product ids + placement for this clone and inject
+                # the public SDK key into codegen (Apphud has no provisioning API — the
+                # dashboard owns app/products). Best-effort — never blocks the build.
+                apphud_config = apphud_provision.provision(
                     spec_data,
                     settings=settings,
                     bundle_id=ident.bundle_id,
                     app_name=ident.app_name,
-                    use_test_store=ident.use_test_store,
+                    sandbox=ident.sandbox,
+                    api_key=(job.source_app_metadata or {}).get("apphud_api_key"),
                 )
-                if rc_config:
-                    paths.rc_config_json.write_text(json.dumps(rc_config, indent=2))
+                if apphud_config:
+                    paths.apphud_config_json.write_text(json.dumps(apphud_config, indent=2))
                     log.info(
-                        "build_frontend.revenuecat_provisioned",
+                        "build_frontend.apphud_configured",
                         job_id=job_id,
-                        app_id=rc_config.get("app_id"),
-                        bundle_id=rc_config.get("bundle_id"),
-                        products=len(rc_config.get("products", [])),
+                        bundle_id=apphud_config.get("bundle_id"),
+                        mode=apphud_config.get("mode"),
+                        products=len(apphud_config.get("products", [])),
+                    )
+
+                # Attribution (Tenjin): only the SDK key is injected — traffic sources are
+                # connected in the Tenjin dashboard, so a new source needs no rebuild.
+                attribution_config = attribution.provision(
+                    settings=settings,
+                    api_key=(job.source_app_metadata or {}).get("tenjin_api_key"),
+                )
+                if attribution_config:
+                    paths.attribution_config_json.write_text(
+                        json.dumps(attribution_config, indent=2)
+                    )
+                    log.info(
+                        "build_frontend.attribution_configured",
+                        job_id=job_id,
+                        provider=attribution_config.get("provider"),
                     )
 
                 stage_row = _start_stage(db, job, Stage.CODEGEN, JobState.CODEGEN)
@@ -782,6 +800,11 @@ def build_frontend(self, job_id: str) -> str:
                     gen.compliance_score = report.get("compliance_score")
                     gen.selftest_report = {**report, "mode": "frontend_only", "verify": "web_loop"}
                     db.commit()
+
+                # ATT copy + the SKAdNetwork list must ride along into the repo so the
+                # build merges them into Info.plist (a missing network id = no SKAN).
+                if attribution_config:
+                    attribution.stage_ios_assets(settings, paths.flutter_app, attribution_config)
 
                 # --- GitHub Upload stage: push the project to a new public repo ---
                 gh_result: dict[str, str] | None = None
@@ -1065,19 +1088,20 @@ def rework_frontend(self, job_id: str, instructions: str = "", augment: bool = F
 
     Hydrates the existing ``flutter_app`` (+ archive context, app_spec, screens) from
     storage, then either applies ``instructions`` (user rework) or, when ``augment``,
-    provisions RevenueCat and runs an incremental gap-analysis pass that ADDS what is
+    emits the Apphud config and runs an incremental gap-analysis pass that ADDS what is
     missing vs the spec (NOT a from-scratch rebuild). Saves a new version, force-pushes
     a fresh commit to the SAME GitHub repo and re-triggers the CodeMagic build.
     """
     import zipfile
 
     from iosforge.mvp import (
+        apphud_provision,
+        attribution,
         build_profile,
         claude_gen,
         compliance,
         frida_ingest,
         github_publish,
-        revenuecat_provision,
     )
     from iosforge.mvp.paths import RunPaths
 
@@ -1128,27 +1152,43 @@ def rework_frontend(self, job_id: str, instructions: str = "", augment: bool = F
                     z.extractall(paths.flutter_app)
 
                 mode = "augment" if augment else "rework"
-                # Provision RevenueCat for BOTH modes: without rc_config.json in the
-                # workspace the codegen agent skips RevenueCat (the _RC_NOTE is gated on
-                # that file) and reverts the paywall to a local stand-in, so real test
-                # purchases stop working after a plain rework.
+                # Emit apphud_config.json for BOTH modes: without it in the workspace the
+                # codegen agent skips Apphud (the _RC_NOTE is gated on that file) and
+                # reverts the paywall to a local stand-in, so real sandbox purchases stop
+                # working after a plain rework.
                 spec_data = json.loads(paths.app_spec_json.read_text())
                 ident = build_profile.resolve_identity(job.source_app_metadata, spec_data, settings)
-                rc_config = revenuecat_provision.provision(
+                apphud_config = apphud_provision.provision(
                     spec_data,
                     settings=settings,
                     bundle_id=ident.bundle_id,
                     app_name=ident.app_name,
-                    use_test_store=ident.use_test_store,
+                    sandbox=ident.sandbox,
+                    api_key=(job.source_app_metadata or {}).get("apphud_api_key"),
                 )
-                if rc_config:
-                    paths.rc_config_json.write_text(json.dumps(rc_config, indent=2))
+                if apphud_config:
+                    paths.apphud_config_json.write_text(json.dumps(apphud_config, indent=2))
                     log.info(
-                        "rework.revenuecat_provisioned",
+                        "rework.apphud_configured",
                         job_id=job_id,
                         mode=mode,
-                        app_id=rc_config.get("app_id"),
-                        store_mode=rc_config.get("mode"),
+                        bundle_id=apphud_config.get("bundle_id"),
+                        store_mode=apphud_config.get("mode"),
+                    )
+
+                attribution_config = attribution.provision(
+                    settings=settings,
+                    api_key=(job.source_app_metadata or {}).get("tenjin_api_key"),
+                )
+                if attribution_config:
+                    paths.attribution_config_json.write_text(
+                        json.dumps(attribution_config, indent=2)
+                    )
+                    log.info(
+                        "rework.attribution_configured",
+                        job_id=job_id,
+                        mode=mode,
+                        provider=attribution_config.get("provider"),
                     )
                 if augment:
                     claude_gen.augment(paths)
@@ -1185,6 +1225,11 @@ def rework_frontend(self, job_id: str, instructions: str = "", augment: bool = F
                         selftest = {**report, "mode": mode, "verify": "web"}
                     except Exception as exc:
                         log.warning("rework.verify_failed", job_id=job_id, error=str(exc))
+
+                # Staged before the archive so the snapshot (and every later rework that
+                # hydrates from it) keeps the ATT copy + SKAdNetwork list.
+                if attribution_config:
+                    attribution.stage_ios_assets(settings, paths.flutter_app, attribution_config)
 
                 zip_base = tmp / "flutter_app"
                 shutil.make_archive(str(zip_base), "zip", str(paths.flutter_app))
@@ -1251,6 +1296,134 @@ def rework_frontend(self, job_id: str, instructions: str = "", augment: bool = F
     if published and prior_codemagic.get("application_id"):
         run_codemagic_build.apply_async(args=[job_id], queue="delivery")
     return f"job {job_id} reworked (v{final_version})"
+
+
+@celery_app.task(base=PipelineTask, name="iosforge.generate_store_assets", bind=True)
+def generate_store_assets(self, job_id: str) -> str:
+    """Render the App Store listing screenshots for an already-built app.
+
+    Reference material is the SOURCE app's listing (composition only); the content is
+    ours — our real rendered screens, our divergent palette and our own copy. The
+    planner picks, per source slide, which of our screens actually shows the promised
+    feature, so the listing never advertises something the app does not do.
+
+    Independent of the build: it needs the generated screens and the spec, nothing else,
+    so it can be re-run to iterate on the listing without touching the app.
+    """
+    from iosforge.mvp import slide_contract, store_assets
+
+    settings = get_settings()
+    storage = S3ArtifactStorage()
+    maker = get_sessionmaker()
+    tmp = Path(tempfile.mkdtemp(prefix="iosforge-store-"))
+    try:
+        with maker() as db:
+            job = db.get(Job, uuid.UUID(job_id))
+            if job is None:
+                return f"job {job_id} not found"
+            app_id = str((job.source_app_metadata or {}).get("appstore_app_id") or "")
+            if not app_id and job.source_app_ref:
+                found = re.search(r"id(\d+)", job.source_app_ref)
+                app_id = found.group(1) if found else ""
+            country = str((job.source_app_metadata or {}).get("appstore_country") or "us")
+
+        work = tmp / "ws"
+        work.mkdir(parents=True, exist_ok=True)
+        screens_dir = work / "screens"
+        screens_dir.mkdir(exist_ok=True)
+
+        spec_raw = storage.get(build_key(job_id=job_id, kind="app_spec", name="app_spec.json"))
+        spec = json.loads(spec_raw)
+        (work / "app_spec.json").write_bytes(spec_raw)
+
+        # Our own rendered screens, keyed by the spec's screen ids.
+        rendered: list[str] = []
+        for entry in spec.get("screens", []) or []:
+            sid = str(entry.get("id") or "")
+            if not sid:
+                continue
+            try:
+                data = storage.get(
+                    build_key(job_id=job_id, kind="generated_screenshots", name=f"{sid}.png")
+                )
+            except Exception:
+                continue
+            (screens_dir / f"{sid}.png").write_bytes(data)
+            rendered.append(sid)
+        if not rendered:
+            return f"job {job_id} has no generated screenshots to build a listing from"
+
+        (work / "screens.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "id": str(e.get("id")),
+                        "name": e.get("name"),
+                        "purpose": e.get("purpose"),
+                    }
+                    for e in spec.get("screens", []) or []
+                    if str(e.get("id") or "") in set(rendered)
+                ],
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        originals_dir = work / "original"
+        originals = store_assets.download_original_slides(app_id, originals_dir, country=country)
+        log.info(
+            "store_assets.staged", job_id=job_id, screens=len(rendered), originals=len(originals)
+        )
+
+        # Stage 1 — analyse EVERY source slide on its own into its own contract.
+        contracts_dir = work / "contracts"
+        slide_contract.analyse(work, timeout=settings.store_assets_timeout_s)
+        # Gate: no contract for a slide means the listing would silently shrink.
+        contracts = slide_contract.verify_analysis(originals_dir, contracts_dir)
+
+        # Stage 2 — author one page per contract, then screenshot. Authoring (rather
+        # than filling fixed templates) is what lets a slide honour an angled device,
+        # an in-context composite or a perspective grid the contract asked for.
+        tokens = spec.get("design_tokens") or {}
+        store_assets.prefetch_backgrounds(work, contracts)
+        pages = store_assets.build_slide_pages(
+            work, tokens, timeout=settings.store_assets_timeout_s
+        )
+        if not pages:
+            return f"job {job_id} produced no slide pages"
+
+        out_dir = tmp / "out"
+        pngs = store_assets.render_pages(work, pages, out_dir)
+
+        dropped = slide_contract.missing_slides(contracts, pngs)
+        if dropped:
+            raise RuntimeError(
+                f"Сгенерировано {len(pngs)} из {len(contracts)} экранов. "
+                f"Отсутствуют: {', '.join(dropped)}"
+            )
+
+        keys: list[str] = []
+        for png in pngs:
+            key = build_key(job_id=job_id, kind="store_assets", name=png.name)
+            storage.put(key, png.read_bytes(), content_type="image/png")
+            keys.append(key)
+        # Keep the authored pages: they are the editable source of each slide.
+        for page in pages:
+            storage.put(
+                build_key(job_id=job_id, kind="store_assets", name=page.name),
+                page.read_bytes(),
+                content_type="text/html",
+            )
+        # The contracts are what generation consumed — keep them alongside the output so
+        # a disputed slide can be traced back to the analysis it came from.
+        storage.put(
+            build_key(job_id=job_id, kind="store_assets", name="slide_contracts.json"),
+            json.dumps(contracts, indent=2, ensure_ascii=False).encode(),
+            content_type="application/json",
+        )
+        log.info("store_assets.done", job_id=job_id, slides=len(keys), contracts=len(contracts))
+        return f"job {job_id} store assets: {len(keys)} slide(s)"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 @celery_app.task(base=PipelineTask, name="iosforge.reverify_web", bind=True)

@@ -147,6 +147,7 @@ def job_detail(
             "gen": gen,
             "build": _latest_build(db, job_id),
             "can_ios_build": can_ios_build,
+            "store_slides": _store_slides(job_id),
         },
     )
 
@@ -207,10 +208,12 @@ def jobs_build_settings(
     build_profile: str = Form("test"),
     bundle_id: str = Form(""),
     app_name: str = Form(""),
+    apphud_api_key: str = Form(""),
+    tenjin_api_key: str = Form(""),
     user: SessionData = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> Response:
-    """Save the build profile / bundle id / display name, then rebuild."""
+    """Save the build profile / bundle id / display name / SDK keys, then rebuild."""
     if not csrf.verify(user.csrf_token, csrf_token):
         return Response("Invalid request (CSRF).", status_code=400)
     job = db.get(Job, job_id)
@@ -219,15 +222,26 @@ def jobs_build_settings(
     profile = "real" if build_profile == "real" else "test"
     bundle_id = (bundle_id or "").strip()
     app_name = (app_name or "").strip()
+    apphud_api_key = (apphud_api_key or "").strip()
+    tenjin_api_key = (tenjin_api_key or "").strip()
     if bundle_id and not re.fullmatch(r"[A-Za-z0-9.]{1,80}", bundle_id):
         return Response("Invalid bundle id.", status_code=400)
     if app_name and not re.fullmatch(r"[\w .\-]{1,50}", app_name):
         return Response("Invalid app name.", status_code=400)
+    # Apphud publishable SDK key (appstr_… / app_…). Apps get one key each, so it is
+    # stored per job; empty falls back to the shared key in the gitignored secrets file.
+    if apphud_api_key and not re.fullmatch(r"[A-Za-z0-9_\-]{8,128}", apphud_api_key):
+        return Response("Invalid Apphud SDK key.", status_code=400)
+    # Tenjin iOS SDK key (32-char uppercase alphanumeric), also one per app.
+    if tenjin_api_key and not re.fullmatch(r"[A-Za-z0-9]{16,64}", tenjin_api_key):
+        return Response("Invalid Tenjin SDK key.", status_code=400)
 
     meta = dict(job.source_app_metadata or {})
     meta["build_profile"] = profile
     meta["override_bundle_id"] = bundle_id if profile == "real" else ""
     meta["override_app_name"] = app_name
+    meta["apphud_api_key"] = apphud_api_key
+    meta["tenjin_api_key"] = tenjin_api_key
     job.source_app_metadata = meta  # reassign so SQLAlchemy persists the JSONB change
     db.commit()
 
@@ -241,9 +255,39 @@ def jobs_build_settings(
             )
         else:
             _enqueue_build(job_id)
-        log.info("jobs.build_settings_saved", job_id=str(job_id), profile=profile)
+        log.info(
+            "jobs.build_settings_saved",
+            job_id=str(job_id),
+            profile=profile,
+            apphud_key_set=bool(apphud_api_key),  # never log the keys themselves
+            tenjin_key_set=bool(tenjin_api_key),
+        )
     except Exception as exc:
         log.error("jobs.build_settings_enqueue_failed", job_id=str(job_id), error=str(exc))
+    return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
+
+
+@router.post("/jobs/{job_id}/store-assets")
+def jobs_store_assets(
+    request: Request,
+    job_id: uuid.UUID,
+    csrf_token: str = Form(...),
+    user: SessionData = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Render the App Store listing screenshots from the app's own generated screens."""
+    if not csrf.verify(user.csrf_token, csrf_token):
+        return Response("Invalid request (CSRF).", status_code=400)
+    gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
+    if gen is None:
+        return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
+    try:
+        from iosforge.worker.run_job import generate_store_assets
+
+        generate_store_assets.apply_async(args=[str(job_id)], queue="codegen")
+        log.info("jobs.store_assets_requested", job_id=str(job_id))
+    except Exception as exc:
+        log.error("jobs.store_assets_enqueue_failed", job_id=str(job_id), error=str(exc))
     return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
 
 
@@ -451,6 +495,23 @@ def _enqueue_verify(job_id: uuid.UUID) -> None:
         reverify_web.apply_async(args=[str(job_id)], queue="codegen")
     except Exception as exc:  # broker down — surfaced in the UI, verify can be retried
         log.error("jobs.verify_web_enqueue_failed", job_id=str(job_id), error=str(exc))
+
+
+def _store_slides(job_id: uuid.UUID) -> list[str]:
+    """Object keys of the rendered listing slides, in order (empty when none yet)."""
+    from iosforge.storage.client import S3ArtifactStorage, build_key
+
+    storage = S3ArtifactStorage()
+    keys: list[str] = []
+    for idx in range(1, 11):  # the planner caps a listing well below this
+        key = build_key(job_id=str(job_id), kind="store_assets", name=f"{idx:02d}.png")
+        try:
+            if not storage.exists(key):
+                break
+        except Exception:
+            break
+        keys.append(key)
+    return keys
 
 
 def _latest_build(db: Session, job_id: uuid.UUID) -> CodemagicBuild | None:

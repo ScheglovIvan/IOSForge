@@ -93,8 +93,9 @@ Inputs in this directory:
   `screen`/`trigger` it says where/when it plays.
 - `subscriptions.json` (OPTIONAL): OBSERVED StoreKit — `products` (id / price /
   period) and `purchase_attempts`. When non-empty this is the REAL monetization
-  catalog; when empty, entitlements may still be in RevenueCat traffic
-  (`api.revenuecat.com`) inside network.jsonl / json_bodies.jsonl.
+  catalog; when empty, entitlements may still be in subscription-infra traffic
+  (RevenueCat `api.revenuecat.com`, Adapty `api.adaptytech.com`, Apphud
+  `api.apphud.com`) inside network.jsonl / json_bodies.jsonl.
 - `sdks.json` (OPTIONAL): OBSERVED third-party SDKs — each `{sdk, evidence:[host]}`
   detected from real traffic (e.g. AppLovin, AppsFlyer, Firebase, Google AdMob).
 - `ads_raw.json` (OPTIONAL): OBSERVED ad-SDK hooks — `ready_hooks.adblock` names
@@ -141,16 +142,16 @@ Method:
    backend — do NOT guess where you can read: derive `backend.apis` from the real
    endpoints (method + host + path), `content.data_model` (entities / fields) from
    the JSON response shapes in `json_bodies.jsonl`, `backend.auth` from observed
-   auth headers/hosts, and subscription/entitlement facts from any RevenueCat
-   traffic (`api.revenuecat.com`) or equivalent. Set `backend.backend_needed`
+   auth headers/hosts, and subscription/entitlement facts from any subscription-
+   infra traffic (RevenueCat / Adapty / Apphud) or equivalent. Set `backend.backend_needed`
    accordingly. Record which backend facts came from observed traffic vs were
    inferred under `analysis_quality` (the backend fields are plain lists with no
    per-item `source`). When these files are ABSENT, infer the backend from the UI.
 7. Make monetization, ads and integrations EVIDENCE-BASED when the observed files
    are present — prefer them over guessing from screenshots:
    - `monetization.packages` from `subscriptions.json` `products` (id / price /
-     period) when non-empty; otherwise from RevenueCat subscriber traffic. Derive
-     `monetization.model` accordingly.
+     period) when non-empty; otherwise from subscription-infra subscriber traffic
+     (RevenueCat / Adapty / Apphud). Derive `monetization.model` accordingly.
    - `monetization.ad_networks` from `sdks.json` (name a network only with real
      host evidence) and `monetization.ad_placements` formats from
      `ads_raw.json` `ready_hooks.adblock` (e.g. `GADInterstitialAd` → an AdMob

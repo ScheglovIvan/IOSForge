@@ -108,8 +108,10 @@ def _prepare_task_workspace(paths: RunPaths) -> None:
     (paths.claude_ws / "PROMPT.md").unlink(missing_ok=True)
     shutil.copy2(paths.app_spec_json, paths.claude_ws / "app_spec.json")
     shutil.copy2(paths.tasks_json, paths.claude_ws / "tasks.json")
-    if paths.rc_config_json.exists():
-        shutil.copy2(paths.rc_config_json, paths.claude_ws / "rc_config.json")
+    if paths.apphud_config_json.exists():
+        shutil.copy2(paths.apphud_config_json, paths.claude_ws / "apphud_config.json")
+    if paths.attribution_config_json.exists():
+        shutil.copy2(paths.attribution_config_json, paths.claude_ws / "attribution_config.json")
     summary = stage_archive_context(paths, paths.claude_ws, include_bytes=True)
     log.info("codegen_tasks.archive_context", **summary)
 
@@ -124,8 +126,10 @@ def _prepare_rework_workspace(paths: RunPaths) -> None:
     (paths.claude_ws / "PROMPT.md").unlink(missing_ok=True)
     if paths.app_spec_json.exists():
         shutil.copy2(paths.app_spec_json, paths.claude_ws / "app_spec.json")
-    if paths.rc_config_json.exists():
-        shutil.copy2(paths.rc_config_json, paths.claude_ws / "rc_config.json")
+    if paths.apphud_config_json.exists():
+        shutil.copy2(paths.apphud_config_json, paths.claude_ws / "apphud_config.json")
+    if paths.attribution_config_json.exists():
+        shutil.copy2(paths.attribution_config_json, paths.claude_ws / "attribution_config.json")
     stage_archive_context(paths, paths.claude_ws, include_bytes=True)
     ws_app = paths.claude_ws / "flutter_app"
     if ws_app.exists():
@@ -164,7 +168,7 @@ Rules:
 - REAL FUNCTIONALITY: when a reported item is a decorative stub (fake button, static map,
   mock data, frozen clock, a permission "asked" by a plain button), replace it with the
   real implementation per the REAL FUNCTIONALITY note below.
-{_REAL_FUNCTIONALITY_NOTE}{_RC_NOTE}
+{_REAL_FUNCTIONALITY_NOTE}{_RC_NOTE}{_ATTRIBUTION_NOTE}
 Output ONLY changes under `flutter_app/`. Do not run the app.
 """
 
@@ -219,8 +223,10 @@ Context files (read as needed):
 - `flutter_app/` — the CURRENT app. EDIT IN PLACE; do NOT rewrite or delete working
   files. Read what already exists before adding anything.
 - `app_spec.json` — the target spec (screens, navigation, monetization, content, audio).
-- `rc_config.json` (OPTIONAL) — RevenueCat config (`sdk_key`, `entitlement`, `offering`,
-  `mode`); present only if the app should monetize via RevenueCat.
+- `apphud_config.json` (OPTIONAL) — Apphud config (`sdk_key`, `placement`, `products`,
+  `mode`); present only if the app should monetize via Apphud.
+- `attribution_config.json` (OPTIONAL) — MMP config (`provider` = `tenjin`, `sdk_key`);
+  present only if the app should report attribution.
 - `screens.json` + `screens/`, `source/<id>.json`, `fonts/`, `media/` — ground truth.
 
 Do a GAP ANALYSIS and add ONLY the missing pieces:
@@ -228,13 +234,26 @@ Do a GAP ANALYSIS and add ONLY the missing pieces:
    (compose from `lib/ui/components/` if that library exists), wired into the router and
    the `/screen/:id` preview + `iosforge://screen/<id>` deep link.
 2. NAVIGATION: any `navigation.map` edge (from→to) not reachable — wire it.
-3. REVENUECAT: if `rc_config.json` exists and the app does not already configure
-   RevenueCat, add `purchases_flutter` and `Purchases.configure(PurchasesConfiguration(
-   "<sdk_key>"))` in `main()` (try/catch, guard empty key), and make the paywall use
-   `Purchases.getOfferings()` (`offerings.current`), `purchasePackage`, `restorePurchases`
-   and unlock premium when `customerInfo.entitlements.active` is non-empty.
-4. Anything else in `app_spec.json` clearly not yet implemented (audio triggers, etc.).
-5. REAL FUNCTIONALITY: find features that were shipped as decorative STUBS (fake buttons,
+3. APPHUD: if `apphud_config.json` exists, the app MUST match it.
+   - Not wired yet → add `apphud` and `await Apphud.start(apiKey: "<sdk_key>")` in
+     `main()` (try/catch, guard empty key), make the paywall load
+     `Apphud.placement("<placement>")`, buy with `Apphud.purchase(...)`,
+     `Apphud.restorePurchases()`, unlock premium via `Apphud.hasPremiumAccess()`.
+   - ALWAYS call `Apphud.paywallShown(paywall)` when the paywall becomes visible —
+     without it Apphud paywall analytics and A/B tests stay empty.
+   - ALREADY wired → do NOT skip: re-read `apphud_config.json` and UPDATE the values
+     baked into the code (the `sdk_key` constant, placement identifier and product ids)
+     wherever they are hardcoded, so they match the file exactly. The key rotates per
+     app, so a stale hardcoded key sends the app to the wrong Apphud account.
+4. ATTRIBUTION: if `attribution_config.json` exists, the app MUST match it.
+   - Not wired yet → add `tenjin_plugin` + `app_tracking_transparency`, request ATT after
+     the first frame, then `TenjinSDK.instance.initialize(sdkKey: "<sdk_key>")`, opt in/out
+     per the ATT result, `TenjinSDK.instance.connect()`, pass the IDFA via
+     `Apphud.setAdvertisingIdentifier(idfa)`, call `Apphud.collectSearchAdsAttribution()`.
+   - ALREADY wired → do NOT skip: UPDATE the hardcoded `sdk_key` to match the file.
+   Never hardcode a network/campaign/creative — sources live in the Tenjin dashboard.
+5. Anything else in `app_spec.json` clearly not yet implemented (audio triggers, etc.).
+6. REAL FUNCTIONALITY: find features that were shipped as decorative STUBS (fake buttons,
    dead toggles, static maps, mock data, frozen clocks) and replace them with the real
    implementation per the REAL FUNCTIONALITY note below — wire real iOS APIs, real
    permissions and live device data; keep `ios_permissions.json` and `CAPABILITIES.md`
@@ -311,26 +330,74 @@ ANTI-CLONE CONTENT: this clone must not look or read like the source app.
 
 
 _RC_NOTE = """
-REVENUECAT (ONLY if `rc_config.json` exists in this directory): the app monetizes via
-RevenueCat. Read `rc_config.json` (fields: `sdk_key`, `entitlement`, `offering`, `mode`).
-- SCAFFOLD: add `purchases_flutter: ^8.0.0` to pubspec (use THIS constraint — older
-  6.x/7.x fail to compile on current Xcode with `'SubscriptionPeriod' is ambiguous`);
-  in `main()` before `runApp`, call
-  `await Purchases.configure(PurchasesConfiguration("<sdk_key>"))` inside a try/catch and
-  guard an empty key so it never crashes. When `mode` is `test_store` the key drives
-  RevenueCat's virtual Test Store, so purchases work without an App Store build.
-- PAYWALL screen: load offerings via `Purchases.getOfferings()`, render the packages of
-  `offerings.current` (fall back to the offering whose identifier is `<offering>` if
-  present) — prices come FROM the offering, never hardcode them; buy with
-  `Purchases.purchasePackage(pkg)`, restore with `Purchases.restorePurchases()`, and
-  unlock premium when `customerInfo.entitlements.active` is non-empty (or contains
-  `<entitlement>`).
+APPHUD (ONLY if `apphud_config.json` exists in this directory): the app monetizes via
+Apphud. Read `apphud_config.json` (fields: `sdk_key`, `placement`, `products`, `mode`).
+- SCAFFOLD: add `apphud` to pubspec (import `package:apphud/apphud.dart`; needs Dart
+  SDK >=3.3); in `main()` before `runApp`, call
+  `await Apphud.start(apiKey: "<sdk_key>")` inside a try/catch and guard an empty key so
+  it never crashes. Apphud auto-detects StoreKit sandbox vs production — no test store to
+  configure, so purchases work in the sandbox without a live App Store link.
+- PAYWALL screen: fetch the placement with `await Apphud.placement('<placement>')` (falls
+  back to scanning `Apphud.placements()`), render its paywall's products — prices/titles
+  come FROM the Apphud product (`skProduct`/`productDetails`), never hardcode them; buy
+  with `Apphud.purchase(product: product)` (or `Apphud.purchase(productId: id)`), restore
+  with `Apphud.restorePurchases()`, unlock premium when `await Apphud.hasPremiumAccess()`.
+- REQUIRED `Apphud.paywallShown(paywall)` as soon as the paywall becomes visible, passing
+  the paywall from the placement. Without this call Apphud records no impressions, so
+  paywall analytics, conversion rates and A/B tests silently stay empty.
+- TRIAL COPY: if the paywall advertises a free trial, gate that wording on
+  `await Apphud.checkEligibilityForIntroductoryOffer(product)` — never promise a trial to
+  a user Apple would charge immediately.
+- EMPTY STATE: if the placement resolves to no products (misconfigured dashboard, no
+  network), show a readable message and keep the app usable — never a blank paywall.
 - NO LOCAL STAND-IN: if the app currently fakes purchases (a hardcoded catalog, an
   entitlement service that "succeeds locally", a bool flag), REPLACE that with the real
-  `Purchases` calls above — the actual buy / restore / unlock MUST go through RevenueCat,
-  never a local flag. You MAY keep the source app's displayed prices/copy on the paywall,
-  but the purchase and the entitlement check must be real RevenueCat.
-Testable via the RevenueCat Test Store / StoreKit sandbox (no live App Store link yet).
+  `Apphud` calls above — the actual buy / restore / unlock MUST go through Apphud, never a
+  local flag. You MAY keep the source app's displayed prices/copy on the paywall, but the
+  purchase and the premium check must be real Apphud.
+- ALREADY WIRED: `apphud_config.json` is the single source of truth. If the app already
+  configures Apphud with a DIFFERENT `sdk_key`, placement or product ids, UPDATE the
+  hardcoded values to match the file — never leave a stale key (it rotates per app and
+  would report to the wrong Apphud account).
+Testable via the StoreKit sandbox (no live App Store link yet).
+"""
+
+
+_ATTRIBUTION_NOTE = """
+ATTRIBUTION (ONLY if `attribution_config.json` exists in this directory): the app
+reports installs/events to an MMP so paid traffic can be attributed to a campaign and
+creative. Read `attribution_config.json` (fields: `provider` = `tenjin`, `sdk_key`).
+- SCAFFOLD: add `tenjin_plugin` and `app_tracking_transparency` to pubspec; import
+  `package:tenjin_plugin/tenjin_plugin.dart`.
+- WIRE (in `main()` / first screen, inside try/catch, guarding an empty key so it can
+  never crash), in this order:
+  1. Request ATT with `AppTrackingTransparency.requestTrackingAuthorization()`. Follow
+     the plugin's documented pattern — Apple requires the app to be visible, so request
+     it after the first frame (e.g. in the first screen's `initState`), not pre-`runApp`.
+  2. `TenjinSDK.instance.initialize(sdkKey: '<sdk_key>');` — use EXACTLY this method.
+     `init(apiKey: ...)` is the DEPRECATED older API; the build pins a newer
+     `tenjin_plugin`, so calling `init` risks failing to compile.
+  3. ATT authorized -> `TenjinSDK.instance.optIn();` else `TenjinSDK.instance.optOut();`
+  4. `TenjinSDK.instance.connect();` — Tenjin requires initialize + connect on EVERY app
+     launch (not only the first), so keep this on the normal startup path.
+  5. Tie purchases to the campaign: read the IDFA via
+     `AppTrackingTransparency.getAdvertisingIdentifier()` and, when non-empty, pass it
+     with `await Apphud.setAdvertisingIdentifier(idfa);`
+  6. `await Apphud.collectSearchAdsAttribution();` (iOS — Apple Search Ads).
+- REVENUE (report from the APP — the two SDKs run independently, no paid server-side
+  bridge): right after a purchase succeeds through Apphud, report it to Tenjin once:
+  subscriptions -> `TenjinSDK.instance.subscriptionWithStoreKit(productId, currencyCode,
+  unitPrice)`; one-time purchases -> `TenjinSDK.instance.transaction(...)`.
+  - Send EXACTLY ONCE per successful purchase, from the purchase-result handler only.
+    Never on app start, on `hasPremiumAccess()` checks, on restore, or on screen rebuilds
+    — repeated sends inflate revenue and corrupt ROAS per creative.
+  - Take productId / price / currency from the Apphud product that was bought, so the
+    reported amount always matches what the store actually charged.
+- ALREADY WIRED: `attribution_config.json` is the single source of truth — if the app
+  configures Tenjin with a DIFFERENT `sdk_key`, UPDATE the hardcoded value to match.
+- NEVER hardcode an ad network, campaign, creative or tracking link: traffic sources are
+  connected in the Tenjin dashboard, never in the app.
+- This is MEASUREMENT ONLY — do NOT add any ad-serving SDK or ad widgets.
 """
 
 
@@ -466,7 +533,7 @@ Do exactly the work this task describes and nothing more:
   play each sound on its mapped `trigger` (e.g. `AudioPlayer().play(AssetSource(...))`
   on the tap/screen the trigger names). Wire EVERY `content.audio` entry — the clone
   must play the same sounds on the same actions as the original.
-{no_ads_line}{content_divergence_note}{_REAL_FUNCTIONALITY_NOTE}{_RC_NOTE}
+{no_ads_line}{content_divergence_note}{_REAL_FUNCTIONALITY_NOTE}{_RC_NOTE}{_ATTRIBUTION_NOTE}
 Output ONLY changes under `flutter_app/`. Do not run the app.
 """
 

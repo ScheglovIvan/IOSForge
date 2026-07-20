@@ -128,7 +128,7 @@ def test_resolved_workflow_id_builtin_template() -> None:
 
 
 def test_builtin_template_targets_ios_13() -> None:
-    # RevenueCat/purchases_flutter need iOS 13+ (Swift concurrency) — the template must
+    # Apphud needs iOS 13+ (StoreKit 2 / Swift concurrency) — the template must
     # bump the deployment target before pod install or the iOS build fails to compile
     assert "IPHONEOS_DEPLOYMENT_TARGET = 13.0" in cm._CODEMAGIC_YAML
     assert "platform :ios, '13.0'" in cm._CODEMAGIC_YAML
@@ -143,18 +143,40 @@ def test_rendered_codemagic_yaml_is_valid_yaml() -> None:
     assert "ios-unsigned" in doc["workflows"]
 
 
-def test_builtin_template_pins_revenuecat_before_pub_get() -> None:
-    # purchases_flutter < 8 breaks on current Xcode ("SubscriptionPeriod is ambiguous");
-    # the template must force a known-good constraint before pub get regardless of codegen.
+def test_builtin_template_pins_sdks_before_pub_get() -> None:
+    # the template must force known-good constraints before pub get so no regeneration
+    # can pin an incompatible version of the subscription / attribution SDKs.
     import yaml
 
     doc = yaml.safe_load(cm._render_yaml(None, "com.acme.demo", "Demo App"))
     steps = doc["workflows"]["ios-unsigned"]["scripts"]
     names = [s["name"] for s in steps]
-    assert "Pin RevenueCat SDK" in names
-    assert names.index("Pin RevenueCat SDK") < names.index("Get Flutter packages")
-    pin = next(s for s in steps if s["name"] == "Pin RevenueCat SDK")["script"]
-    assert "purchases_flutter" in pin and "^8.0.0" in pin
+    assert "Pin SDK versions" in names
+    assert names.index("Pin SDK versions") < names.index("Get Flutter packages")
+    pin = next(s for s in steps if s["name"] == "Pin SDK versions")["script"]
+    assert "apphud" in pin and "^3.2.0" in pin
+    assert "tenjin_plugin" in pin and "^1.2.0" in pin
+
+
+def test_builtin_template_merges_skadnetwork_ids() -> None:
+    # a network id missing from Info.plist = zero SKAN attribution for that network, so
+    # the build must merge the MMP's consolidated list when it is staged with the app.
+    import ast
+
+    import yaml
+
+    doc = yaml.safe_load(cm._render_yaml(None, "com.acme.demo", "Demo App"))
+    steps = doc["workflows"]["ios-unsigned"]["scripts"]
+    names = [s["name"] for s in steps]
+    assert "Merge SKAdNetwork ad network ids" in names
+    # must run after flutter create regenerated ios/ (Info.plist must exist)
+    assert names.index("Merge SKAdNetwork ad network ids") > names.index(
+        "Scaffold platform folders"
+    )
+    step = next(s for s in steps if s["name"] == "Merge SKAdNetwork ad network ids")["script"]
+    assert "skadnetwork_ids.plist" in step and "SKAdNetworkItems" in step
+    body = step.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    ast.parse(body)  # embedded plistlib driver must be valid python
 
 
 def test_builtin_template_injects_ios_permissions() -> None:
