@@ -17,6 +17,7 @@ import base64
 import os
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -44,15 +45,15 @@ workflows:
     scripts:
       - name: Scaffold platform folders
         script: flutter create --platforms=ios,android .
-      - name: Set iOS deployment target 13.0
+      - name: Set iOS deployment target 15.0
         script: |
-          # Apphud uses StoreKit 2 / Swift concurrency (iOS 13+); the
-          # flutter-create default (12.0) fails to compile. Force 13.0 in the Podfile
-          # platform AND inside post_install so EVERY pod target is bumped before build.
-          sed -i '' "s/^# *platform :ios.*/platform :ios, '13.0'/" ios/Podfile || true
-          sed -i '' "s/platform :ios, '[0-9.]*'/platform :ios, '13.0'/" ios/Podfile || true
-          perl -0pi -e "s/flutter_additional_ios_build_settings\\(target\\)/flutter_additional_ios_build_settings(target)\\n      target.build_configurations.each { |c| c.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '13.0' }/g" ios/Podfile || true
-          sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*/IPHONEOS_DEPLOYMENT_TARGET = 13.0/g" ios/Runner.xcodeproj/project.pbxproj || true
+          # Apphud SDK 3.x requires iOS 15.0+ (pod install fails below it); the
+          # flutter-create default is lower. Force 15.0 in the Podfile platform AND
+          # inside post_install so EVERY pod target is bumped before build.
+          sed -i '' "s/^# *platform :ios.*/platform :ios, '15.0'/" ios/Podfile || true
+          sed -i '' "s/platform :ios, '[0-9.]*'/platform :ios, '15.0'/" ios/Podfile || true
+          perl -0pi -e "s/flutter_additional_ios_build_settings\\(target\\)/flutter_additional_ios_build_settings(target)\\n      target.build_configurations.each { |c| c.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0' }/g" ios/Podfile || true
+          sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*/IPHONEOS_DEPLOYMENT_TARGET = 15.0/g" ios/Runner.xcodeproj/project.pbxproj || true
       - name: Set display name and Android identity
         script: |
           # Display name (user-visible) + Android applicationId/label are written from
@@ -79,7 +80,10 @@ workflows:
               return subprocess.run(["/usr/libexec/PlistBuddy", "-c", cmd, PLIST]).returncode
           data = json.load(open("ios_permissions.json"))
           for key, value in data.items():
-              if isinstance(value, list):
+              if isinstance(value, bool):
+                  buddy(f"Delete :{key}")
+                  buddy(f"Add :{key} bool {'true' if value else 'false'}")
+              elif isinstance(value, list):
                   buddy(f"Delete :{key}")
                   buddy(f"Add :{key} array")
                   for i, item in enumerate(value):
@@ -95,7 +99,7 @@ workflows:
         script: |
           # Force known-good constraints at build time so no regeneration can pin an
           # incompatible version of the subscription / attribution SDKs. No-op if unused.
-          sed -i '' -E "s/^([[:space:]]*apphud:).*/\\1 ^3.2.0/" pubspec.yaml || true
+          sed -i '' -E "s/^([[:space:]]*apphud:).*/\\1 3.1.2/" pubspec.yaml || true
           sed -i '' -E "s/^([[:space:]]*tenjin_plugin:).*/\\1 ^1.2.0/" pubspec.yaml || true
       - name: Merge SKAdNetwork ad network ids
         script: |
@@ -119,6 +123,13 @@ workflows:
           fi
       - name: Get Flutter packages
         script: flutter pub get
+      - name: Generate launcher icons
+        script: |
+          # Builds every iOS/Android launcher size from assets/icon/app_icon.png.
+          # A no-op when the app has no staged icon, so it never fails a build.
+          if [ -f assets/icon/app_icon.png ]; then
+            dart run flutter_launcher_icons || flutter pub run flutter_launcher_icons || true
+          fi
       - name: Install CocoaPods
         script: find . -name Podfile -execdir pod install \\; || true
       - name: Build unsigned iOS
@@ -145,6 +156,153 @@ workflows:
       - build/ios/iphoneos/Runner.app
       - flutter_drive.log
 """
+
+
+# Signed App Store workflow: signing is driven entirely by App Store Connect API key
+# environment variables injected at build-trigger time (APP_STORE_CONNECT_ISSUER_ID /
+# _KEY_IDENTIFIER / _PRIVATE_KEY + CERTIFICATE_PRIVATE_KEY), so the key is NEVER committed
+# to this yaml and NO manual registration in the CodeMagic UI is needed. The
+# app-store-connect CLI fetches/creates the distribution certificate + provisioning
+# profile on the fly; the real bundle id is written into the binary; the .ipa is uploaded
+# to App Store Connect (it appears under the app's builds; TestFlight groups / metadata /
+# review submission stay manual). Placeholders: __BUNDLE_ID__ / __APP_NAME__ /
+# __APP_STORE_APPLE_ID__.
+_CODEMAGIC_YAML_SIGNED = """\
+workflows:
+  ios-store:
+    name: iOS Store (signed - App Store Connect)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      vars:
+        BUNDLE_ID: "__BUNDLE_ID__"
+        APP_STORE_APPLE_ID: __APP_STORE_APPLE_ID__
+      flutter: 3.44.4
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Scaffold platform folders
+        script: flutter create --platforms=ios,android .
+      - name: Set iOS deployment target 15.0
+        script: |
+          sed -i '' "s/^# *platform :ios.*/platform :ios, '15.0'/" ios/Podfile || true
+          sed -i '' "s/platform :ios, '[0-9.]*'/platform :ios, '15.0'/" ios/Podfile || true
+          perl -0pi -e "s/flutter_additional_ios_build_settings\\(target\\)/flutter_additional_ios_build_settings(target)\\n      target.build_configurations.each { |c| c.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0' }/g" ios/Podfile || true
+          sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*/IPHONEOS_DEPLOYMENT_TARGET = 15.0/g" ios/Runner.xcodeproj/project.pbxproj || true
+      - name: Set bundle id and display name
+        script: |
+          # A signed store build MUST carry the real bundle id in the binary (unlike the
+          # unsigned sideload build, which stays at com.example.*). __APP_STORE_APPLE_ID__
+          # is the numeric App Store id used for the auto build number and the upload.
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName __APP_NAME__" ios/Runner/Info.plist \
+            || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string __APP_NAME__" ios/Runner/Info.plist
+          sed -i '' "s/PRODUCT_BUNDLE_IDENTIFIER = [^;]*;/PRODUCT_BUNDLE_IDENTIFIER = __BUNDLE_ID__;/g" ios/Runner.xcodeproj/project.pbxproj || true
+          sed -i '' 's/applicationId "[^"]*"/applicationId "__BUNDLE_ID__"/' android/app/build.gradle || true
+          sed -i '' 's/android:label="[^"]*"/android:label="__APP_NAME__"/' android/app/src/main/AndroidManifest.xml || true
+      - name: Inject iOS permission usage descriptions
+        script: |
+          if [ -f ios_permissions.json ]; then
+            python3 - <<'PY'
+          import json, subprocess
+          PLIST = "ios/Runner/Info.plist"
+          def buddy(cmd):
+              return subprocess.run(["/usr/libexec/PlistBuddy", "-c", cmd, PLIST]).returncode
+          data = json.load(open("ios_permissions.json"))
+          for key, value in data.items():
+              if isinstance(value, bool):
+                  buddy(f"Delete :{key}")
+                  buddy(f"Add :{key} bool {'true' if value else 'false'}")
+              elif isinstance(value, list):
+                  buddy(f"Delete :{key}")
+                  buddy(f"Add :{key} array")
+                  for i, item in enumerate(value):
+                      buddy(f"Add :{key}:{i} string {item}")
+              else:
+                  text = str(value)
+                  if buddy(f"Set :{key} {text}") != 0:
+                      buddy(f"Add :{key} string {text}")
+          print("applied", len(data), "iOS permission key(s)")
+          PY
+          fi
+      - name: Merge SKAdNetwork ad network ids
+        script: |
+          if [ -f skadnetwork_ids.plist ]; then
+            python3 - <<'PY'
+          import plistlib
+          INFO = "ios/Runner/Info.plist"
+          with open("skadnetwork_ids.plist", "rb") as f:
+              items = plistlib.load(f).get("SKAdNetworkItems") or []
+          if items:
+              with open(INFO, "rb") as f:
+                  info = plistlib.load(f)
+              info["SKAdNetworkItems"] = items
+              with open(INFO, "wb") as f:
+                  plistlib.dump(info, f)
+          print("merged", len(items), "SKAdNetwork id(s)")
+          PY
+          fi
+      - name: Pin SDK versions
+        script: |
+          sed -i '' -E "s/^([[:space:]]*apphud:).*/\\1 3.1.2/" pubspec.yaml || true
+          sed -i '' -E "s/^([[:space:]]*tenjin_plugin:).*/\\1 ^1.2.0/" pubspec.yaml || true
+      - name: Get Flutter packages
+        script: flutter pub get
+      - name: Generate launcher icons
+        script: |
+          # Builds every iOS/Android launcher size from assets/icon/app_icon.png.
+          # A no-op when the app has no staged icon, so it never fails a build.
+          if [ -f assets/icon/app_icon.png ]; then
+            dart run flutter_launcher_icons || flutter pub run flutter_launcher_icons || true
+          fi
+      - name: Install CocoaPods
+        script: find . -name Podfile -execdir pod install \\; || true
+      - name: Set up code signing
+        script: |
+          # Env-var signing: the App Store Connect API key + certificate private key are
+          # injected as build variables, so app-store-connect fetches (or, with --create,
+          # mints once and re-uses) the distribution certificate + App Store profile, and
+          # use-profiles writes export_options.plist. No key is stored in this repo.
+          keychain initialize
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --platform IOS \
+            --type IOS_APP_STORE \
+            --certificate-key="$CERTIFICATE_PRIVATE_KEY" \
+            --create
+          keychain add-certificates
+          xcode-project use-profiles
+      - name: Build signed IPA
+        script: |
+          # Auto-increment off the highest build number EVER uploaded (TestFlight +
+          # processing included) so re-uploads never collide. get-latest-build-number
+          # sees all builds; get-latest-app-store-build-number only sees a live App Store
+          # version (absent until first release) and would keep returning 0 -> build 1.
+          LATEST=$(app-store-connect get-latest-build-number "$APP_STORE_APPLE_ID" 2>/dev/null || echo 0)
+          flutter build ipa --release \
+            --build-number=$(($LATEST + 1)) \
+            --export-options-plist=/Users/builder/export_options.plist
+    artifacts:
+      - build/ios/ipa/*.ipa
+    publishing:
+      app_store_connect:
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        submit_to_testflight: false
+"""
+
+
+@dataclass(frozen=True)
+class StoreSigning:
+    """Per-app inputs for a signed App Store build.
+
+    ``apple_id`` is the app's numeric App Store id (per job). ``asc_api_key_name`` is the
+    optional human label of the App Store Connect API key; signing itself is driven by the
+    uploaded credential's environment variables (see ``mvp.asc_credentials``), not by a
+    key registered in the CodeMagic UI, so the name is informational only.
+    """
+
+    asc_api_key_name: str
+    apple_id: str
 
 
 class CodeMagicIntegrationError(RuntimeError):
@@ -204,15 +362,26 @@ def _reference_yaml(settings: Settings, gh_token: str) -> str | None:
     return base64.b64decode(resp.json()["content"]).decode()
 
 
-def _render_yaml(reference: str | None, bundle_id: str, app_name: str = "App") -> str:
+def _render_yaml(
+    reference: str | None,
+    bundle_id: str,
+    app_name: str = "App",
+    signing: StoreSigning | None = None,
+) -> str:
     """Render the effective config, substituting the per-job bundle id + display name.
 
-    Falls back to the built-in iOS template when no reference is available. Both the
-    built-in (``__BUNDLE_ID__`` / ``__APP_NAME__``) and reference (``com.batteam.trimvo``)
-    placeholders are filled so the built binary gets the job's identity.
+    With ``signing`` the signed App Store template is used (real bundle id, automatic
+    signing, upload to ASC) and the API-key name + Apple id are filled in. Without it,
+    the reference repo's config or the built-in unsigned sideload template is used. Both
+    the built-in placeholders and the reference (``com.batteam.trimvo``) are filled so
+    the built binary gets the job's identity.
     """
-    content = _CODEMAGIC_YAML if reference is None else reference
-    content = re.sub(r"com\.batteam\.trimvo", bundle_id, content)
+    if signing is not None:
+        content = _CODEMAGIC_YAML_SIGNED
+        content = content.replace("__APP_STORE_APPLE_ID__", signing.apple_id)
+    else:
+        content = _CODEMAGIC_YAML if reference is None else reference
+        content = re.sub(r"com\.batteam\.trimvo", bundle_id, content)
     content = content.replace("__BUNDLE_ID__", bundle_id).replace("__APP_NAME__", app_name)
     return content
 
@@ -224,6 +393,7 @@ def resolved_workflow_id(
     *,
     bundle_id: str | None = None,
     app_name: str = "App",
+    signing: StoreSigning | None = None,
 ) -> str:
     """The workflow id of the effective codemagic.yaml (reference repo or built-in).
 
@@ -234,7 +404,8 @@ def resolved_workflow_id(
     from iosforge.mvp import codemagic_build
 
     bid = bundle_id or _bundle_id(settings, full_name)
-    content = _render_yaml(_reference_yaml(settings, gh_token), bid, app_name)
+    reference = None if signing is not None else _reference_yaml(settings, gh_token)
+    content = _render_yaml(reference, bid, app_name, signing)
     return codemagic_build.first_workflow_id(content) or "ios-unsigned"
 
 
@@ -246,17 +417,20 @@ def ensure_codemagic_yaml(
     *,
     bundle_id: str | None = None,
     app_name: str = "App",
+    signing: StoreSigning | None = None,
 ) -> bool:
     """Upsert the iOS ``codemagic.yaml`` (bundle id + display name for this job).
 
     Creates the file when absent and UPDATES it when the rendered content differs
     (e.g. the build profile / bundle id / name changed) so identity changes reach the
     build; a matching file is left untouched. Returns True when it wrote the file.
+    With ``signing`` the signed App Store workflow is written instead of the unsigned one.
     """
     base = settings.github_api_base
     path = "codemagic.yaml"
     bid = bundle_id or _bundle_id(settings, full_name)
-    content = _render_yaml(_reference_yaml(settings, gh_token), bid, app_name)
+    reference = None if signing is not None else _reference_yaml(settings, gh_token)
+    content = _render_yaml(reference, bid, app_name, signing)
     encoded = base64.b64encode(content.encode()).decode()
 
     check = httpx.get(
@@ -361,11 +535,13 @@ def integrate(
     repo_html_url: str,
     bundle_id: str | None = None,
     app_name: str = "App",
+    signing: StoreSigning | None = None,
 ) -> dict[str, Any]:
     """Connect ``repo_full_name`` to CodeMagic; return the saved identifiers.
 
     ``bundle_id`` / ``app_name`` (from the build profile) are written into the
-    committed codemagic.yaml so the built binary gets the job's identity.
+    committed codemagic.yaml so the built binary gets the job's identity. With
+    ``signing`` the signed App Store workflow is committed instead of the unsigned one.
     """
     cm_token = load_token(settings)
     if not cm_token:
@@ -399,8 +575,14 @@ def integrate(
         default_branch,
         bundle_id=bundle_id,
         app_name=app_name,
+        signing=signing,
     )
-    log.info("codemagic.codemagic_yaml", created=created_yaml, bundle_id=bundle_id)
+    log.info(
+        "codemagic.codemagic_yaml",
+        created=created_yaml,
+        bundle_id=bundle_id,
+        signed=signing is not None,
+    )
 
     app = find_app(settings, cm_token, repo_html_url)
     if app is None:

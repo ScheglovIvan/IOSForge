@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,47 @@ CANVAS = (1290, 2796)
 
 _FALLBACK_BG = ("#1B1B2F", "#3A1C4A")
 _FALLBACK_TEXT = "#FFFFFF"
+
+# Reusable decorative assets staged for every build. A laurel branch and a five-star
+# row are the badge furniture listings lean on; hand-drawing them in CSS looks crude and
+# wastes authoring time, so they ship as clean vectors the agent references by path.
+# The laurel is ONE left branch — the slide mirrors it (`transform:scaleX(-1)`) for the
+# right side. Colour is baked white (what most listings use), because `currentColor`
+# does not inherit into an SVG loaded through <img>. Leaves are elongated, spaced and
+# paired along a clean arc so it reads as a branch, not a blob.
+_LAUREL_STEM = "M62 136 C40 122 27 98 26 70 C25 46 33 24 52 8"
+_LAUREL_LEAVES = (
+    (48, 122, 60, 22, 6),
+    (34, 122, 20, 22, 6),
+    (38, 100, 74, 22, 6.5),
+    (24, 102, 34, 22, 6.5),
+    (30, 76, 86, 23, 7),
+    (18, 80, 46, 23, 7),
+    (28, 52, 100, 22, 6.5),
+    (18, 56, 58, 22, 6.5),
+    (34, 30, 112, 20, 6),
+    (26, 34, 72, 20, 6),
+)
+_LAUREL_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 144">'
+    f'<path d="{_LAUREL_STEM}" fill="none" stroke="#fff" stroke-width="3.5" '
+    'stroke-linecap="round"/>'
+    '<g fill="#fff">'
+    + "".join(
+        f'<ellipse cx="{cx}" cy="{cy}" rx="{rx}" ry="{ry}" transform="rotate({rot} {cx} {cy})"/>'
+        for cx, cy, rot, rx, ry in _LAUREL_LEAVES
+    )
+    + "</g></svg>"
+)
+_STARS_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 48" fill="#FFC531">'
+    + "".join(
+        f'<path transform="translate({i * 52})" d="M24 4l5.9 12 13.1 1.9-9.5 9.2 2.2 13'
+        'L24 27.9 12.3 34l2.2-13L5 11.9 18.1 10z"/>'
+        for i in range(5)
+    )
+    + "</svg>"
+)
 
 
 def load_pexels_key(secrets_path: str = "secrets/pexels.env") -> str:
@@ -174,33 +216,99 @@ per contract; a headless browser screenshots each at exactly {w}x{h}.
 
 Read in this directory:
 - `contracts/NN.json` — the analysis of source slide NN: what it sells, its `hero`, the
-  `key_elements` that must survive, headline treatment, backdrop, how the device sits,
-  `extras` and `depth_devices`. Do NOT open `original/` — contracts are the input.
-- `screens.json` + `screens/<id>.png` — OUR app's real screens (`id`, `name`, `purpose`).
-- `backgrounds/NN.jpg` — a stock photo already fetched for slides whose contract asks
-  for a photographic backdrop. Use it when present; otherwise build the backdrop in CSS.
-- `tokens.json` — OUR palette, gradients and typefaces. The listing must look like OUR
-  app, never like the source.
+  `key_elements` inside the phone, headline treatment, backdrop, device handling,
+  `extras` and `depth_devices`.
+- `original/NN.png` — the source store slide itself. Use it as the visual reference for
+  the COMPOSITION and the in-phone CONTENT you are reproducing (layout, which UI blocks,
+  what they contain). Never take colour, type or branding from it.
+- `screens.json` + `screens/<id>.png` — OUR app's real screens. These are your STYLE
+  reference: match their component look (card shape, buttons, list rows, icons, spacing).
+  Do NOT embed them as images — they are there to be imitated, not pasted.
+- `backgrounds/NN.jpg` — a stock photo pre-fetched for slides whose contract asks for a
+  photographic backdrop. Use it when present; otherwise build the backdrop in CSS.
+- `props/NN.jpg` — a stock photo of the slide's HEAVY prop (a car, a splash, a 3D object)
+  when the contract has a `prop_query`. Composite it; do NOT hand-draw the object.
+- `assets/laurel.svg`, `assets/stars.svg` — reusable badge furniture. Use these for any
+  laurel wreath or star rating (tint the laurel with `color`); never CSS-draw a wreath.
+- `tokens.json` — OUR palette, gradients and typefaces.
 
 Write `slides/NN.html`, one per contract, same numbering.
 
-HARD REQUIREMENTS
-- `body` is exactly {w}px by {h}px, `overflow:hidden`, no margins. Nothing may be clipped
-  unintentionally, and the page must not scroll.
-- Self-contained: inline `<style>` only. Reference local files by relative path
-  (`../screens/0006.png`, `../backgrounds/03.jpg`). NO external fonts, CDNs or network
-  URLs — they will not load and the slide will render broken.
-- Inside any device frame put OUR real screen image. Never draw a fake app UI, and never
-  claim a feature our screens do not show.
+WHAT TO BUILD vs WHAT TO PLACE AS AN IMAGE
+- BUILD in HTML/CSS: the in-phone app UI (below), the headline, the backdrop when it is a
+  gradient, simple shapes, and text. These carry our style, so they must be authored.
+- PLACE AS AN IMAGE, never hand-drawn: any HEAVY or complex object — a car, a water
+  splash, a 3D render (`props/NN.jpg`), a laurel wreath or star row (`assets/laurel.svg`,
+  `assets/stars.svg`), a photographic backdrop (`backgrounds/NN.jpg`). Hand-drawing a car
+  or a wreath in CSS looks crude and is a defect; reach for the asset instead.
 
-REPRODUCE THE COMPOSITION, NOT THE SKIN
-- Honour the contract's `hero`, every entry in `key_elements`, and its `depth_devices`.
-  If it says the UI cards overhang the phone edges, make them overhang. If the phone is
-  angled or bleeds off an edge, do that with `transform` / positioning. If there is a
-  feature list, a callout ring or a badge, build it.
-- CSS can carry most "3D": `perspective`, `rotate3d`, layered shadows, and a gold
-  vanishing-point grid via `repeating-linear-gradient` under `transform: perspective()`.
-  Use them instead of flat boxes when the contract calls for depth.
+THE IN-PHONE UI IS HTML/CSS — NOT A SCREENSHOT
+Do not embed any screenshot. The phone's screen is built as real HTML/CSS elements, just
+like the rest of the slide. Store listings are polished mock-ups, not raw captures, so
+this is what real listings do.
+- CONTENT and LAYOUT of the in-phone UI mirror the source slide's phone (from `original/`
+  and the contract's `key_elements`): the same kind of blocks, in the same arrangement —
+  if the source shows three sound-slot cards, build three; if it shows a scrolling list
+  of tracks with play buttons, build that list; if a dashboard of clock/map/weather
+  tiles, build those tiles.
+- STYLE comes entirely from OUR design system — `tokens.json` plus the look of
+  `screens/<id>.png` (our card radius, our buttons, our accent, our fonts). It must read
+  as OUR app, never the source's colours or branding.
+- TEXT is OURS. Where our real screens have a matching label or item name, use it; other-
+  wise write natural copy in the same spirit. Never reproduce the source's exact strings
+  or brand names, and never render the source's logo.
+- FILL THE WHOLE SCREEN, top to bottom. The phone screen is a COMPLETE app screen: the
+  header/title area, the main content the source shows there (cards, list rows, tiles, a
+  map, a player — whatever it is, populated with real items), and the tab bar when the
+  source has one. There must be NO bands of bare background inside the frame. Two or three
+  thin strips floating over an empty dark screen is the single most common failure here and
+  counts as a hard defect — the frame must read as a real, fully populated screen.
+- Build it cleanly: no doubled elements, nothing overlapping, no placeholder lorem. It
+  should look like a real, populated screen of our app.
+
+DEVICE OR NO DEVICE — read the contract's `device.treatment`
+- `treatment` is `none` (icon plates, full-bleed graphics, hero shots): do NOT draw a
+  phone at all. Such a source is often SQUARE while our canvas is portrait — adapt it, do
+  not letterbox it: put the mark large in the upper half, our headline/tagline beneath it,
+  and a backdrop (gradient or the provided photo) covering the ENTIRE canvas edge to edge.
+  A small tile floating on empty black is a hard defect; no third of the canvas may sit
+  empty. Forcing a phone onto an icon slide is also a hard structural miss.
+- Otherwise render the phone using the CANONICAL FRAME below, VERBATIM. Every slide that
+  shows a phone must use this exact frame so the device looks identical across the whole
+  listing — only its overall size may differ (scale the `.device` width). The `.screen`
+  is a container you fill with the built in-phone UI, never an `<img>`.
+
+  <div class="device"><div class="notch"></div>
+    <div class="screen"><!-- built UI here, styled from our tokens --></div></div>
+
+  .device{{position:relative;width:62%;aspect-ratio:1179/2556;
+    background:#0a0a0a;border-radius:12%/5.8%;padding:1.4%;
+    box-shadow:0 4% 9% rgba(0,0,0,.6),inset 0 0 0 1px rgba(255,255,255,.06);}}
+  .device .screen{{width:100%;height:100%;overflow:hidden;
+    border-radius:10.5%/5%;display:block;}}
+  .device .notch{{position:absolute;top:2.2%;left:50%;transform:translateX(-50%);
+    width:30%;height:1.6%;background:#0a0a0a;border-radius:999px;z-index:2;}}
+
+GEOMETRY
+- `body` is exactly {w}px by {h}px, `overflow:hidden`, no margins, no scrolling.
+- The in-phone UI is clipped by `.screen` (`overflow:hidden`), so build it to fill the
+  screen naturally; content may run under the bottom edge like a real scrolling screen.
+- Everything stays INSIDE the canvas. A prop, wreath or phone may sit partly off one edge
+  only if the contract says so; nothing drifts off by accident (no `right:-90px` that
+  pushes content out of frame).
+- Lay the canvas out as a vertical flow (flex column) so blocks reserve their own space.
+  Use absolute positioning only for things that are meant to overlap the backdrop, never
+  for headlines, badges or captions — that is how decoration ends up across text.
+- Leave breathing room: no element may touch or cross another's text.
+
+COMPOSITION
+- Honour the contract's `hero`, its `key_elements` and its `depth_devices` — express them
+  in HTML/CSS, in our design system, per the rules above.
+- CSS carries most "3D": `perspective`, `rotate3d`, layered shadows, and a vanishing-
+  point grid via `repeating-linear-gradient` under `transform: perspective()`.
+- Self-contained: inline `<style>` only, and any backdrop photo by relative path
+  (`../backgrounds/03.jpg`). NO external fonts, CDNs or network URLs — they will not load
+  and the slide renders broken.
 - Colours, gradients and type come from `tokens.json` — NOT from the source's palette.
 
 COPY
@@ -212,6 +320,44 @@ COPY
 Write ONLY the files under `slides/`. Produce one for EVERY contract — a listing that
 drops a slide is a failure.
 """
+
+
+BUILD_ONE_PROMPT = (
+    "Author EXACTLY ONE slide: write `slides/{index:02d}.html` for contract "
+    "`contracts/{index:02d}.json`. Do not touch any other slide. Follow every rule "
+    "below.\n\n" + BUILD_PROMPT
+)
+
+
+def stage_assets(workspace: Path) -> None:
+    """Write the reusable decorative vectors into the workspace for the agent to use."""
+    assets = workspace / "assets"
+    assets.mkdir(parents=True, exist_ok=True)
+    (assets / "laurel.svg").write_text(_LAUREL_SVG, encoding="utf-8")
+    (assets / "stars.svg").write_text(_STARS_SVG, encoding="utf-8")
+
+
+def prefetch_props(
+    workspace: Path, contracts: list[dict[str, Any]], *, api_key: str | None = None
+) -> int:
+    """Fetch a stock photo for each contract's heavy photographic prop (car, splash…).
+
+    A vehicle or 3D object hand-drawn in CSS looks crude and is slow to author, so the
+    analysis surfaces a `prop_query` and the object ships as a real photo the agent
+    composites, never as CSS shapes.
+    """
+    key = load_pexels_key() if api_key is None else api_key
+    out = workspace / "props"
+    fetched = 0
+    for contract in contracts:
+        query = str(contract.get("prop_query") or "").strip()
+        if not query:
+            continue
+        index = int(contract.get("index") or 0)
+        if fetch_background(query, out / f"{index:02d}.jpg", api_key=key):
+            fetched += 1
+    log.info("store_assets.props", fetched=fetched)
+    return fetched
 
 
 def prefetch_backgrounds(
@@ -235,6 +381,38 @@ def prefetch_backgrounds(
     return fetched
 
 
+def restore_pages(
+    workspace: Path, indices: Iterable[int], fetch: Callable[[str], bytes | None]
+) -> list[int]:
+    """Seed ``workspace/slides`` with pages authored by an earlier run.
+
+    Authoring eight slides takes hours, and the task is ``acks_late``: a worker restart
+    re-delivers it and used to re-author everything from zero, so the refine loop never
+    got its turn. Pages already on record are replayed and :func:`build_slide_pages`
+    skips them; a page the workspace already holds is never replaced.
+    """
+    slides = workspace / "slides"
+    slides.mkdir(parents=True, exist_ok=True)
+    restored: list[int] = []
+    for index in indices:
+        name = f"{index:02d}.html"
+        page = slides / name
+        if page.is_file():
+            continue
+        try:
+            data = fetch(name)
+        except Exception as exc:
+            log.warning("store_assets.restore_failed", index=index, error=str(exc))
+            continue
+        if not data:
+            continue
+        page.write_bytes(data)
+        restored.append(index)
+    if restored:
+        log.info("store_assets.restored", slides=restored)
+    return restored
+
+
 def build_slide_pages(
     workspace: Path,
     tokens: dict[str, Any],
@@ -242,27 +420,326 @@ def build_slide_pages(
     size: tuple[int, int] = CANVAS,
     timeout: int = 1800,
 ) -> list[Path]:
-    """Have the agent author one HTML page per contract; return the pages written.
+    """Author one HTML page per contract; return the pages written.
 
-    Authoring beats fixed templates here: the contracts describe angled devices,
-    in-context composites, callouts and perspective grids, and enumerating a template
-    per treatment would always trail what the analysis can describe.
+    One agent session authors all pages, then any slide it skipped is authored on its
+    own, serially. Authoring is done serially on purpose: concurrent claude CLI sessions
+    on a small host starve each other's CPU and most crash, producing far fewer pages
+    than they should — slow-but-complete beats fast-but-missing.
     """
-    from iosforge.mvp.claude_gen import run_task
 
     bound = log.bind(stage="slide_build", workdir=str(workspace))
     (workspace / "slides").mkdir(parents=True, exist_ok=True)
     (workspace / "tokens.json").write_text(
         json.dumps(tokens, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    prompt = BUILD_PROMPT.format(w=size[0], h=size[1])
-    (workspace / "BUILD_PROMPT.md").write_text(prompt, encoding="utf-8")
-    bound.info("store_assets.building")
-    run_task(workspace, prompt, timeout=timeout, tlog=bound)
+    indices = sorted(
+        int(p.stem) for p in (workspace / "contracts").glob("*.json") if p.stem.isdigit()
+    )
+    if not indices:
+        return []
+
+    bound.info("store_assets.building", slides=len(indices))
+    (workspace / "BUILD_PROMPT.md").write_text(
+        BUILD_PROMPT.format(w=size[0], h=size[1]), encoding="utf-8"
+    )
+    # One session per slide, each bounded by its own timeout (a single session for all
+    # pages blew past the timeout and retried the whole task). The CLI sometimes returns
+    # having written nothing, so retry a slide a few times until its page exists — a
+    # no-op return is cheap to repeat, and this is what makes the run reach 8/8.
+    for idx in indices:
+        page = workspace / "slides" / f"{idx:02d}.html"
+        for attempt in range(1, _BUILD_ATTEMPTS + 1):
+            if page.is_file():
+                break
+            try:
+                _author_one_slide(workspace, idx, size, timeout)
+            except Exception as exc:
+                bound.warning(
+                    "store_assets.slide_build_failed", index=idx, attempt=attempt, error=str(exc)
+                )
+        if not page.is_file():
+            bound.warning("store_assets.slide_unrecoverable", index=idx)
 
     pages = sorted((workspace / "slides").glob("*.html"))
     bound.info("store_assets.built", pages=len(pages))
     return pages
+
+
+# The CLI occasionally returns without writing the page; a couple of retries per slide
+# turns those flaky no-ops into a complete listing.
+_BUILD_ATTEMPTS = 3
+
+
+_SHARED_INPUTS = ("contracts", "screens", "original", "backgrounds", "props", "assets")
+_SHARED_FILES = ("tokens.json", "screens.json")
+
+
+def link_shared_inputs(workspace: Path, sub: Path) -> None:
+    """Give ``sub`` its own entries for the shared inputs, without copying bytes.
+
+    These used to be symlinks, and the agent could not read a single one: the CLI
+    sandbox allows reads inside the working directory, a symlink resolves outside it,
+    and the read is refused. The agent then rightly declined to author a slide blind
+    and exited 0 having written nothing — the "flaky no-op" that lost slides every run.
+    Hard links are real directory entries, so they resolve inside and cost no space.
+    """
+    for name in _SHARED_INPUTS:
+        src = workspace / name
+        if not src.is_dir():
+            continue
+        shutil.copytree(src, sub / name, copy_function=_link_or_copy, dirs_exist_ok=True)
+    for name in _SHARED_FILES:
+        src = workspace / name
+        if src.is_file():
+            _link_or_copy(str(src), str(sub / name))
+
+
+def _link_or_copy(src: str, dst: str) -> None:
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
+def _author_one_slide(
+    workspace: Path, index: int, size: tuple[int, int], timeout: int
+) -> Path | None:
+    """Author a single slide in an isolated sub-workspace, then collect its page.
+
+    Concurrent agents must not share a cwd (each writes its own TASK.md), so every
+    slide gets its own directory with the shared inputs linked in.
+    """
+    from iosforge.mvp.claude_gen import run_task, task_tail
+
+    sub = workspace / "build" / f"{index:02d}"
+    if sub.exists():
+        shutil.rmtree(sub, ignore_errors=True)
+    (sub / "slides").mkdir(parents=True, exist_ok=True)
+    link_shared_inputs(workspace, sub)
+
+    prompt = BUILD_ONE_PROMPT.format(index=index, w=size[0], h=size[1])
+    run_task(sub, prompt, timeout=timeout, tlog=log.bind(stage="slide_build", index=index))
+
+    authored = sub / "slides" / f"{index:02d}.html"
+    if not authored.is_file():
+        log.warning("store_assets.slide_not_authored", index=index, tail=task_tail(sub))
+        return None
+    target = workspace / "slides" / f"{index:02d}.html"
+    shutil.copy2(authored, target)
+    return target
+
+
+REVIEW_PROMPT = """\
+Score how faithfully each of our slides reproduces the COMPOSITION of the source slide
+it answers, then say exactly what to change.
+
+Pairs to compare (same number = same slide):
+- `original/NN.png` — the source slide.
+- `render/NN.png` — ours.
+
+We deliberately differ in palette, wording and branding — ours is skinned in our own
+design system. Do NOT penalise different colours, fonts or copy.
+
+CANVAS IS FIXED — NEVER PENALISE IT. Ours is a portrait App Store screenshot canvas whose
+size is mandated by Apple; the source slide may be a completely different shape (a square
+icon plate, a wide banner). Never score down for the aspect/size difference and never ask
+us to resize the canvas — that "fix" would produce an invalid screenshot. Judge instead how
+well the source's composition is ADAPTED to our portrait canvas. When the source is only an
+app icon or a full-bleed graphic, the correct answer is a real portrait slide (the mark
+large, our headline, a backdrop filling the frame); score that adaptation, and penalise
+dead empty space rather than the shape.
+
+Score how well ours reproduces the source's STRUCTURE:
+- headline placement, how many lines, whether the emphasis treatment matches;
+- where the device sits, its size relative to the canvas, how it is cropped or angled;
+- the IN-PHONE UI: does it show the same kind of blocks in the same arrangement as the
+  source's phone (same number of cards, a matching list, the same tile grid)?
+- presence and position of badges, feature lists, callouts, props;
+- the depth device (cards lifted past the frame, in-context composite, etc.);
+- overall balance and use of space.
+
+Defects that cap a slide at 40 regardless of layout:
+- the in-phone screen is empty, ONLY PARTLY FILLED (thin strips of UI with bands of bare
+  background between them inside the frame), a flat placeholder, or clearly not the UI the
+  source slide shows there;
+- more than a third of the canvas is dead empty space carrying nothing;
+- the in-phone UI is skinned in the SOURCE's colours/branding instead of ours;
+- any element crossing text (a badge, wreath or prop over a headline or caption);
+- the device cut off when the source keeps it whole;
+- text clipped, overflowing the canvas, or running off an edge;
+- any duplicated / doubled-up element;
+- a heavy object (car, splash, wreath, 3D shape) crudely hand-drawn in CSS instead of
+  placed as the provided image.
+
+Look hardest at the DEPTH compositions — lifted cards, angled devices, in-context
+composites, perspective grids. That is where elements collide. Flag precisely: a lifted
+card overlapping another card or its own text; a tilted phone whose corner covers a
+caption; a prop or grid line crossing a headline; two floating layers overlapping so
+their content is unreadable. Give the exact pair and the fix (shift, resize, restack).
+
+Write `review.json`:
+
+{"slides": [
+  {"index": 1,
+   "score": 0-100,
+   "defects": ["specific, actionable: 'laurel wreath overlaps the badge caption'"],
+   "fixes": ["what to change in the HTML, concretely"]}
+]}
+
+Be strict and concrete. A defect with no actionable fix is useless. Output ONLY
+`review.json`.
+"""
+
+REFINE_PROMPT = """\
+Fix the slides that failed review.
+
+`review.json` scores each slide against the source composition and lists its defects and
+fixes. For EVERY slide scoring below {threshold}, edit its `slides/NN.html` so the listed
+defects are gone. Leave passing slides untouched.
+
+All the original build rules still hold — in particular:
+- everything is HTML/CSS, including the in-phone UI: no screenshot is embedded, the phone
+  screen is built elements styled from our design system, its content mirroring the
+  source slide's phone;
+- if a phone is shown it is the SAME canonical device as the other slides;
+- the canvas is a vertical flow; decoration must not cross text; nothing doubled;
+- `body` stays exactly {w}px by {h}px with nothing unintentionally cut off.
+
+Edit the existing files in place. Write nothing else.
+"""
+
+
+EDIT_SLIDE_PROMPT = """\
+Improve ONE existing slide in place. Do not rewrite it from scratch.
+
+`slides/{name}` is the current HTML for slide {index}; `render/{index:02d}.png` is how it
+looks now; `original/{index:02d}.png` is the source slide it reproduces. Our app's real
+screens are in `screens/` (STYLE reference — imitate their look, do not embed them), our
+palette in `tokens.json`, a stock backdrop (if any) in `backgrounds/`.
+
+Operator request:
+{instructions}
+
+Edit `slides/{name}` to satisfy that request while keeping everything else about the
+slide. All the original build rules still hold:
+- the app UI appears EXACTLY ONCE, always as an `<img>` of a screen or a crop of it —
+  never hand-author cards, chips, rows or nav bars;
+- never layer anything over a screenshot that already shows the same content;
+- if a phone is shown it must be the SAME device as the other slides — a `.device` with a
+  dark bezel, ~12% body radius, a notch and a drop shadow (only the size may differ),
+  never a hairline outline; if the contract's treatment is `none`, do not draw a phone;
+- the canvas is a vertical flow; decoration must never cross text; nothing drifts off the
+  edge by accident;
+- `body` stays exactly {w}px by {h}px, self-contained inline CSS, local paths only.
+
+Edit the one file in place. Write nothing else.
+"""
+
+
+def edit_slide(
+    workspace: Path,
+    index: int,
+    instructions: str,
+    *,
+    size: tuple[int, int] = CANVAS,
+    timeout: int = 1200,
+) -> Path | None:
+    """Apply an operator instruction to a single existing slide page, in place."""
+    from iosforge.mvp.claude_gen import run_task
+
+    page = workspace / "slides" / f"{index:02d}.html"
+    if not page.is_file():
+        log.warning("store_assets.edit_missing_page", index=index)
+        return None
+    bound = log.bind(stage="slide_edit", index=index)
+    prompt = EDIT_SLIDE_PROMPT.format(
+        name=page.name,
+        index=index,
+        instructions=instructions.strip() or "Improve the composition and fix any defects.",
+        w=size[0],
+        h=size[1],
+    )
+    bound.info("store_assets.editing")
+    run_task(workspace, prompt, timeout=timeout, tlog=bound)
+    return page
+
+
+def review_slides(
+    workspace: Path, originals_dir: Path, renders: list[Path], *, timeout: int = 900
+) -> dict[str, Any]:
+    """Score each render against its source slide; returns the parsed review."""
+    from iosforge.mvp.claude_gen import run_task
+
+    bound = log.bind(stage="slide_review", workdir=str(workspace))
+    render_dir = workspace / "render"
+    if render_dir.exists():
+        shutil.rmtree(render_dir, ignore_errors=True)
+    render_dir.mkdir(parents=True, exist_ok=True)
+    for png in renders:
+        shutil.copy2(png, render_dir / png.name)
+
+    (workspace / "review.json").unlink(missing_ok=True)
+    bound.info("store_assets.reviewing", pairs=len(renders))
+    run_task(workspace, REVIEW_PROMPT, timeout=timeout, tlog=bound)
+
+    produced = workspace / "review.json"
+    if not produced.is_file():
+        bound.warning("store_assets.review_missing")
+        return {"slides": []}
+    try:
+        payload = json.loads(produced.read_text())
+    except ValueError:
+        bound.warning("store_assets.review_unparsable")
+        return {"slides": []}
+    return payload if isinstance(payload, dict) else {"slides": []}
+
+
+def review_scores(review: dict[str, Any]) -> dict[int, int]:
+    """Slide index -> score, from a review payload."""
+    scores: dict[int, int] = {}
+    for entry in review.get("slides", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        index, score = entry.get("index"), entry.get("score", 0)
+        try:
+            scores[int(index)] = int(score)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+    return scores
+
+
+def failing_slides(review: dict[str, Any], threshold: int) -> list[int]:
+    """Indices scoring below ``threshold``, worst first."""
+    scores = review_scores(review)
+    return sorted((i for i, s in scores.items() if s < threshold), key=lambda i: scores[i])
+
+
+def resumable_slides(review: dict[str, Any], indices: Iterable[int], threshold: int) -> list[int]:
+    """Indices worth carrying over from a previous run — those that already passed.
+
+    Resuming everything would preserve the very slides the last review rejected, and
+    the authoring prompt is what usually changed between runs. A slide that scored
+    below the threshold (or was never scored) is re-authored from its contract.
+    """
+    scores = review_scores(review)
+    return [i for i in indices if scores.get(i, 0) >= threshold]
+
+
+def refine_slides(
+    workspace: Path,
+    *,
+    threshold: int,
+    size: tuple[int, int] = CANVAS,
+    timeout: int = 1800,
+) -> None:
+    """Have the agent repair the slides the review failed, in place."""
+    from iosforge.mvp.claude_gen import run_task
+
+    bound = log.bind(stage="slide_refine", workdir=str(workspace))
+    prompt = REFINE_PROMPT.format(threshold=threshold, w=size[0], h=size[1])
+    bound.info("store_assets.refining")
+    run_task(workspace, prompt, timeout=timeout, tlog=bound)
 
 
 def _chromium() -> str:

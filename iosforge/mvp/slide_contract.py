@@ -82,7 +82,11 @@ For each `original/NN.png` write `contracts/NN.json`:
      "description": "e.g. 'laurel wreath around 1M+ Users and five stars'"}
   ],
   "depth_devices": ["how the slide creates depth: UI cards lifted past the frame,
-                    layered 3D props, drop shadows, magnifier cutout, ..."]
+                    layered 3D props, drop shadows, magnifier cutout, ..."],
+  "prop_query": "2-4 word stock-photo search for a HEAVY photographic prop the slide
+                 leans on — a vehicle, a water splash, a 3D object — that should be an
+                 image, not CSS. \\"\\" when there is no such prop (icons, wreaths, badges
+                 and simple shapes are NOT props; leave them out)."
 }
 
 Rules:
@@ -107,6 +111,34 @@ def analyse(workspace: Path, *, timeout: int = 900) -> list[Path]:
     written = sorted((workspace / "contracts").glob("*.json"))
     bound.info("slide_contract.analysed", count=len(written))
     return written
+
+
+def restore_contracts(contracts_dir: Path, stored: list[Any]) -> list[int]:
+    """Write contracts kept from an earlier run back into ``contracts_dir``.
+
+    A listing run costs hours, so a restart that re-analysed the source from scratch
+    never reached the refine loop. Contracts already on record are replayed instead;
+    anything the workspace holds wins, so a fresh analysis is never overwritten.
+    """
+    contracts_dir.mkdir(parents=True, exist_ok=True)
+    restored: list[int] = []
+    for payload in stored:
+        if not isinstance(payload, dict) or not payload.get("sells"):
+            continue
+        try:
+            index = int(payload.get("index", 0))
+        except (TypeError, ValueError):
+            continue
+        if index <= 0:
+            continue
+        path = contracts_dir / CONTRACT_NAME.format(index=index)
+        if path.is_file():
+            continue
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        restored.append(index)
+    if restored:
+        log.info("slide_contract.restored", slides=restored)
+    return restored
 
 
 def source_indices(originals_dir: Path) -> list[int]:

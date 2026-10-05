@@ -25,6 +25,7 @@ from iosforge.common.config import Settings
 
 _TEST = "test"
 _REAL = "real"
+_STORE = "store"
 
 
 def _bundle_slug(value: str) -> str:
@@ -47,7 +48,7 @@ def resolve_identity(
     meta = metadata or {}
     spec = spec or {}
     profile = str(meta.get("build_profile") or _TEST).lower()
-    if profile not in (_TEST, _REAL):
+    if profile not in (_TEST, _REAL, _STORE):
         profile = _TEST
 
     app_name = str(meta.get("override_app_name") or spec.get("app_name") or "App").strip() or "App"
@@ -55,5 +56,6 @@ def resolve_identity(
     override_bundle = str(meta.get("override_bundle_id") or "").strip()
     bundle_id = override_bundle or f"{settings.codemagic_bundle_prefix}.{_bundle_slug(app_name)}"
 
+    # Only the test profile runs Apphud in sandbox; real and store are production.
     sandbox = profile == _TEST
     return BuildIdentity(profile=profile, app_name=app_name, bundle_id=bundle_id, sandbox=sandbox)

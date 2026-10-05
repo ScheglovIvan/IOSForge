@@ -180,3 +180,26 @@ def test_cli_run_uses_staged_pipeline(tmp_path: Path, monkeypatch: pytest.Monkey
     assert flutter_app == run_dir / "flutter_app"
     assert (run_dir / "app_spec.json").exists()
     assert (run_dir / "tasks.json").exists()
+
+
+def test_run_task_keeps_the_cli_transcript_for_a_silent_no_op(tmp_path, monkeypatch) -> None:
+    # the CLI sometimes exits 0 writing nothing; without the transcript a refusal and a
+    # crash look identical in the logs
+    import subprocess as sp
+
+    from iosforge.mvp import claude_gen
+
+    def fake_run(*args, **kwargs):
+        return sp.CompletedProcess(args=[], returncode=0, stdout="wrote nothing", stderr="warn")
+
+    monkeypatch.setattr(claude_gen.subprocess, "run", fake_run)
+    log = claude_gen.get_logger("test")
+    assert claude_gen.run_task(tmp_path, "do it", timeout=5, tlog=log) == 0
+    tail = claude_gen.task_tail(tmp_path)
+    assert "wrote nothing" in tail and "warn" in tail
+
+
+def test_task_tail_is_empty_when_nothing_ran(tmp_path) -> None:
+    from iosforge.mvp import claude_gen
+
+    assert claude_gen.task_tail(tmp_path) == ""

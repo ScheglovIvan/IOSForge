@@ -22,6 +22,7 @@ from __future__ import annotations
 import io
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from datetime import datetime
 from typing import IO, TYPE_CHECKING
 
 import boto3  # type: ignore[import-untyped]
@@ -85,6 +86,7 @@ class ArtifactVersion(BaseModel):
     version_id: str | None = None
     size: int
     is_latest: bool
+    last_modified: datetime | None = None
 
 
 class ArtifactRef(BaseModel):
@@ -247,6 +249,7 @@ class S3ArtifactStorage(ArtifactStorage):
                     version_id=entry.get("VersionId"),
                     size=int(entry.get("Size", 0)),
                     is_latest=bool(entry.get("IsLatest", False)),
+                    last_modified=entry.get("LastModified"),
                 )
             )
         _log.info(
@@ -272,6 +275,16 @@ class S3ArtifactStorage(ArtifactStorage):
         # On a versioned bucket this writes a delete marker; prior versions stay.
         self._client.delete_object(Bucket=self._bucket, Key=key)
         _log.info("artifact.delete", bucket=self._bucket, key=key)
+
+    def delete_version(self, key: str, version_id: str) -> None:
+        """Hard-delete ONE version of ``key``, leaving the rest of the history.
+
+        Used to discard a bad generation: the object keeps its other versions, and
+        whichever remains newest becomes current again. Not on the abstract
+        interface — a store without versioning has nothing to implement.
+        """
+        self._client.delete_object(Bucket=self._bucket, Key=key, VersionId=version_id)
+        _log.info("artifact.delete_version", bucket=self._bucket, key=key, version_id=version_id)
 
     def purge(self, key: str) -> None:
         """Hard-delete every version of ``key`` (test cleanup / explicit GC).

@@ -102,3 +102,29 @@ def test_analyse_prompt_forbids_summarising_the_set() -> None:
 
 def test_analyse_prompt_records_rather_than_invents() -> None:
     assert "This is analysis; invent nothing here" in sc.ANALYSE_PROMPT
+
+
+def test_restore_contracts_rebuilds_the_analysis_from_a_previous_run(tmp_path) -> None:
+    # a store-assets run costs hours; a restart must not re-analyse slides it already has
+    contracts_dir = tmp_path / "contracts"
+    stored = [_contract(1), _contract(2), _contract(3)]
+    assert sc.restore_contracts(contracts_dir, stored) == [1, 2, 3]
+    assert sorted(p.name for p in contracts_dir.glob("*.json")) == [
+        "01.json",
+        "02.json",
+        "03.json",
+    ]
+    reloaded = json.loads((contracts_dir / "02.json").read_text())
+    assert reloaded["index"] == 2 and reloaded["sells"]
+
+
+def test_restore_contracts_skips_junk_and_never_overwrites(tmp_path) -> None:
+    contracts_dir = tmp_path / "contracts"
+    contracts_dir.mkdir()
+    (contracts_dir / "01.json").write_text('{"index": 1, "sells": "fresh"}')
+    restored = sc.restore_contracts(
+        contracts_dir,
+        ["not-a-dict", {"sells": "no index"}, {"index": 1, "sells": "stale"}, _contract(2)],
+    )
+    assert restored == [2]
+    assert json.loads((contracts_dir / "01.json").read_text())["sells"] == "fresh"

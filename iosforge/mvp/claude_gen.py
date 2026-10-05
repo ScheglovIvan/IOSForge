@@ -561,9 +561,28 @@ def run_task(
         timeout=timeout,
         check=False,
     )
+    # The CLI sometimes exits 0 having written nothing. Without its transcript there is
+    # no way to tell a refusal from a crash, so keep the tail next to the workspace.
+    try:
+        (workspace / TASK_LOG).write_text(
+            f"{res.stdout[-8000:]}\n[stderr]\n{res.stderr[-2000:]}", encoding="utf-8"
+        )
+    except OSError:
+        pass
     if res.returncode != 0:
         tlog.warning("codegen_tasks.task.cli_failed", code=res.returncode, stderr=res.stderr[-500:])
     return res.returncode
+
+
+TASK_LOG = ".claude_task.log"
+
+
+def task_tail(workspace: Path, limit: int = 400) -> str:
+    """Last of the CLI transcript for ``workspace``, for explaining a no-op run."""
+    try:
+        return (workspace / TASK_LOG).read_text(encoding="utf-8").strip()[-limit:]
+    except OSError:
+        return ""
 
 
 def _slug(value: str) -> str:

@@ -40,6 +40,7 @@ from iosforge.db.session import get_sessionmaker
 from iosforge.storage.client import S3ArtifactStorage, build_key
 
 if TYPE_CHECKING:
+    from iosforge.mvp.legal_pages import DataPractice
     from iosforge.mvp.paths import RunPaths
 
 log = get_logger("worker.run_job")
@@ -58,6 +59,30 @@ def _finish_stage(db, row: StageTimeline) -> None:
     if row.started_at:
         row.duration_ms = int((row.finished_at - row.started_at).total_seconds() * 1000)
     db.commit()
+
+
+def _store_signing(job: Job, settings: Settings) -> Any:
+    """Signed App Store build inputs for a store-profile job, or None.
+
+    Returns a ``StoreSigning`` only when the job asks for a store build AND both the app's
+    numeric App Store id (per job) and an uploaded App Store Connect signing credential
+    (admin Signing settings page → secrets/) are present. The key itself reaches the build
+    as injected environment variables, so no name registered in the CodeMagic UI is needed.
+    Otherwise None → the unsigned sideload workflow is used.
+    """
+    from iosforge.mvp import asc_credentials
+    from iosforge.mvp.codemagic_integration import StoreSigning
+
+    meta = job.source_app_metadata or {}
+    if str(meta.get("build_profile") or "") != "store":
+        return None
+    apple_id = str(meta.get("appstore_apple_id") or "").strip()
+    if not apple_id or not asc_credentials.is_configured(settings, str(job.id)):
+        return None
+    key_name = str(
+        meta.get("asc_api_key_name") or settings.codemagic_asc_api_key_name or ""
+    ).strip()
+    return StoreSigning(asc_api_key_name=key_name, apple_id=apple_id)
 
 
 def _archive_and_upload_sources(paths: RunPaths, storage, job_id: str, tmp: Path) -> str:
@@ -805,6 +830,14 @@ def build_frontend(self, job_id: str) -> str:
                 # build merges them into Info.plist (a missing network id = no SKAN).
                 if attribution_config:
                     attribution.stage_ios_assets(settings, paths.flutter_app, attribution_config)
+                from iosforge.mvp import ios_compliance
+
+                ios_compliance.stage(
+                    paths.flutter_app,
+                    bool((job.source_app_metadata or {}).get("export_compliance_exempt")),
+                )
+                _stage_app_icon(job_id, storage, paths.flutter_app)
+                _stage_audio_envelopes(paths.flutter_app)
 
                 # --- GitHub Upload stage: push the project to a new public repo ---
                 gh_result: dict[str, str] | None = None
@@ -857,6 +890,7 @@ def build_frontend(self, job_id: str) -> str:
                                 repo_html_url=gh_result["url"],
                                 bundle_id=ident.bundle_id,
                                 app_name=ident.app_name,
+                                signing=_store_signing(job, settings),
                             )
                             gen.codemagic = cm_result
                             log.info(
@@ -981,13 +1015,19 @@ def run_codemagic_build(self, job_id: str) -> str:
         # lags behind). A rework/augment force-push replaces the tree with flutter_app/
         # and drops the separately-committed codemagic.yaml, so also restore it in the
         # repo (best-effort) for the UI / future builds.
+        signing = _store_signing(job, settings)
         try:
             workflow_id = codemagic_integration.resolved_workflow_id(
-                settings, gh_token, full_name, bundle_id=ident.bundle_id, app_name=ident.app_name
+                settings,
+                gh_token,
+                full_name,
+                bundle_id=ident.bundle_id,
+                app_name=ident.app_name,
+                signing=signing,
             )
         except Exception as exc:
             log.warning("codemagic_build.workflow_lookup_failed", job_id=job_id, error=str(exc))
-            workflow_id = "ios-unsigned"
+            workflow_id = "ios-store" if signing else "ios-unsigned"
         if gh_token and full_name:
             try:
                 if codemagic_integration.ensure_codemagic_yaml(
@@ -997,6 +1037,7 @@ def run_codemagic_build(self, job_id: str) -> str:
                     branch,
                     bundle_id=ident.bundle_id,
                     app_name=ident.app_name,
+                    signing=signing,
                 ):
                     log.info(
                         "codemagic_build.codemagic_yaml_updated",
@@ -1010,9 +1051,19 @@ def run_codemagic_build(self, job_id: str) -> str:
                     error=str(exc),
                 )
 
+        build_env: dict[str, str] | None = None
+        if signing is not None:
+            from iosforge.mvp import asc_credentials
+
+            build_env = asc_credentials.build_env(settings, job_id)
         try:
             build_id = codemagic_build.start_build(
-                settings, token, app_id=app_id, workflow_id=workflow_id, branch=branch
+                settings,
+                token,
+                app_id=app_id,
+                workflow_id=workflow_id,
+                branch=branch,
+                env=build_env,
             )
         except Exception as exc:
             log.error("codemagic_build.start_failed", job_id=job_id, error=str(exc))
@@ -1191,13 +1242,17 @@ def rework_frontend(self, job_id: str, instructions: str = "", augment: bool = F
                         provider=attribution_config.get("provider"),
                     )
                 if augment:
-                    claude_gen.augment(paths)
+                    claude_gen.augment(paths, timeout=settings.codegen_rework_timeout_s)
                 else:
-                    claude_gen.rework(paths, instructions)
+                    claude_gen.rework(
+                        paths, instructions, timeout=settings.codegen_rework_timeout_s
+                    )
 
                 if settings.codegen_compile_gate:
                     remaining = claude_gen.ensure_compiles(
-                        paths, attempts=settings.codegen_compile_gate_attempts
+                        paths,
+                        attempts=settings.codegen_compile_gate_attempts,
+                        timeout=settings.codegen_rework_timeout_s,
                     )
                     if remaining:
                         log.warning(
@@ -1230,6 +1285,14 @@ def rework_frontend(self, job_id: str, instructions: str = "", augment: bool = F
                 # hydrates from it) keeps the ATT copy + SKAdNetwork list.
                 if attribution_config:
                     attribution.stage_ios_assets(settings, paths.flutter_app, attribution_config)
+                from iosforge.mvp import ios_compliance
+
+                ios_compliance.stage(
+                    paths.flutter_app,
+                    bool((job.source_app_metadata or {}).get("export_compliance_exempt")),
+                )
+                _stage_app_icon(job_id, storage, paths.flutter_app)
+                _stage_audio_envelopes(paths.flutter_app)
 
                 zip_base = tmp / "flutter_app"
                 shutil.make_archive(str(zip_base), "zip", str(paths.flutter_app))
@@ -1298,6 +1361,543 @@ def rework_frontend(self, job_id: str, instructions: str = "", augment: bool = F
     return f"job {job_id} reworked (v{final_version})"
 
 
+def _stage_audio_envelopes(flutter_app: Path) -> bool:
+    """Measure the app's audio and write the envelopes it draws its waveform from.
+
+    Done at build time from the actual clips: a hand-written envelope looks varied
+    but repeats, which shows up on screen as identical clumps of bars.
+    """
+    from iosforge.mvp import audio_envelope
+
+    audio_dir = flutter_app / "assets" / "audio"
+    if not audio_dir.is_dir():
+        return False
+    envelopes = audio_envelope.measure_directory(audio_dir)
+    if not envelopes:
+        return False
+    target = flutter_app / "lib" / "core" / "audio" / "sound_envelopes.g.dart"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(audio_envelope.to_dart(envelopes), encoding="utf-8")
+    log.info("audio_envelope.staged", clips=len(envelopes))
+    return True
+
+
+def _slide_contract(storage, job_id: str, index: int, spec: dict[str, Any]) -> dict[str, Any]:
+    """The analysed contract for one slide, or a minimal stand-in.
+
+    A contract records what the source slide sells and which elements must not be
+    lost — the product of a full analysis pass. When that pass has not run, the
+    model still SEES the source image, so a slide can be drawn from the app's own
+    description instead of blocking on an analysis that costs half an hour.
+    """
+    try:
+        stored = storage.get(
+            build_key(job_id=job_id, kind="store_assets", name="slide_contracts.json")
+        )
+        for entry in json.loads(stored):
+            if int(entry.get("index", 0)) == index:
+                return dict(entry)
+    except Exception:
+        pass
+
+    log.info("store_slide.contract_fallback", job_id=job_id, index=index)
+    sells = str(spec.get("one_liner") or spec.get("description") or "").strip()
+    return {
+        "index": index,
+        "sells": sells[:220] or "what this app does, as the source slide presents it",
+        "device": {"treatment": "as_shown"},
+    }
+
+
+def _stage_app_icon(job_id: str, storage, flutter_app: Path) -> bool:
+    """Carry the chosen icon into the project being built, when one exists.
+
+    The icon is generated and re-rolled independently of the app, so the build
+    reads whichever version is current at the time it runs. Absence is normal —
+    a job whose icon was never generated builds with the Flutter default.
+    """
+    from iosforge.mvp import app_icon, icon_stage
+
+    key = build_key(job_id=job_id, kind="app_icon", name=app_icon.ICON_NAME)
+    try:
+        if not storage.exists(key):
+            return False
+        return icon_stage.stage(flutter_app, storage.get(key))
+    except Exception as exc:
+        log.warning("icon_stage.failed", job_id=job_id, error=str(exc))
+        return False
+
+
+def _app_palette(job_id: str, storage) -> dict[str, str]:
+    """The palette the generated app actually compiled, or empty when unreadable.
+
+    Read from the sources archive rather than the spec: only the theme file states
+    what the shipped app looks like. Any failure degrades to the spec's tokens
+    instead of failing the job.
+    """
+    import zipfile
+
+    from iosforge.mvp import app_icon
+
+    maker = get_sessionmaker()
+    try:
+        with maker() as db:
+            gen = db.scalar(
+                select(GenerationResult)
+                .where(GenerationResult.job_id == uuid.UUID(job_id))
+                .order_by(GenerationResult.created_at.desc())
+            )
+            key = gen.sources_key if gen else ""
+        if not key:
+            return {}
+        with zipfile.ZipFile(io.BytesIO(storage.get(key))) as archive:
+            for name in archive.namelist():
+                if name.endswith("app_colors.dart"):
+                    palette = app_icon.palette_from_app(
+                        archive.read(name).decode("utf-8", "replace")
+                    )
+                    if palette:
+                        log.info("app_icon.palette_from_app", job_id=job_id, **palette)
+                        return palette
+    except Exception as exc:
+        log.warning("app_icon.palette_read_failed", job_id=job_id, error=str(exc))
+    return {}
+
+
+@celery_app.task(base=PipelineTask, name="iosforge.publish_legal_pages", bind=True)
+def publish_legal_pages(
+    self, job_id: str, contact_email: str = "", app_name_override: str = ""
+) -> str:
+    """Publish the app's Privacy Policy to GitHub Pages and record the URL.
+
+    App Store Connect will not accept a submission without a Privacy Policy URL, and
+    review rejects a paywall whose Terms/Privacy links do nothing. The page is built
+    from what this build actually declares — the SDKs in its pubspec and the usage
+    descriptions in ``ios_permissions.json`` — and pushed to a ``gh-pages`` branch
+    the code push never touches, so re-generating the app cannot delete it.
+    """
+    import zipfile
+
+    from iosforge.mvp import github_publish, legal_pages
+
+    settings = get_settings()
+    storage = S3ArtifactStorage()
+    maker = get_sessionmaker()
+    tmp = Path(tempfile.mkdtemp(prefix="iosforge-legal-"))
+    try:
+        with maker() as db:
+            job = db.get(Job, uuid.UUID(job_id))
+            if job is None:
+                return f"job {job_id} not found"
+            gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job.id))
+            repo_url = (gen.github_repo_url if gen else "") or ""
+        if not repo_url:
+            return f"job {job_id}: no GitHub repo to publish to"
+
+        spec = json.loads(
+            storage.get(build_key(job_id=job_id, kind="app_spec", name="app_spec.json"))
+        )
+        app_name = app_name_override or str(spec.get("app_name") or spec.get("name") or "This app")
+        bundle_id = str(spec.get("bundle_id") or "")
+
+        sources = tmp / "flutter_app.zip"
+        sources.write_bytes(
+            storage.get(build_key(job_id=job_id, kind="sources", name="flutter_app.zip"))
+        )
+        pubspec = ""
+        permissions: dict[str, object] = {}
+        with zipfile.ZipFile(sources) as archive:
+            for name in archive.namelist():
+                if name == "pubspec.yaml":
+                    pubspec = archive.read(name).decode("utf-8", "replace")
+                elif name == "ios_permissions.json":
+                    try:
+                        permissions = json.loads(archive.read(name))
+                    except json.JSONDecodeError:
+                        permissions = {}
+                if not bundle_id and name == "ios_permissions.json":
+                    continue
+
+        facts = legal_pages.facts_from_build(
+            app_name=app_name,
+            bundle_id=bundle_id,
+            contact_email=contact_email or settings.legal_contact_email,
+            pubspec=pubspec,
+            permissions=permissions,
+            remote_endpoints=_remote_endpoints(pubspec, spec),
+        )
+        url = legal_pages.publish_pages(
+            settings=settings,
+            token=github_publish.load_token(settings),
+            repo_full_name=legal_pages.repo_full_name(repo_url),
+            files=legal_pages.build_pages(facts),
+            commit_message=f"Publish privacy policy for {app_name}",
+        )
+        privacy_url = f"{url}/privacy"
+        support_url = f"{url}/support"
+        storage.put(
+            build_key(job_id=job_id, kind="legal", name="urls.json"),
+            json.dumps(
+                {
+                    "privacy_policy_url": privacy_url,
+                    "terms_url": legal_pages.APPLE_EULA_URL,
+                    "support_url": support_url,
+                },
+                indent=2,
+            ).encode("utf-8"),
+            content_type="application/json",
+        )
+        log.info("legal_pages.recorded", job_id=job_id, url=privacy_url)
+        return privacy_url
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _remote_endpoints(pubspec: str, spec: dict[str, Any]) -> list[DataPractice]:
+    """Third-party endpoints the app sends user input to, as policy disclosures."""
+    from iosforge.mvp.legal_pages import DataPractice as _Practice
+
+    out: list[DataPractice] = []
+    blob = json.dumps(spec, ensure_ascii=False).lower()
+    if "vin" in blob and "http" in pubspec:
+        out.append(
+            _Practice(
+                "Vehicle lookup",
+                "When you look up a VIN, that number is sent to the United States "
+                "National Highway Traffic Safety Administration's public vPIC "
+                "service to be decoded. Nothing else about you is sent with it, and "
+                "we do not keep the numbers you look up.",
+            )
+        )
+    return out
+
+
+def _legal_urls(job_id: str, storage: S3ArtifactStorage) -> dict[str, str]:
+    """The published privacy/terms/support URLs for a job, empty when not yet published."""
+    from iosforge.mvp.store_listing import APPLE_EULA_URL
+
+    key = build_key(job_id=job_id, kind="legal", name="urls.json")
+    if not storage.exists(key):
+        return {"privacy_policy_url": "", "terms_url": APPLE_EULA_URL, "support_url": ""}
+    data = json.loads(storage.get(key))
+    return {
+        "privacy_policy_url": str(data.get("privacy_policy_url") or ""),
+        "terms_url": str(data.get("terms_url") or APPLE_EULA_URL),
+        "support_url": str(data.get("support_url") or ""),
+    }
+
+
+@celery_app.task(base=PipelineTask, name="iosforge.generate_store_listing", bind=True)
+def generate_store_listing(
+    self,
+    job_id: str,
+    subtitle: str = "",
+    keyword_seed: list[str] | None = None,
+    lead: str = "",
+) -> str:
+    """Draft the App Store listing (description, keywords, subtitle) from the app's spec.
+
+    Independent of the build: it needs the spec and the published legal URLs only, so the
+    listing can be re-rolled without touching the app. Stored as ``store_listing/listing.json``
+    for the admin to review and push. Not copied from the original app — generated fresh.
+    """
+    from iosforge.mvp import store_listing
+
+    storage = S3ArtifactStorage()
+    maker = get_sessionmaker()
+    with maker() as db:
+        job = db.get(Job, uuid.UUID(job_id))
+        if job is None:
+            return f"job {job_id} not found"
+        metadata = dict(job.source_app_metadata or {})
+
+    spec = json.loads(storage.get(build_key(job_id=job_id, kind="app_spec", name="app_spec.json")))
+    legal = _legal_urls(job_id, storage)
+    app_name = str(metadata.get("app_name") or spec.get("app_name") or spec.get("name") or "")
+    has_sub = bool(
+        spec.get("monetization")
+        or spec.get("subscriptions")
+        or "paywall" in json.dumps(spec).lower()
+    )
+
+    listing = store_listing.generate(
+        spec,
+        app_name=app_name,
+        privacy_policy_url=legal["privacy_policy_url"],
+        terms_url=legal["terms_url"],
+        subtitle=subtitle,
+        keyword_seed=keyword_seed or [],
+        lead=lead,
+        has_subscription=has_sub,
+    )
+    storage.put(
+        build_key(job_id=job_id, kind="store_listing", name="listing.json"),
+        json.dumps(listing.to_dict(), indent=2, ensure_ascii=False).encode("utf-8"),
+        content_type="application/json",
+    )
+    log.info(
+        "store_listing.generated",
+        job_id=job_id,
+        keywords=listing.keywords[:60],
+        warnings=len(listing.warnings),
+    )
+    return f"job {job_id} store listing drafted ({len(listing.description)} chars)"
+
+
+@celery_app.task(base=PipelineTask, name="iosforge.push_store_listing", bind=True)
+def push_store_listing(self, job_id: str) -> str:
+    """Write the drafted listing to App Store Connect via the job's own API key.
+
+    Targets the app's editable version + app-info localisation, so nothing is written to a
+    version already in review or on sale. Description, keywords, promotional text and
+    support/marketing URLs go on the version; subtitle and privacy policy URL on the app
+    info. Requires the job's ASC signing key and a generated listing.
+    """
+    from iosforge.mvp import asc_api, asc_credentials, store_listing
+
+    settings = get_settings()
+    storage = S3ArtifactStorage()
+    maker = get_sessionmaker()
+    with maker() as db:
+        job = db.get(Job, uuid.UUID(job_id))
+        if job is None:
+            return f"job {job_id} not found"
+        metadata = dict(job.source_app_metadata or {})
+
+    listing_key = build_key(job_id=job_id, kind="store_listing", name="listing.json")
+    if not storage.exists(listing_key):
+        raise RuntimeError("no store listing drafted — generate it first")
+    listing = store_listing.from_dict(json.loads(storage.get(listing_key)))
+
+    creds = asc_credentials.load(settings, job_id)
+    if creds is None:
+        raise RuntimeError("no App Store Connect API key uploaded for this app")
+
+    bundle_id = str(metadata.get("bundle_id") or "")
+    with asc_api.AscClient(creds) as client:
+        target = client.editable_listing(bundle_id=bundle_id)
+        written: list[str] = []
+        if target.version_localization_id:
+            version_attrs = {
+                "description": listing.description,
+                "keywords": listing.keywords,
+                "promotionalText": listing.promotional_text,
+            }
+            if listing.support_url:
+                version_attrs["supportUrl"] = listing.support_url
+            if listing.marketing_url:
+                version_attrs["marketingUrl"] = listing.marketing_url
+            client.write_version_localization(target.version_localization_id, version_attrs)
+            written.append("description/keywords")
+        if target.info_localization_id:
+            info_attrs: dict[str, str] = {"subtitle": listing.subtitle}
+            if listing.privacy_policy_url:
+                info_attrs["privacyPolicyUrl"] = listing.privacy_policy_url
+            # The store name is writable only while the app info is editable — Apple
+            # locks it once a version is in review. Attempt it, but never let a locked
+            # name lose the rest of the listing.
+            if listing.app_name:
+                try:
+                    client.write_info_localization(
+                        target.info_localization_id, {**info_attrs, "name": listing.app_name}
+                    )
+                    written.append("name/subtitle/privacy")
+                except asc_api.AscApiError as exc:
+                    log.warning("store_listing.name_locked", job_id=job_id, error=str(exc))
+                    client.write_info_localization(target.info_localization_id, info_attrs)
+                    written.append("subtitle/privacy (name locked)")
+            else:
+                client.write_info_localization(target.info_localization_id, info_attrs)
+                written.append("subtitle/privacy")
+
+    log.info(
+        "store_listing.pushed",
+        job_id=job_id,
+        app_id=target.app_id,
+        state=target.version_state,
+        wrote=written,
+    )
+    return f"job {job_id} listing pushed to App Store Connect ({', '.join(written) or 'nothing'})"
+
+
+@celery_app.task(base=PipelineTask, name="iosforge.autofill_store_metadata", bind=True)
+def autofill_store_metadata(
+    self,
+    job_id: str,
+    primary_category: str = "UTILITIES",
+    secondary_category: str = "",
+    copyright_holder: str = "",
+) -> str:
+    """Fill every App Store Connect field the API can set without human judgement.
+
+    Category, content-rights declaration, the age-rating questionnaire (answered as an app
+    with no objectionable content → 4+), the Support URL and the copyright line — the fields
+    that otherwise have to be clicked through in the web UI before a version can be
+    submitted. Submission is blocked outright without the copyright, so it is filled from the
+    account holder's organisation unless the caller names one. The privacy policy and store
+    copy come from their own steps; this covers what is left. The build is NOT attached
+    here — that is a deliberate, version-specific choice left to the operator.
+    """
+    from iosforge.mvp import asc_api, asc_credentials
+
+    settings = get_settings()
+    storage = S3ArtifactStorage()
+    maker = get_sessionmaker()
+    with maker() as db:
+        job = db.get(Job, uuid.UUID(job_id))
+        if job is None:
+            return f"job {job_id} not found"
+        metadata = dict(job.source_app_metadata or {})
+
+    creds = asc_credentials.load(settings, job_id)
+    if creds is None:
+        raise RuntimeError("no App Store Connect API key uploaded for this app")
+
+    legal = _legal_urls(job_id, storage)
+    support_url = str(legal.get("support_url") or "")
+    bundle_id = str(metadata.get("bundle_id") or "")
+    done: list[str] = []
+
+    with asc_api.AscClient(creds) as client:
+        app = client.find_app(bundle_id)
+        app_id = str(app["id"])
+        target = client.editable_listing(bundle_id=bundle_id)
+
+        infos = client.get(f"/apps/{app_id}/appInfos", **{"include": "ageRatingDeclaration"})
+        info = infos.get("data", [{}])[0]
+        info_id = str(info.get("id") or "")
+        age_decl = next(
+            (i["id"] for i in infos.get("included", []) if i["type"] == "ageRatingDeclarations"),
+            "",
+        )
+
+        if info_id:
+            client.set_categories(info_id, primary=primary_category, secondary=secondary_category)
+            done.append(f"category {primary_category}")
+        try:
+            client.set_content_rights(app_id, "DOES_NOT_USE_THIRD_PARTY_CONTENT")
+            done.append("content rights")
+        except asc_api.AscApiError as exc:
+            log.warning("autofill.content_rights_failed", job_id=job_id, error=str(exc))
+        if age_decl:
+            client.set_age_rating(age_decl, asc_api.AGE_RATING_NO_OBJECTIONABLE)
+            done.append("age rating")
+        if support_url and target.version_localization_id:
+            client.write_version_localization(
+                target.version_localization_id, {"supportUrl": support_url}
+            )
+            done.append("support URL")
+
+        holder = copyright_holder.strip() or _copyright_line(client)
+        if holder:
+            client.set_copyright(target.version_id, holder)
+            done.append("copyright")
+
+    log.info("autofill.done", job_id=job_id, app_id=app_id, filled=done)
+    return f"job {job_id} App Store Connect fields filled: {', '.join(done) or 'nothing'}"
+
+
+def _copyright_line(client: object) -> str:
+    """``<year> <organisation>`` for the copyright field, from the account holder.
+
+    Apple wants the rights holder, not the app name, and blocks submission without it.
+    The account holder's own name is the honest fallback when the API exposes no
+    organisation.
+    """
+    import datetime as _dt
+
+    holder = client.account_holder()  # type: ignore[attr-defined]
+    name = " ".join(x for x in (holder.get("first_name"), holder.get("last_name")) if x)
+    return f"{_dt.datetime.now(_dt.UTC).year} {name}".strip() if name else ""
+
+
+@celery_app.task(base=PipelineTask, name="iosforge.set_review_contact", bind=True)
+def set_review_contact(
+    self,
+    job_id: str,
+    first_name: str,
+    last_name: str,
+    phone: str,
+    email: str,
+    notes: str = "",
+) -> str:
+    """Write the App Review contact (name, phone, email) onto the editable version.
+
+    Apple requires this before a version can be submitted and does not expose it as a
+    build detail, so it lives here as its own step the admin can trigger.
+    """
+    from iosforge.mvp import asc_api, asc_credentials
+
+    settings = get_settings()
+    maker = get_sessionmaker()
+    with maker() as db:
+        job = db.get(Job, uuid.UUID(job_id))
+        if job is None:
+            return f"job {job_id} not found"
+        bundle_id = str((job.source_app_metadata or {}).get("bundle_id") or "")
+
+    creds = asc_credentials.load(settings, job_id)
+    if creds is None:
+        raise RuntimeError("no App Store Connect API key uploaded for this app")
+
+    attributes: dict[str, object] = {
+        "contactFirstName": first_name.strip(),
+        "contactLastName": last_name.strip(),
+        "contactPhone": phone.strip(),
+        "contactEmail": email.strip(),
+        "demoAccountRequired": False,
+    }
+    if notes.strip():
+        attributes["notes"] = notes.strip()
+
+    with asc_api.AscClient(creds) as client:
+        target = client.editable_listing(bundle_id=bundle_id)
+        client.set_review_contact(target.version_id, attributes)
+
+    log.info("review_contact.set", job_id=job_id, email=email)
+    return f"job {job_id} review contact set: {first_name} {last_name}"
+
+
+@celery_app.task(base=PipelineTask, name="iosforge.generate_app_icon", bind=True)
+def generate_app_icon(self, job_id: str) -> str:
+    """Draw the clone's own app icon from the source app's icon.
+
+    Independent of the build: it needs the spec and the source listing's artwork,
+    nothing else, so the icon can be re-rolled until it satisfies without touching
+    the app. Stored as ``app_icon/app_icon.png`` — 1024x1024, opaque, unrounded,
+    which is what App Store Connect accepts.
+    """
+    from iosforge.mvp import app_icon, store_assets
+
+    settings = get_settings()
+    storage = S3ArtifactStorage()
+    maker = get_sessionmaker()
+    tmp = Path(tempfile.mkdtemp(prefix="iosforge-icon-"))
+    try:
+        with maker() as db:
+            job = db.get(Job, uuid.UUID(job_id))
+            if job is None:
+                return f"job {job_id} not found"
+            metadata = dict(job.source_app_metadata or {})
+
+        spec = json.loads(
+            storage.get(build_key(job_id=job_id, kind="app_spec", name="app_spec.json"))
+        )
+        # The icon must match the app that actually ships. Codegen applies its own
+        # anti-clone divergence, so the palette it compiled can disagree with the
+        # spec's tokens entirely — read the app's colours first and fall back.
+        palette = _app_palette(job_id, storage) or store_assets.palette(
+            spec.get("design_tokens") or {}
+        )
+        icon = app_icon.generate(spec, metadata, tmp, settings=settings, palette=palette)
+        key = build_key(job_id=job_id, kind="app_icon", name=app_icon.ICON_NAME)
+        storage.put(key, icon.read_bytes(), content_type="image/png")
+        log.info("app_icon.stored", job_id=job_id, key=key)
+        return f"job {job_id} app icon: {icon.stat().st_size // 1024} KB"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 @celery_app.task(base=PipelineTask, name="iosforge.generate_store_assets", bind=True)
 def generate_store_assets(self, job_id: str) -> str:
     """Render the App Store listing screenshots for an already-built app.
@@ -1310,7 +1910,7 @@ def generate_store_assets(self, job_id: str) -> str:
     Independent of the build: it needs the generated screens and the spec, nothing else,
     so it can be re-run to iterate on the listing without touching the app.
     """
-    from iosforge.mvp import slide_contract, store_assets
+    from iosforge.mvp import image_slides, slide_contract, store_assets
 
     settings = get_settings()
     storage = S3ArtifactStorage()
@@ -1374,54 +1974,495 @@ def generate_store_assets(self, job_id: str) -> str:
             "store_assets.staged", job_id=job_id, screens=len(rendered), originals=len(originals)
         )
 
+        # A previous run's output is the starting point: this task is acks_late and
+        # costs hours, so a restart that re-analysed and re-authored everything never
+        # reached the refine loop. Whatever is already on record is replayed first.
+        def _stored(name: str) -> bytes | None:
+            key = build_key(job_id=job_id, kind="store_assets", name=name)
+            return storage.get(key) if storage.exists(key) else None
+
         # Stage 1 — analyse EVERY source slide on its own into its own contract.
         contracts_dir = work / "contracts"
-        slide_contract.analyse(work, timeout=settings.store_assets_timeout_s)
-        # Gate: no contract for a slide means the listing would silently shrink.
-        contracts = slide_contract.verify_analysis(originals_dir, contracts_dir)
+        previous = _stored("slide_contracts.json")
+        if previous:
+            slide_contract.restore_contracts(contracts_dir, json.loads(previous))
+        # Gate: no contract for a slide means the listing would silently shrink. A
+        # restored set that already satisfies it makes the analysis pass unnecessary.
+        try:
+            contracts = slide_contract.verify_analysis(originals_dir, contracts_dir)
+        except slide_contract.IncompleteAnalysisError:
+            slide_contract.analyse(work, timeout=settings.store_assets_timeout_s)
+            contracts = slide_contract.verify_analysis(originals_dir, contracts_dir)
 
-        # Stage 2 — author one page per contract, then screenshot. Authoring (rather
-        # than filling fixed templates) is what lets a slide honour an angled device,
-        # an in-context composite or a perspective grid the contract asked for.
         tokens = spec.get("design_tokens") or {}
+        out_dir = tmp / "out"
+
+        # Stage 2 — draw each contract. The image engine returns a finished slide per
+        # source in about a minute; the HTML engine has an agent author a page that
+        # Chromium screenshots, which costs minutes but keeps text and colour exact.
+        # A configured engine with no token silently falls back rather than failing a
+        # job for a missing secret.
+        if settings.store_assets_engine == "replicate" and image_slides.is_configured(settings):
+            token = image_slides.load_token(settings)
+            palette = store_assets.palette(tokens)
+            pngs = []
+            for contract in contracts:
+                index = int(contract.get("index") or 0)
+                source = originals_dir / f"{index:02d}.png"
+                if not source.is_file():
+                    continue
+                try:
+                    pngs.append(
+                        image_slides.render_slide(
+                            contract,
+                            source,
+                            out_dir / f"{index:02d}.png",
+                            settings=settings,
+                            token=token,
+                            palette=palette,
+                        )
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "store_assets.slide_failed", job_id=job_id, index=index, error=str(exc)
+                    )
+            if not pngs:
+                return f"job {job_id} produced no slides"
+            return _store_slides(storage, job_id, pngs, pages=[], contracts=contracts, review={})
+
+        store_assets.stage_assets(work)
         store_assets.prefetch_backgrounds(work, contracts)
+        store_assets.prefetch_props(work, contracts)
+        threshold = settings.store_assets_similarity_min
+        prior = _stored("review.json")
+        store_assets.restore_pages(
+            work,
+            store_assets.resumable_slides(
+                json.loads(prior) if prior else {},
+                [int(c.get("index", 0)) for c in contracts if c.get("index")],
+                threshold,
+            ),
+            _stored,
+        )
         pages = store_assets.build_slide_pages(
             work, tokens, timeout=settings.store_assets_timeout_s
         )
         if not pages:
             return f"job {job_id} produced no slide pages"
 
-        out_dir = tmp / "out"
         pngs = store_assets.render_pages(work, pages, out_dir)
 
-        dropped = slide_contract.missing_slides(contracts, pngs)
-        if dropped:
-            raise RuntimeError(
-                f"Сгенерировано {len(pngs)} из {len(contracts)} экранов. "
-                f"Отсутствуют: {', '.join(dropped)}"
-            )
+        # Stage 3 — score each render against the source composition and re-author the
+        # ones that fail. Authoring is blind: without this loop nobody ever looks at the
+        # result, which is how doubled UI and decoration across text survived before.
+        review: dict[str, Any] = {}
+        # The review/refine agents are long-running too; a timeout here must NOT bubble
+        # up and retry the whole (already expensive) build. Best-effort polish only.
+        try:
+            for attempt in range(1, settings.store_assets_max_iterations + 1):
+                review = store_assets.review_slides(
+                    work, originals_dir, pngs, timeout=settings.store_assets_timeout_s
+                )
+                failing = store_assets.failing_slides(review, threshold)
+                scores = store_assets.review_scores(review)
+                log.info(
+                    "store_assets.reviewed",
+                    job_id=job_id,
+                    attempt=attempt,
+                    failing=len(failing),
+                    lowest=min(scores.values()) if scores else None,
+                    mean=round(sum(scores.values()) / len(scores)) if scores else None,
+                )
+                if not failing:
+                    break
+                if attempt == settings.store_assets_max_iterations:
+                    log.warning(
+                        "store_assets.below_threshold",
+                        job_id=job_id,
+                        slides=failing,
+                        threshold=threshold,
+                    )
+                    break
+                store_assets.refine_slides(
+                    work, threshold=threshold, timeout=settings.store_assets_timeout_s
+                )
+                pngs = store_assets.render_pages(work, pages, out_dir)
+        except Exception as exc:
+            log.warning("store_assets.review_skipped", job_id=job_id, error=str(exc))
 
-        keys: list[str] = []
-        for png in pngs:
-            key = build_key(job_id=job_id, kind="store_assets", name=png.name)
-            storage.put(key, png.read_bytes(), content_type="image/png")
-            keys.append(key)
-        # Keep the authored pages: they are the editable source of each slide.
-        for page in pages:
-            storage.put(
-                build_key(job_id=job_id, kind="store_assets", name=page.name),
-                page.read_bytes(),
-                content_type="text/html",
-            )
-        # The contracts are what generation consumed — keep them alongside the output so
-        # a disputed slide can be traced back to the analysis it came from.
-        storage.put(
-            build_key(job_id=job_id, kind="store_assets", name="slide_contracts.json"),
-            json.dumps(contracts, indent=2, ensure_ascii=False).encode(),
-            content_type="application/json",
+        return _store_slides(storage, job_id, pngs, pages=pages, contracts=contracts, review=review)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _store_slides(
+    storage,
+    job_id: str,
+    pngs: list[Path],
+    *,
+    pages: list[Path],
+    contracts: list[dict[str, Any]],
+    review: dict[str, Any],
+) -> str:
+    """Persist a finished listing and report what was produced against what was planned.
+
+    Shared by both engines. A short listing is reported WITHOUT raising: an exception
+    here would send the whole expensive task into a Celery retry, so what succeeded is
+    stored and the gap is surfaced in the result and a warning.
+    """
+    from iosforge.mvp import slide_contract, store_assets
+
+    dropped = slide_contract.missing_slides(contracts, pngs)
+    if dropped:
+        log.warning(
+            "store_assets.incomplete",
+            job_id=job_id,
+            made=len(pngs),
+            expected=len(contracts),
+            missing=dropped,
         )
-        log.info("store_assets.done", job_id=job_id, slides=len(keys), contracts=len(contracts))
-        return f"job {job_id} store assets: {len(keys)} slide(s)"
+
+    keys: list[str] = []
+    for png in pngs:
+        key = build_key(job_id=job_id, kind="store_assets", name=png.name)
+        storage.put(key, png.read_bytes(), content_type="image/png")
+        keys.append(key)
+    # Authored pages are the editable source of a slide; the image engine has none.
+    for page in pages:
+        storage.put(
+            build_key(job_id=job_id, kind="store_assets", name=page.name),
+            page.read_bytes(),
+            content_type="text/html",
+        )
+    # The contracts are what generation consumed — keep them alongside the output so
+    # a disputed slide can be traced back to the analysis it came from.
+    storage.put(
+        build_key(job_id=job_id, kind="store_assets", name="slide_contracts.json"),
+        json.dumps(contracts, indent=2, ensure_ascii=False).encode(),
+        content_type="application/json",
+    )
+    storage.put(
+        build_key(job_id=job_id, kind="store_assets", name="review.json"),
+        json.dumps(review, indent=2, ensure_ascii=False).encode(),
+        content_type="application/json",
+    )
+    scores = store_assets.review_scores(review)
+    mean_score = round(sum(scores.values()) / len(scores)) if scores else None
+    log.info(
+        "store_assets.done",
+        job_id=job_id,
+        slides=len(keys),
+        contracts=len(contracts),
+        mean_score=mean_score,
+    )
+    gap = f", missing {', '.join(dropped)}" if dropped else ""
+    scored = f", similarity {mean_score}%" if mean_score is not None else ""
+    return f"job {job_id} store assets: {len(keys)}/{len(contracts)} slide(s){scored}{gap}"
+
+
+def _rehydrate_store_workspace(job_id: str, storage, spec: dict[str, Any], work: Path) -> None:
+    """Rebuild the store-assets workspace from stored artifacts for a per-slide edit.
+
+    A slide's HTML references its screen and backdrop by relative path, so the pages,
+    the app screens, the fetched backdrops and the contracts are all restored where the
+    edit + re-render expect them.
+    """
+    from iosforge.mvp import store_assets
+
+    (work / "slides").mkdir(parents=True, exist_ok=True)
+    (work / "screens").mkdir(parents=True, exist_ok=True)
+
+    for entry in spec.get("screens", []) or []:
+        sid = str(entry.get("id") or "")
+        if not sid:
+            continue
+        try:
+            data = storage.get(
+                build_key(job_id=job_id, kind="generated_screenshots", name=f"{sid}.png")
+            )
+        except Exception:
+            continue
+        (work / "screens" / f"{sid}.png").write_bytes(data)
+
+    # The edit references render/NN.png (how it looks now); stage it from the stored PNG.
+    (work / "render").mkdir(parents=True, exist_ok=True)
+    for idx in range(1, 11):
+        try:
+            html = storage.get(
+                build_key(job_id=job_id, kind="store_assets", name=f"{idx:02d}.html")
+            )
+        except Exception:
+            continue
+        (work / "slides" / f"{idx:02d}.html").write_bytes(html)
+        try:
+            png = storage.get(build_key(job_id=job_id, kind="store_assets", name=f"{idx:02d}.png"))
+            (work / "render" / f"{idx:02d}.png").write_bytes(png)
+        except Exception:
+            pass
+
+    try:
+        contracts = json.loads(
+            storage.get(build_key(job_id=job_id, kind="store_assets", name="slide_contracts.json"))
+        )
+        (work / "slide_contracts.json").write_text(json.dumps(contracts, ensure_ascii=False))
+        store_assets.stage_assets(work)
+        store_assets.prefetch_backgrounds(work, contracts)
+        store_assets.prefetch_props(work, contracts)
+    except Exception:
+        pass
+
+    (work / "tokens.json").write_text(
+        json.dumps(spec.get("design_tokens") or {}, ensure_ascii=False)
+    )
+
+
+@celery_app.task(base=PipelineTask, name="iosforge.generate_ipad_slides", bind=True)
+def generate_ipad_slides(
+    self,
+    job_id: str,
+    count: int = 3,
+    swap_device: bool = True,
+    variant: str = "",
+    notes: str = "",
+    indices: list[int] | None = None,
+) -> str:
+    """Re-frame the first slides of the listing for the iPad canvas.
+
+    Built FROM our finished phone slides rather than from the competitor's artwork:
+    the wording, palette and subject are already settled, and re-deriving them would
+    only reopen decisions that were made deliberately. Only the shape changes —
+    0.46 wide-to-tall becomes 0.75 — and, where a phone is pictured, the device
+    itself becomes a tablet.
+
+    Only the leading slides are made: those are the ones a listing is judged on, and
+    an iPad set does not have to match the iPhone set slide for slide.
+
+    ``variant`` writes beside the set instead of over it, so several takes can be
+    compared before one is adopted. ``notes`` steer a take without touching the
+    standing rules. ``indices`` re-frames named slides instead of the leading ones,
+    for when the tablet set is not simply the first few.
+    """
+    from iosforge.mvp import image_slides
+
+    settings = get_settings()
+    storage = S3ArtifactStorage()
+    tmp = Path(tempfile.mkdtemp(prefix="iosforge-ipad-"))
+    try:
+        token = image_slides.load_token(settings)
+        if not token:
+            return f"job {job_id}: no Replicate token configured"
+
+        made: list[int] = []
+        wanted = indices if indices else list(range(1, 11))
+        for index in wanted:
+            if not indices and len(made) >= count:
+                break
+            source_key = build_key(job_id=job_id, kind="store_assets", name=f"{index:02d}.png")
+            if not storage.exists(source_key):
+                continue
+            phone = tmp / f"{index:02d}.png"
+            phone.write_bytes(storage.get(source_key))
+            try:
+                prompt = image_slides.ipad_prompt(swap_device=swap_device)
+                if notes.strip():
+                    prompt += (
+                        "\n\nOPERATOR CORRECTIONS — these override anything above "
+                        f"that contradicts them:\n{notes.strip()}"
+                    )
+                data = image_slides.generate_image(
+                    prompt,
+                    [image_slides.upload_image(phone, token=token)],
+                    token=token,
+                    model=settings.replicate_model,
+                    resolution=settings.replicate_resolution,
+                    timeout=settings.replicate_timeout_s,
+                    size=image_slides.IPAD_CANVAS,
+                )
+            except Exception as exc:
+                log.warning("ipad_slide.failed", job_id=job_id, index=index, error=str(exc))
+                continue
+            name = f"ipad_{index:02d}.png"
+            if variant:
+                safe = re.sub(r"[^a-z0-9-]+", "-", variant.lower()).strip("-") or "v"
+                name = f"ipad_{index:02d}_{safe}.png"
+            storage.put(
+                build_key(job_id=job_id, kind="store_assets", name=name),
+                image_slides.to_png(data),
+                content_type="image/png",
+            )
+            made.append(index)
+            log.info("ipad_slide.done", job_id=job_id, index=index, bytes=len(data))
+
+        if not made:
+            return f"job {job_id} produced no iPad slides"
+        return f"job {job_id} iPad slides: {', '.join(f'{i:02d}' for i in made)}"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@celery_app.task(base=PipelineTask, name="iosforge.generate_store_slide", bind=True)
+def generate_store_slide(
+    self,
+    job_id: str,
+    index: int,
+    notes: str = "",
+    from_current: bool = False,
+    variant: str = "",
+    text_free: bool = False,
+) -> str:
+    """Draw ONE listing slide with the image engine, leaving the others alone.
+
+    The unit an operator actually works in: look at a slide, say what is wrong, get
+    that slide back. ``notes`` are appended to the prompt as corrections that
+    override the standing rules, so a re-run answers the feedback instead of
+    rolling the dice again. The contract is untouched — it records what the source
+    slide contained, which does not change because our render was off.
+
+    ``from_current`` edits OUR slide instead of redrawing from the competitor's.
+    Once a slide is close, starting over throws away everything that already works
+    and re-rolls the parts that were fine; editing keeps them.
+
+    ``variant`` writes the result beside the slide instead of over it, so several
+    attempts can be compared before one replaces the listing. Variants are named
+    ``NN_<variant>.png`` and never appear in the listing itself.
+    """
+    from iosforge.mvp import image_slides, store_assets
+
+    settings = get_settings()
+    storage = S3ArtifactStorage()
+    maker = get_sessionmaker()
+    tmp = Path(tempfile.mkdtemp(prefix="iosforge-slide-"))
+    try:
+        with maker() as db:
+            job = db.get(Job, uuid.UUID(job_id))
+            if job is None:
+                return f"job {job_id} not found"
+            meta = job.source_app_metadata or {}
+            app_id = str(meta.get("appstore_app_id") or "")
+            if not app_id and job.source_app_ref:
+                found = re.search(r"id(\d+)", job.source_app_ref)
+                app_id = found.group(1) if found else ""
+            country = str(meta.get("appstore_country") or "us")
+
+        token = image_slides.load_token(settings)
+        if not token:
+            return f"job {job_id} slide {index}: no Replicate token configured"
+
+        spec = json.loads(
+            storage.get(build_key(job_id=job_id, kind="app_spec", name="app_spec.json"))
+        )
+        contract = _slide_contract(storage, job_id, index, spec)
+
+        slide_key = build_key(job_id=job_id, kind="store_assets", name=f"{index:02d}.png")
+        if from_current:
+            # Editing our own render: it IS the composition, so the competitor's
+            # slide is not needed and would only pull the result back towards it.
+            if not storage.exists(slide_key):
+                return f"job {job_id} has no slide {index:02d} to edit"
+            image_slides_source = tmp / f"current_{index:02d}.png"
+            image_slides_source.write_bytes(storage.get(slide_key))
+        else:
+            originals = tmp / "original"
+            image_slides_source = originals / f"{index:02d}.png"
+            store_assets.download_original_slides(app_id, originals, country=country)
+            if not image_slides_source.is_file():
+                return f"job {job_id} could not fetch source slide {index:02d}"
+
+        palette = _app_palette(job_id, storage) or store_assets.palette(
+            spec.get("design_tokens") or {}
+        )
+        # Our own icon rides along as a second reference so a slide that shows the
+        # app's mark draws OURS, not the source's — the model otherwise copies the
+        # icon it can see in the screenshot, colours and all.
+        icon_path: Path | None = None
+        icon_key = build_key(job_id=job_id, kind="app_icon", name=image_slides.ICON_REF_NAME)
+        try:
+            if storage.exists(icon_key):
+                icon_path = tmp / "app_icon.png"
+                icon_path.write_bytes(storage.get(icon_key))
+        except Exception as exc:
+            log.warning("store_slide.icon_unavailable", job_id=job_id, error=str(exc))
+            icon_path = None
+
+        out = image_slides.render_slide(
+            contract,
+            image_slides_source,
+            tmp / "out" / f"{index:02d}.png",
+            settings=settings,
+            token=token,
+            palette=palette,
+            notes=notes,
+            icon=icon_path,
+            editing=from_current,
+            text_free=text_free,
+        )
+        target = slide_key
+        if variant:
+            safe = re.sub(r"[^a-z0-9-]+", "-", variant.lower()).strip("-") or "v"
+            target = build_key(job_id=job_id, kind="store_assets", name=f"{index:02d}_{safe}.png")
+        storage.put(target, out.read_bytes(), content_type="image/png")
+        log.info("store_slide.done", job_id=job_id, index=index, notes=bool(notes.strip()))
+        return f"job {job_id} slide {index:02d}: {out.stat().st_size // 1024} KB"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@celery_app.task(base=PipelineTask, name="iosforge.regenerate_store_slide", bind=True)
+def regenerate_store_slide(self, job_id: str, index: int, instructions: str) -> str:
+    """Refine ONE listing slide in place from the HTML that already exists.
+
+    Rehydrates only what that slide needs, edits its page per the operator's request
+    (never from scratch), re-renders just that slide and stores it back. The other
+    slides are untouched.
+    """
+    from iosforge.mvp import store_assets
+
+    settings = get_settings()
+    storage = S3ArtifactStorage()
+    maker = get_sessionmaker()
+    tmp = Path(tempfile.mkdtemp(prefix="iosforge-slide-"))
+    try:
+        with maker() as db:
+            job = db.get(Job, uuid.UUID(job_id))
+            if job is None:
+                return f"job {job_id} not found"
+            app_id = str((job.source_app_metadata or {}).get("appstore_app_id") or "")
+            if not app_id and job.source_app_ref:
+                found = re.search(r"id(\d+)", job.source_app_ref)
+                app_id = found.group(1) if found else ""
+            country = str((job.source_app_metadata or {}).get("appstore_country") or "us")
+        spec = json.loads(
+            storage.get(build_key(job_id=job_id, kind="app_spec", name="app_spec.json"))
+        )
+
+        work = tmp / "ws"
+        work.mkdir(parents=True, exist_ok=True)
+        _rehydrate_store_workspace(job_id, storage, spec, work)
+        # The source slide is the edit's fidelity reference.
+        store_assets.download_original_slides(app_id, work / "original", country=country)
+
+        page = store_assets.edit_slide(
+            work, index, instructions, timeout=settings.store_assets_timeout_s
+        )
+        if page is None:
+            return f"job {job_id} slide {index:02d} not found to edit"
+
+        rendered = store_assets.render_pages(work, [page], tmp / "out")
+        if not rendered:
+            return f"job {job_id} slide {index:02d} failed to render after edit"
+
+        storage.put(
+            build_key(job_id=job_id, kind="store_assets", name=f"{index:02d}.html"),
+            page.read_bytes(),
+            content_type="text/html",
+        )
+        storage.put(
+            build_key(job_id=job_id, kind="store_assets", name=f"{index:02d}.png"),
+            rendered[0].read_bytes(),
+            content_type="image/png",
+        )
+        log.info("store_assets.slide_regenerated", job_id=job_id, index=index)
+        return f"job {job_id} slide {index:02d} regenerated"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

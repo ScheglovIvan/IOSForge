@@ -52,3 +52,15 @@ def test_missing_metadata_and_spec_are_safe() -> None:
     assert ident.profile == "test"
     assert ident.app_name == "App"
     assert ident.bundle_id == "com.batteam.app"
+
+
+def test_store_profile_is_production_with_custom_bundle() -> None:
+    meta = {
+        "build_profile": "store",
+        "override_bundle_id": "com.acme.demo",
+        "override_app_name": "Demo",
+    }
+    ident = bp.resolve_identity(meta, {"app_name": "Ignored"}, _settings())
+    assert ident.profile == "store"
+    assert ident.bundle_id == "com.acme.demo"
+    assert ident.sandbox is False  # store = Apphud production

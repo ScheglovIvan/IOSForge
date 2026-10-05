@@ -229,6 +229,10 @@ def make_celery_app(
         },
         task_acks_late=True,
         task_reject_on_worker_lost=True,
+        # Codegen/store-asset tasks can run well over an hour. Redis' default
+        # visibility_timeout (1h) would decide the worker died and redeliver the task,
+        # running it a second time in parallel. Raise it above the longest task.
+        broker_transport_options={"visibility_timeout": 21600},
         task_serializer="json",
         result_serializer="json",
         accept_content=["json"],

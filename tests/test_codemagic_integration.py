@@ -127,11 +127,13 @@ def test_resolved_workflow_id_builtin_template() -> None:
     assert wf == "ios-unsigned"
 
 
-def test_builtin_template_targets_ios_13() -> None:
-    # Apphud needs iOS 13+ (StoreKit 2 / Swift concurrency) — the template must
-    # bump the deployment target before pod install or the iOS build fails to compile
-    assert "IPHONEOS_DEPLOYMENT_TARGET = 13.0" in cm._CODEMAGIC_YAML
-    assert "platform :ios, '13.0'" in cm._CODEMAGIC_YAML
+def test_builtin_template_targets_ios_15() -> None:
+    # Apphud SDK 3.x requires iOS 15.0+ — the template must bump the deployment target
+    # before pod install or `pod install` fails ("requires a higher minimum iOS version").
+    assert "IPHONEOS_DEPLOYMENT_TARGET = 15.0" in cm._CODEMAGIC_YAML
+    assert "platform :ios, '15.0'" in cm._CODEMAGIC_YAML
+    # the signed store workflow must carry the same bump (that is what the store build uses)
+    assert "platform :ios, '15.0'" in cm._CODEMAGIC_YAML_SIGNED
 
 
 def test_rendered_codemagic_yaml_is_valid_yaml() -> None:
@@ -154,7 +156,11 @@ def test_builtin_template_pins_sdks_before_pub_get() -> None:
     assert "Pin SDK versions" in names
     assert names.index("Pin SDK versions") < names.index("Get Flutter packages")
     pin = next(s for s in steps if s["name"] == "Pin SDK versions")["script"]
-    assert "apphud" in pin and "^3.2.0" in pin
+    # apphud pinned EXACT 3.1.2 (→ ApphudSDK 4.0.3). ApphudSDK 4.2.x ships "commitment
+    # plan" code referencing StoreKit members (billingPlanType / pricingTerms) absent from
+    # every available CI Xcode SDK, so it fails to compile — 4.0.x predates it. 3.1.2 is the
+    # newest 3.1.x that still has the checkEligibilityForIntroductoryOffer Dart method.
+    assert "apphud:" in pin and "3.1.2" in pin and "3.2" not in pin
     assert "tenjin_plugin" in pin and "^1.2.0" in pin
 
 
@@ -282,3 +288,60 @@ def test_render_yaml_substitutes_bundle_and_falls_back() -> None:
     assert out.count("com.acme.app") == 2
     # no reference -> built-in template
     assert "ios-unsigned" in cm._render_yaml(None, "com.acme.app")
+
+
+def test_signed_workflow_renders_when_signing_present() -> None:
+    import yaml
+
+    signing = cm.StoreSigning(asc_api_key_name="EnhancerApiKey", apple_id="6480123456")
+    rendered = cm._render_yaml(None, "com.acme.speaker", "Speaker", signing)
+    doc = yaml.safe_load(rendered)
+    wf = doc["workflows"]["ios-store"]
+    # env-var-driven signing: the key is injected at trigger time, NOT registered in the
+    # CodeMagic UI, so there is no team integration and the bundle id is in the vars.
+    assert "integrations" not in wf
+    assert wf["environment"]["vars"]["BUNDLE_ID"] == "com.acme.speaker"
+    assert str(wf["environment"]["vars"]["APP_STORE_APPLE_ID"]) == "6480123456"
+    # signing fetches/creates the cert + profile from the injected env vars
+    assert "fetch-signing-files" in rendered and "$CERTIFICATE_PRIVATE_KEY" in rendered
+    # publishing authenticates with the injected ASC API key (not a named integration)
+    pub = wf["publishing"]["app_store_connect"]
+    assert pub["api_key"] == "$APP_STORE_CONNECT_PRIVATE_KEY"
+    assert pub["issuer_id"] == "$APP_STORE_CONNECT_ISSUER_ID"
+    # uploads to App Store Connect, but not TestFlight/review — the rest stays manual
+    assert pub["submit_to_testflight"] is False
+    names = [s["name"] for s in wf["scripts"]]
+    assert "Set up code signing" in names
+    assert "Build signed IPA" in names
+    # no placeholders left unfilled
+    assert "__BUNDLE_ID__" not in rendered and "__ASC_KEY_NAME__" not in rendered
+    assert "__APP_STORE_APPLE_ID__" not in rendered and "__APP_NAME__" not in rendered
+
+
+def test_signed_workflow_sets_the_real_ios_bundle_id() -> None:
+    # the unsigned build leaves com.example.*; a store build MUST write the real id
+    signing = cm.StoreSigning(asc_api_key_name="K", apple_id="123456")
+    rendered = cm._render_yaml(None, "com.acme.app", "App", signing)
+    assert "PRODUCT_BUNDLE_IDENTIFIER = com.acme.app;" in rendered
+
+
+def test_unsigned_stays_the_default_without_signing() -> None:
+    assert "ios-unsigned" in cm._render_yaml(None, "com.acme.app", "App")
+    assert "ios-store" not in cm._render_yaml(None, "com.acme.app", "App")
+
+
+def test_resolved_workflow_id_is_store_when_signing() -> None:
+    signing = cm.StoreSigning(asc_api_key_name="K", apple_id="123456")
+    wf = cm.resolved_workflow_id(Settings(codemagic_template_repo=""), "gh", "o/r", signing=signing)
+    assert wf == "ios-store"
+
+
+def test_launcher_icons_are_generated_in_both_workflows() -> None:
+    # one staged PNG has to become every iOS/Android launcher size at build time
+    from iosforge.mvp import codemagic_integration as ci
+
+    for yaml in (ci._CODEMAGIC_YAML, ci._CODEMAGIC_YAML_SIGNED):
+        assert "Generate launcher icons" in yaml
+        assert "flutter_launcher_icons" in yaml
+        # absence of an icon must not fail a build
+        assert "if [ -f assets/icon/app_icon.png ]" in yaml

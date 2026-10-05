@@ -117,6 +117,11 @@ class Settings(BaseSettings):
     # GitHub / the CodeMagic iOS build (which would otherwise waste a full build to surface it).
     codegen_compile_gate: bool = Field(default=True)
     codegen_compile_gate_attempts: int = Field(default=2, ge=0, le=5)
+    # Wall-clock budget for a single rework/augment `claude` codegen pass. The default
+    # 1800s is too tight for a substantial rework (rebrand + several new features across a
+    # large app), where the CLI hits the limit and PipelineTask retries burn hours. Tunable
+    # via env so a big repositioning pass can run without a code change.
+    codegen_rework_timeout_s: int = Field(default=5400, gt=0)
     # Frontend web-verify pass bar. Distinct from the SPEC ≥0.95 iOS-compliance goal
     # (compliance_threshold): a headless web render of a Flutter app compared to
     # native iOS screenshots has an inherent ceiling, so the frontend MVP passes at
@@ -205,6 +210,24 @@ class Settings(BaseSettings):
     # Stock backdrops come from Pexels (commercial use, no attribution required).
     store_assets_timeout_s: int = Field(default=900, gt=0)
     pexels_secrets_path: str = Field(default="secrets/pexels.env")
+    # Each rendered slide is scored against the source slide's composition (palette,
+    # wording and screen content are meant to differ and are not penalised). Slides
+    # below the threshold are re-authored from the review's defect list.
+    store_assets_similarity_min: int = Field(default=80, ge=0, le=100)
+    store_assets_max_iterations: int = Field(default=3, gt=0)
+    # Which engine draws a slide. "replicate" sends the source slide to an image
+    # model and gets a finished slide back in about a minute; "html" has an agent
+    # author a self-contained page that headless Chromium screenshots, which costs
+    # minutes per slide but keeps every glyph and colour under our control.
+    store_assets_engine: str = Field(default="replicate", pattern="^(replicate|html)$")
+    replicate_secrets_path: str = Field(default="secrets/replicate.env")
+    # Seedream renders explicit dimensions, so the App Store canvas comes out of
+    # the model directly — no aspect-ratio approximation, no post-processing.
+    replicate_model: str = Field(default="bytedance/seedream-4")
+    # The model only emits stock aspect ratios, so 9:16 at 4K is generated and the
+    # exact App Store canvas is reached afterwards by growing the background.
+    replicate_resolution: str = Field(default="4K")
+    replicate_timeout_s: int = Field(default=600, gt=0)
     # ATT prompt copy (Info.plist NSUserTrackingUsageDescription). Without ATT consent
     # attribution degrades to SKAN campaign-level aggregates (no keyword/creative).
     att_usage_description: str = Field(
@@ -232,6 +255,9 @@ class Settings(BaseSettings):
     github_api_base: str = Field(default="https://api.github.com")
     github_repo_private: bool = Field(default=False)
     github_repo_prefix: str = Field(default="")
+    # Legal pages stage: the Privacy Policy published to the app repo's gh-pages
+    # branch needs a reachable contact address, which App Store review checks.
+    legal_contact_email: str = Field(default="support@iosforge.app")
     # CodeMagic Integration stage: import the pushed repo as a CodeMagic app and
     # commit a codemagic.yaml (iOS). No build/sign/IPA/TestFlight here. Token
     # (x-auth-token) lives in a gitignored env file (codemagic_token_path,
@@ -246,6 +272,26 @@ class Settings(BaseSettings):
     # the built-in UNSIGNED iOS template (sideload / jailbreak, no Apple signing).
     codemagic_template_repo: str = Field(default="")
     codemagic_bundle_prefix: str = Field(default="com.batteam")
+    # Signed App Store build: the name of the App Store Connect API key as configured in
+    # the CodeMagic team (Personal account → Integrations → Developer Portal). The .p8 /
+    # Issuer ID / Key ID live in CodeMagic, never here. Per-job override goes in
+    # Job.source_app_metadata (asc_api_key_name) since apps may ship under different
+    # Apple accounts; the numeric App Store id is per-job (appstore_apple_id). Empty +
+    # no per-job value = the signed store workflow is not used (falls back to unsigned).
+    codemagic_asc_api_key_name: str = Field(default="")
+    # App Store Connect signing credential uploaded PER JOB in the admin (each app ships
+    # under its own Apple account, so the .p8 / Issuer ID / Key ID are per app). Stored in
+    # gitignored files under secrets/jobs/<job_id>/, never committed, never in .env, chmod
+    # 600. They let the pipeline sign + upload WITHOUT registering the key in the CodeMagic
+    # UI: the key is injected as build environment variables at trigger time, and a reusable
+    # RSA certificate key is generated once per app. A credential dropped in the shared paths
+    # below (no UI) is an optional fallback when a job has none of its own.
+    asc_jobs_secrets_dir: str = Field(default="secrets/jobs")
+    asc_api_key_secrets_path: str = Field(default="secrets/asc_api_key.env")
+    asc_api_key_p8_path: str = Field(default="secrets/asc_api_key.p8")
+    asc_certificate_key_path: str = Field(default="secrets/asc_certificate_private_key.pem")
+    # Upper bound on an uploaded App Store Connect .p8 (they are ~250 bytes).
+    asc_api_key_max_bytes: int = Field(default=16 * 1024, gt=0)
     # Auto-trigger the CodeMagic iOS build at the end of the pipeline (instead of the
     # manual button). Every run spends CodeMagic minutes; the template is UNSIGNED.
     codemagic_auto_build: bool = Field(default=True)

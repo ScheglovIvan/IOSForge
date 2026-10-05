@@ -28,13 +28,27 @@ def _headers(token: str) -> dict[str, str]:
 
 
 def start_build(
-    settings: Settings, token: str, *, app_id: str, workflow_id: str, branch: str
+    settings: Settings,
+    token: str,
+    *,
+    app_id: str,
+    workflow_id: str,
+    branch: str,
+    env: dict[str, str] | None = None,
 ) -> str:
-    """POST /builds; return the new buildId."""
+    """POST /builds; return the new buildId.
+
+    ``env`` is injected as ``environment.variables`` — API-supplied variables override the
+    UI/yaml values, so a signed store build receives its App Store Connect key this way
+    without the secret ever living in the repo's committed codemagic.yaml.
+    """
+    payload: dict[str, object] = {"appId": app_id, "workflowId": workflow_id, "branch": branch}
+    if env:
+        payload["environment"] = {"variables": env}
     resp = httpx.post(
         f"{settings.codemagic_api_base}/builds",
         headers=_headers(token),
-        json={"appId": app_id, "workflowId": workflow_id, "branch": branch},
+        json=payload,
         timeout=60.0,
     )
     if resp.status_code not in (200, 201):

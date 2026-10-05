@@ -2,7 +2,46 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+import httpx
+import pytest
+
+from iosforge.common.config import Settings
 from iosforge.mvp import codemagic_build as cb
+
+
+class _Resp:
+    status_code = 201
+
+    def json(self) -> dict[str, str]:
+        return {"buildId": "b123"}
+
+
+def _capture_post(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    seen: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _Resp:
+        seen["url"] = url
+        seen["json"] = kwargs.get("json")
+        return _Resp()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    return seen
+
+
+def test_start_build_omits_environment_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _capture_post(monkeypatch)
+    bid = cb.start_build(Settings(), "tok", app_id="a", workflow_id="ios-store", branch="main")
+    assert bid == "b123"
+    assert "environment" not in seen["json"]
+
+
+def test_start_build_injects_env_variables(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _capture_post(monkeypatch)
+    env = {"APP_STORE_CONNECT_ISSUER_ID": "iss", "CERTIFICATE_PRIVATE_KEY": "pem"}
+    cb.start_build(Settings(), "tok", app_id="a", workflow_id="ios-store", branch="main", env=env)
+    assert seen["json"]["environment"] == {"variables": env}
 
 
 def test_first_workflow_id() -> None:
