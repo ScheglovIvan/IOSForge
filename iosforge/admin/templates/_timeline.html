@@ -1,51 +1,55 @@
-<table>
-  <thead><tr><th>Stage</th><th>Started</th><th>Finished</th><th>Duration</th><th>Error</th></tr></thead>
-  <tbody>
-  {% for row in timeline %}
-    <tr>
-      <td>{{ 'Verify (web)' if row.stage.value == 'verify' else row.stage.value }}</td>
-      <td>{{ row.started_at.strftime('%H:%M:%S') if row.started_at else '—' }}</td>
-      <td>{{ row.finished_at.strftime('%H:%M:%S') if row.finished_at else '—' }}</td>
-      <td>{{ (row.duration_ms ~ ' ms') if row.duration_ms is not none else '—' }}</td>
-      <td>{{ row.error or '' }}</td>
-    </tr>
-  {% else %}
-    <tr><td colspan="5">No stages recorded yet (waiting for the worker).</td></tr>
-  {% endfor %}
-  </tbody>
-</table>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Stage</th><th>Started</th><th>Finished</th><th>Duration</th><th>Error</th></tr></thead>
+    <tbody>
+    {% for row in timeline %}
+      <tr>
+        <td><strong>{{ 'Verify (web)' if row.stage.value == 'verify' else row.stage.value.replace('_', ' ') }}</strong></td>
+        <td class="mono muted">{{ row.started_at.strftime('%H:%M:%S') if row.started_at else '—' }}</td>
+        <td class="mono muted">{{ row.finished_at.strftime('%H:%M:%S') if row.finished_at else '—' }}</td>
+        <td class="mono">{{ (row.duration_ms ~ ' ms') if row.duration_ms is not none else '—' }}</td>
+        <td class="mono" style="color:var(--danger-text);">{{ row.error or '' }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="muted">No stages recorded yet (waiting for the worker).</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
 {% if codegen_tasks %}
   {% set total = codegen_tasks[0].total %}
   {% set done = codegen_tasks | selectattr('status', 'equalto', 'done') | list | length %}
   {% set failed = codegen_tasks | selectattr('status', 'equalto', 'failed') | list | length %}
-  <h4 style="margin-top:16px;">Code Generation</h4>
-  <p><strong>Generated {{ total }} implementation tasks.</strong>
+  <h4 style="margin-top:18px;">Code generation</h4>
+  <p class="muted"><strong style="color:var(--text);">{{ total }} implementation tasks.</strong>
      &nbsp;{{ done }}/{{ total }} completed · {{ total - done }} remaining</p>
-  <table>
-    <thead><tr><th>Task</th><th>Title</th><th>Status</th><th>Attempts</th></tr></thead>
-    <tbody>
-    {% for t in codegen_tasks %}
-      <tr>
-        <td>{{ t.idx + 1 }}/{{ t.total }}</td>
-        <td>{{ t.title }}</td>
-        <td>
-          {% if t.status == 'running' %}Running…
-          {% elif t.status == 'retrying' %}Failed — retrying…
-          {% elif t.status == 'failed' %}Failed permanently
-          {% else %}Completed{% endif %}
-        </td>
-        <td>{{ t.attempts }}</td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% if failed %}<div class="err">Task failed permanently. Pipeline stopped.</div>
-  {% elif total and done == total %}<div class="ok">All implementation tasks completed successfully.</div>{% endif %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Task</th><th>Title</th><th>Status</th><th>Attempts</th></tr></thead>
+      <tbody>
+      {% for t in codegen_tasks %}
+        <tr>
+          <td class="mono muted">{{ t.idx + 1 }}/{{ t.total }}</td>
+          <td>{{ t.title }}</td>
+          <td>
+            {% if t.status == 'running' %}<span class="pill pill--info pill--active"><span class="dot"></span>running</span>
+            {% elif t.status == 'retrying' %}<span class="pill pill--warning"><span class="dot"></span>retrying</span>
+            {% elif t.status == 'failed' %}<span class="pill pill--danger"><span class="dot"></span>failed</span>
+            {% else %}<span class="pill pill--success"><span class="dot"></span>done</span>{% endif %}
+          </td>
+          <td class="mono">{{ t.attempts }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if failed %}<div class="alert alert--danger">Task failed permanently. Pipeline stopped.</div>
+  {% elif total and done == total %}<div class="alert alert--success">All implementation tasks completed successfully.</div>{% endif %}
 {% endif %}
-{% if gen and gen.github_repo_url %}<div class="ok">Push completed successfully. Repository:
+{% if gen and gen.github_repo_url %}<div class="alert alert--success">Push completed. Repository:
   <a href="{{ gen.github_repo_url }}" target="_blank" rel="noopener">{{ gen.github_repo_url }}</a></div>{% endif %}
-{% if gen and gen.codemagic and gen.codemagic.get('application_id') %}<div class="ok">CodeMagic integration completed —
+{% if gen and gen.codemagic and gen.codemagic.get('application_id') %}<div class="alert alert--success">CodeMagic integration completed —
   <a href="https://codemagic.io/app/{{ gen.codemagic.get('application_id') }}" target="_blank" rel="noopener">{{ gen.codemagic.get('project_name') }}</a>
   (app id {{ gen.codemagic.get('application_id') }}, branch {{ gen.codemagic.get('default_branch') }})</div>{% endif %}
-{% if job.state.value == 'needs_input' %}<div style="background:#fff6e5;color:#8a5a00;padding:10px 12px;border-radius:6px;margin:10px 0;">Needs input — structural web verification finished with open gaps. Review the audit and choose to ship or rework.</div>{% endif %}
-{% if job.state.value == 'failed' %}<div class="err">Job failed — see the stage error above.</div>{% endif %}
+{% if job.state.value == 'needs_input' %}<div class="alert alert--warning">Needs input — structural web verification finished with open gaps. Review the audit and choose to ship or rework.</div>{% endif %}
+{% if job.state.value == 'failed' %}<div class="alert alert--danger">Job failed — see the stage error above.</div>{% endif %}

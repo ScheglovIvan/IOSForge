@@ -7,7 +7,10 @@ itself and is meant to run on 127.0.0.1 behind a TLS reverse proxy (see README).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI, Request
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.status import HTTP_303_SEE_OTHER
@@ -15,6 +18,8 @@ from starlette.status import HTTP_303_SEE_OTHER
 from iosforge.admin import auth, routes_jobs
 from iosforge.admin.deps import NotAuthenticated
 from iosforge.admin.middleware import security_headers
+
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 def create_app() -> FastAPI:
@@ -34,6 +39,8 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     app.include_router(auth.router)
     app.include_router(routes_jobs.router)

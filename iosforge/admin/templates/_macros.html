@@ -1,0 +1,22 @@
+{% macro state_pill(state) %}
+{%- set s = state.value if state is not string else state -%}
+{%- set active = ['discovery','acquisition','walkthrough','analysis','codegen','verify','github_upload','codemagic_integration','delivery'] -%}
+{%- if s == 'done' -%}{% set cls = 'pill--success' %}
+{%- elif s in ['failed','cancelled'] -%}{% set cls = 'pill--danger' %}
+{%- elif s in ['needs_input','retryable'] -%}{% set cls = 'pill--warning' %}
+{%- elif s in active -%}{% set cls = 'pill--info pill--active' %}
+{%- else -%}{% set cls = '' %}
+{%- endif -%}
+<span class="pill {{ cls }}"><span class="dot"></span>{{ s.replace('_', ' ') }}</span>
+{%- endmacro %}
+
+{% macro build_pill(status) %}
+{%- set done = ['finished'] -%}
+{%- set bad = ['failed','timeout','canceled','cancelled'] -%}
+{%- if status in done -%}{% set cls = 'pill--success' %}
+{%- elif status in bad -%}{% set cls = 'pill--danger' %}
+{%- elif status == 'skipped' -%}{% set cls = '' %}
+{%- else -%}{% set cls = 'pill--info pill--active' %}
+{%- endif -%}
+<span class="pill {{ cls }}"><span class="dot"></span>{{ status }}</span>
+{%- endmacro %}

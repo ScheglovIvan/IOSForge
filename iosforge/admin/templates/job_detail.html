@@ -1,183 +1,527 @@
 {% extends "base.html" %}
-{% block title %}Job · IOSForge Admin{% endblock %}
+{% from "_macros.html" import state_pill, build_pill %}
+{% block title %}Job · IOSForge{% endblock %}
+{% block crumbs %}<a href="/jobs">Jobs</a> / {{ job.source_app_ref }}{% endblock %}
 {% block head %}
   {% set build_running = build and build.status not in ['finished', 'failed', 'canceled', 'cancelled', 'timeout', 'skipped'] %}
   {% if job.state.value not in ['done', 'failed', 'cancelled'] or build_running %}
-  <meta http-equiv="refresh" content="3">
+  <meta http-equiv="refresh" content="8">
   {% endif %}
 {% endblock %}
 {% block content %}
-<p><a href="/jobs">← Jobs</a></p>
-<div class="card">
-  <h2>Job <code>{{ job.id }}</code></h2>
-  <p>Source: <strong>{{ job.source_app_ref }}</strong></p>
-  <p>State: <span class="state">{{ job.state.value }}</span>
-     &nbsp;·&nbsp; created {{ job.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</p>
-  <p><a class="btn" href="/jobs/{{ job.id }}/artifacts">View artifacts</a></p>
-  <p style="color:#667;font-size:13px;">Analysis → Frontend Build → Code Generation → GitHub Upload run automatically.</p>
-  {% if gen and gen.github_repo_url %}
-  <p class="ok">GitHub repository:
-    <a href="{{ gen.github_repo_url }}" target="_blank" rel="noopener">{{ gen.github_repo_url }}</a></p>
-  {% endif %}
-</div>
-<div class="card">
-  <h3>Timeline</h3>
-  {% include "_timeline.html" %}
-</div>
 
-{% if gen %}
 <div class="card">
-  <h3>Rework (fix bugs / apply changes)</h3>
-  <p style="color:#667;font-size:13px;">Version {{ job.result_version }}. Describe the bugs
-    or paste an updated spec — the existing app is edited in place, re-pushed to the same repo
-    and rebuilt. Runs only when the pipeline is idle.</p>
-  {% set busy = job.state.value not in ['done', 'failed', 'cancelled'] %}
-  <form method="post" action="/jobs/{{ job.id }}/rework">
-    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-    <textarea name="instructions" rows="6" style="width:100%;box-sizing:border-box;"
-      placeholder="e.g. On the Sounds tab the slot cards overflow; the paywall Continue button does nothing; German locale is missing on Settings → Language."
-      {{ 'disabled' if busy else '' }}></textarea>
-    <div style="margin-top:8px;">
-      <button class="btn" type="submit" {{ 'disabled' if busy else '' }}>Apply rework</button>
-      {% if busy %}<span style="color:#667;font-size:13px;">&nbsp;Pipeline is busy…</span>{% endif %}
+  <div class="card-title">
+    <div>
+      <h2 style="margin-bottom:4px;">{{ job.source_app_ref }}</h2>
+      <span class="mono muted" style="font-size:12px;">{{ job.id }}</span>
     </div>
-  </form>
-</div>
-{% endif %}
-
-{% if gen %}
-<div class="card">
-  <h3>Re-verify (structural web)</h3>
-  <p style="color:#667;font-size:13px;">Static audit of the generated Flutter app against the
-    navigation graph — missing screens, dead links, missing edges and blank renders — with a
-    fix loop. Runs only when the pipeline is idle.</p>
-  {% set busy = job.state.value not in ['done', 'failed', 'cancelled', 'needs_input'] %}
-  {% if gen.selftest_report and gen.selftest_report.structural %}
-  {% set s = gen.selftest_report.structural %}
-  <p style="font-size:13px;">Last structural audit:
-    <strong>{{ 'ok' if s.ok else 'gaps' }}</strong>
-    &nbsp;·&nbsp; missing screens {{ (s.missing_screens or []) | length }}
-    &nbsp;·&nbsp; blank {{ (s.blank_screens or []) | length }}
-    &nbsp;·&nbsp; dead links {{ (s.dead_links or []) | length }}
-    &nbsp;·&nbsp; missing edges {{ (s.missing_edges or []) | length }}</p>
-  {% endif %}
-  <form method="post" action="/jobs/{{ job.id }}/verify-web">
-    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-    <button class="btn" type="submit" {{ 'disabled' if busy else '' }}>Re-verify (structural web)</button>
-    {% if busy %}<span style="color:#667;font-size:13px;">&nbsp;Pipeline is busy…</span>{% endif %}
-  </form>
-</div>
-{% endif %}
-
-<div class="card">
-  <h3>Build settings</h3>
-  {% set meta = job.source_app_metadata or {} %}
-  {% set profile = meta.get('build_profile', 'test') %}
-  {% set bs_busy = job.state.value not in ['done', 'failed', 'cancelled', 'needs_input'] %}
-  <p style="color:#667;font-size:13px;">
-    <strong>Test</strong> = Apphud sandbox mode (StoreKit sandbox, unsigned build).
-    <strong>Real</strong> = your bundle id + name written into the binary, Apphud in
-    production mode (still unsigned until Apple signing is configured). Saving rebuilds
-    the app.</p>
-  <form method="post" action="/jobs/{{ job.id }}/build-settings">
-    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-    <p>
-      <label><input type="radio" name="build_profile" value="test"
-        {{ 'checked' if profile != 'real' else '' }}> Test (Apphud sandbox)</label>
-      &nbsp;&nbsp;
-      <label><input type="radio" name="build_profile" value="real"
-        {{ 'checked' if profile == 'real' else '' }}> Real (custom bundle id / name)</label>
-    </p>
-    <p><label>Display name<br>
-      <input type="text" name="app_name" value="{{ meta.get('override_app_name', '') }}"
-        placeholder="e.g. Speaker Cleaner" style="width:100%;box-sizing:border-box;"></label></p>
-    <p><label>Bundle id (real only)<br>
-      <input type="text" name="bundle_id" value="{{ meta.get('override_bundle_id', '') }}"
-        placeholder="e.g. com.acme.speakercleaner" pattern="[A-Za-z0-9.]+"
-        style="width:100%;box-sizing:border-box;"></label></p>
-    <p><label>Apphud SDK key<br>
-      <input type="text" name="apphud_api_key" value="{{ meta.get('apphud_api_key', '') }}"
-        placeholder="appstr_… (App settings → Authentication center)"
-        pattern="[A-Za-z0-9_\-]+" style="width:100%;box-sizing:border-box;"></label>
-      <span style="color:#667;font-size:12px;">Apphud issues one key per app — paste this
-        app&#39;s own key. Empty = the shared key from the server secrets file.</span></p>
-    <p><label>Tenjin SDK key (attribution)<br>
-      <input type="text" name="tenjin_api_key" value="{{ meta.get('tenjin_api_key', '') }}"
-        placeholder="32-char key (Configure → App &amp; SDK → SDK Keys)"
-        pattern="[A-Za-z0-9]+" style="width:100%;box-sizing:border-box;"></label>
-      <span style="color:#667;font-size:12px;">Also one key per app. Traffic sources are
-        connected in the Tenjin dashboard — no rebuild needed to add one.
-        Empty = attribution SDK is not wired in.</span></p>
-    <button class="btn" type="submit" {{ 'disabled' if bs_busy else '' }}>Save &amp; rebuild</button>
-    {% if bs_busy %}<span style="color:#667;font-size:13px;">&nbsp;Pipeline is busy…</span>{% endif %}
-  </form>
-</div>
-
-{% if can_ios_build %}
-<div class="card">
-  <h3>iOS Build (CodeMagic)</h3>
-  {% set running = build and build.status not in ['finished', 'failed', 'canceled', 'cancelled', 'timeout', 'skipped'] %}
-  <form method="post" action="/jobs/{{ job.id }}/codemagic-build" style="margin-bottom:10px;">
-    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-    <button class="btn" type="submit" {{ 'disabled' if running else '' }}>Run iOS build</button>
-    {% if running %}<span style="color:#667;font-size:13px;">&nbsp;A build is in progress…</span>{% endif %}
-  </form>
-  {% if build %}
-  <table>
-    <tr><th>Status</th><td><strong>{{ build.status }}</strong>{% if running %} …{% endif %}</td></tr>
-    <tr><th>Build number</th><td>{{ build.build_number if build.build_number is not none else '—' }}</td></tr>
-    <tr><th>Build ID</th><td><code>{{ build.build_id or '—' }}</code></td></tr>
-    <tr><th>Started</th><td>{{ build.started_at or '—' }}</td></tr>
-    <tr><th>Finished</th><td>{{ build.finished_at or '—' }}</td></tr>
-    <tr><th>Duration</th><td>{{ (build.duration_ms // 1000 ~ ' s') if build.duration_ms else '—' }}</td></tr>
-  </table>
-  {% if build.status in ['failed', 'timeout'] and build.message %}
-  <div class="err" style="margin-top:8px;">Reason: {{ build.message }}</div>
-  {% endif %}
-  <h4 style="margin-top:14px;">Artifacts</h4>
-  {% if build.artifacts %}
-  <ul>
-    {% for a in build.artifacts %}
-    <li>{{ a.get('name') }} {% if a.get('size') %}({{ (a.get('size') // 1024) }} KB){% endif %}
-      &nbsp;<a class="btn" href="/jobs/{{ job.id }}/codemagic-build/artifact?i={{ loop.index0 }}">Download</a></li>
-    {% endfor %}
-  </ul>
-  {% else %}
-  <p style="color:#667;">{{ 'No artifacts produced.' if not running else 'Waiting for artifacts…' }}</p>
-  {% endif %}
-  <p style="margin-top:10px;">
-    <a class="btn" href="/jobs/{{ job.id }}/codemagic-build/logs" target="_blank">View / download logs</a>
-  </p>
-  {% else %}
-  <p style="color:#667;">No build yet — press “Run iOS build”.</p>
-  {% endif %}
-</div>
-{% endif %}
-
-{% if gen %}
-<div class="card">
-  <h3>App Store screenshots</h3>
-  <p style="color:#667;font-size:13px;">
-    Renders the listing at 1290&times;2796 from this app&#39;s own generated screens, in the
-    app&#39;s palette. The source listing is studied for composition only — copy and screens
-    are ours, and no screen is used to claim a feature the app does not have.</p>
-  <form method="post" action="/jobs/{{ job.id }}/store-assets">
-    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-    <button class="btn" type="submit">Generate screenshots</button>
-    {% if store_slides %}<span style="color:#667;font-size:13px;">&nbsp;Re-running replaces
-      the current set.</span>{% endif %}
-  </form>
-  {% if store_slides %}
-  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;">
-    {% for key in store_slides %}
-    <a href="/jobs/{{ job.id }}/artifacts/object?key={{ key }}" target="_blank">
-      <img src="/jobs/{{ job.id }}/artifacts/object?key={{ key }}"
-           style="width:132px;border-radius:8px;border:1px solid #d5d8de;display:block;"></a>
-    {% endfor %}
+    {{ state_pill(job.state) }}
   </div>
-  {% else %}
-  <p style="color:#667;margin-top:10px;">Nothing rendered yet.</p>
-  {% endif %}
+  <p class="hint">Analysis → Frontend Build → Code Generation → GitHub Upload run automatically.
+    Created {{ job.created_at.strftime('%Y-%m-%d %H:%M:%S') }}.</p>
+  <div class="form-actions">
+    <a class="btn btn--ghost" href="/jobs/{{ job.id }}/artifacts">View artifacts</a>
+    {% if gen and gen.github_repo_url %}
+    <a class="btn btn--ghost" href="{{ gen.github_repo_url }}" target="_blank" rel="noopener">GitHub repository ↗</a>
+    {% endif %}
+  </div>
 </div>
-{% endif %}
+
+{% set active = 't-build' if (signed_ok or sign_error) else 't-overview' %}
+<div class="tabs">
+  <input class="tab-radio" type="radio" name="jobtab" id="t-overview" {{ 'checked' if active == 't-overview' else '' }}>
+  <input class="tab-radio" type="radio" name="jobtab" id="t-build" {{ 'checked' if active == 't-build' else '' }}>
+  {% if can_ios_build %}<input class="tab-radio" type="radio" name="jobtab" id="t-ios">{% endif %}
+  {% if gen %}<input class="tab-radio" type="radio" name="jobtab" id="t-store">
+  <input class="tab-radio" type="radio" name="jobtab" id="t-rework">{% endif %}
+
+  <nav class="tab-bar" role="tablist">
+    <label for="t-overview">Overview</label>
+    <label for="t-build">Build &amp; sign</label>
+    {% if can_ios_build %}<label for="t-ios">iOS build</label>{% endif %}
+    {% if gen %}<label for="t-store">Store assets{% if store_slides %} <span class="tcount">{{ store_slides|length }}</span>{% endif %}</label>
+    <label for="t-rework">Rework</label>{% endif %}
+  </nav>
+
+  <div class="tab-panels">
+
+    <section class="tab-panel panel-overview" role="tabpanel" aria-label="Overview">
+      <div class="card">
+        <h3>Timeline</h3>
+        {% include "_timeline.html" %}
+      </div>
+    </section>
+
+    <section class="tab-panel panel-build" role="tabpanel" aria-label="Build and sign">
+      <div class="card">
+        <h3>Build settings</h3>
+        {% set meta = job.source_app_metadata or {} %}
+        {% set profile = meta.get('build_profile', 'test') %}
+        {% set bs_busy = job.state.value not in ['done', 'failed', 'cancelled', 'needs_input'] %}
+        <p class="hint">
+          <strong>Test</strong> = Apphud sandbox, unsigned (sideload / jailbreak).
+          <strong>Real</strong> = your bundle id + name in the binary, Apphud production, still unsigned.
+          <strong>Store</strong> = signed build uploaded to App Store Connect (upload this app's API key
+          in the signing card below first). Saving rebuilds the app.</p>
+        <form method="post" action="/jobs/{{ job.id }}/build-settings">
+          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+          <div class="radios">
+            <label><input type="radio" name="build_profile" value="test"
+              {{ 'checked' if profile not in ['real', 'store'] else '' }}> Test</label>
+            <label><input type="radio" name="build_profile" value="real"
+              {{ 'checked' if profile == 'real' else '' }}> Real</label>
+            <label><input type="radio" name="build_profile" value="store"
+              {{ 'checked' if profile == 'store' else '' }}> Store (signed → App Store Connect)</label>
+          </div>
+          <div class="field">
+            <label>Display name</label>
+            <input type="text" name="app_name" value="{{ meta.get('override_app_name', '') }}"
+              placeholder="e.g. Speaker Cleaner">
+          </div>
+          <div class="field">
+            <label>Bundle id <span class="muted">(real / store)</span></label>
+            <input type="text" name="bundle_id" value="{{ meta.get('override_bundle_id', '') }}"
+              placeholder="e.g. com.acme.speakercleaner" pattern="[A-Za-z0-9.]+">
+          </div>
+          <fieldset>
+            <legend>Store (signed) — only for the Store profile</legend>
+            <div class="field" style="margin-bottom:0;">
+              <label>App Store Apple ID (numeric)</label>
+              <input type="text" name="appstore_apple_id" value="{{ meta.get('appstore_apple_id', '') }}"
+                placeholder="e.g. 6480123456 (App Store Connect → App Information → Apple ID)"
+                pattern="[0-9]+">
+            </div>
+          </fieldset>
+          <div class="field">
+            <label>Apphud SDK key</label>
+            <input type="text" name="apphud_api_key" value="{{ meta.get('apphud_api_key', '') }}"
+              placeholder="appstr_… (App settings → Authentication center)" pattern="[A-Za-z0-9_\-]+">
+            <p class="hint">Apphud issues one key per app — paste this app's own key. Empty = the shared
+              key from the server secrets file.</p>
+          </div>
+          <div class="field">
+            <label>Tenjin SDK key <span class="muted">(attribution)</span></label>
+            <input type="text" name="tenjin_api_key" value="{{ meta.get('tenjin_api_key', '') }}"
+              placeholder="32-char key (Configure → App &amp; SDK → SDK Keys)" pattern="[A-Za-z0-9]+">
+            <p class="hint">Also one key per app. Traffic sources are connected in the Tenjin dashboard —
+              no rebuild needed to add one. Empty = attribution SDK is not wired in.</p>
+          </div>
+          <div class="form-actions">
+            <button class="btn" type="submit" {{ 'disabled' if bs_busy else '' }}>Save &amp; rebuild</button>
+            {% if bs_busy %}<span class="hint">Pipeline is busy…</span>{% endif %}
+          </div>
+        </form>
+      </div>
+
+      <div class="card" id="signing">
+        <h3>App Store signing key <span class="muted" style="font-weight:400;">— this app</span></h3>
+        <p class="hint">This app ships under its own Apple account, so upload <em>its</em> App Store
+          Connect API key here. Stored only in a gitignored file (mode&nbsp;600), injected into the
+          signed build at trigger time — never committed, and no CodeMagic-UI setup needed. Needed for
+          the <strong>Store</strong> profile.</p>
+        {% if signed_ok %}<div class="alert alert--success">Signing key saved for this app.</div>{% endif %}
+        {% if sign_error %}<div class="alert alert--danger">{{ sign_error }}</div>{% endif %}
+        {% if signing.configured %}
+          <p class="hint">
+            <span class="pill {{ 'pill--success' if signing.own else 'pill--warning' }}"><span class="dot"></span>{{ 'this app' if signing.own else 'shared fallback' }}</span>
+            &nbsp; Key&nbsp;ID <code>{{ signing.key_id }}</code>, Issuer <code>{{ signing.issuer_id }}</code>
+            {% if signing.key_name %}(&ldquo;{{ signing.key_name }}&rdquo;){% endif %}. Uploading again replaces it.</p>
+        {% else %}
+          <p class="hint" style="color:var(--danger-text);">No signing key uploaded — a Store build would
+            fall back to the unsigned workflow.</p>
+        {% endif %}
+        <form method="post" action="/jobs/{{ job.id }}/signing" enctype="multipart/form-data">
+          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+          <div class="field">
+            <label>Issuer ID (UUID)</label>
+            <input type="text" name="issuer_id" placeholder="69a6de70-…-5b8c7c11a4d1" required>
+            <p class="hint">App Store Connect → Users and Access → Integrations → Team Keys (role App&nbsp;Manager).</p>
+          </div>
+          <div class="field">
+            <label>Key ID</label>
+            <input type="text" name="key_id" placeholder="e.g. 2X9R4HXF34" required>
+          </div>
+          <div class="field">
+            <label>Key name <span class="muted">(optional label)</span></label>
+            <input type="text" name="key_name" placeholder="e.g. SpeakerCleanerKey">
+          </div>
+          <div class="field">
+            <label>API key file (.p8)</label>
+            <input type="file" name="p8" accept=".p8,text/plain" required>
+          </div>
+          <button class="btn" type="submit">Save signing key</button>
+        </form>
+      </div>
+    </section>
+
+    {% if can_ios_build %}
+    <section class="tab-panel panel-ios" role="tabpanel" aria-label="iOS build">
+      <div class="card">
+        <h3>iOS build <span class="muted" style="font-weight:400;">— CodeMagic</span></h3>
+        {% set running = build and build.status not in ['finished', 'failed', 'canceled', 'cancelled', 'timeout', 'skipped'] %}
+        <form method="post" action="/jobs/{{ job.id }}/codemagic-build">
+          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+          <div class="form-actions" style="margin-top:0;margin-bottom:12px;">
+            <button class="btn" type="submit" {{ 'disabled' if running else '' }}>Run iOS build</button>
+            {% if running %}<span class="hint">A build is in progress…</span>{% endif %}
+          </div>
+        </form>
+        {% if build %}
+        <div class="table-wrap" style="margin-bottom:12px;">
+          <table class="kv">
+            <tr><th>Status</th><td>{{ build_pill(build.status) }}</td></tr>
+            <tr><th>Build number</th><td class="mono">{{ build.build_number if build.build_number is not none else '—' }}</td></tr>
+            <tr><th>Build ID</th><td><code>{{ build.build_id or '—' }}</code></td></tr>
+            <tr><th>Started</th><td class="muted">{{ build.started_at or '—' }}</td></tr>
+            <tr><th>Finished</th><td class="muted">{{ build.finished_at or '—' }}</td></tr>
+            <tr><th>Duration</th><td class="mono">{{ (build.duration_ms // 1000 ~ ' s') if build.duration_ms else '—' }}</td></tr>
+          </table>
+        </div>
+        {% if build.status in ['failed', 'timeout'] and build.message %}
+        <div class="alert alert--danger">Reason: {{ build.message }}</div>
+        {% endif %}
+        <h4>Artifacts</h4>
+        {% if build.artifacts %}
+        <ul style="margin:6px 0;padding-left:18px;">
+          {% for a in build.artifacts %}
+          <li style="margin-bottom:6px;">{{ a.get('name') }} {% if a.get('size') %}<span class="muted">({{ (a.get('size') // 1024) }} KB)</span>{% endif %}
+            &nbsp;<a class="btn btn--ghost btn--sm" href="/jobs/{{ job.id }}/codemagic-build/artifact?i={{ loop.index0 }}">Download</a></li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="hint">{{ 'No artifacts produced.' if not running else 'Waiting for artifacts…' }}</p>
+        {% endif %}
+        <div class="form-actions">
+          <a class="btn btn--ghost" href="/jobs/{{ job.id }}/codemagic-build/logs" target="_blank">View / download logs</a>
+        </div>
+        {% else %}
+        <p class="hint">No build yet — press "Run iOS build".</p>
+        {% endif %}
+      </div>
+    </section>
+    {% endif %}
+
+    {% if gen %}
+    <section class="tab-panel panel-store" role="tabpanel" aria-label="Store assets">
+      <div class="card" id="store-listing">
+        <h3>App Store listing</h3>
+        <p class="hint">Description, keywords and subtitle drafted from this app's spec — generated fresh,
+          not copied from the original (that is a 4.3 rejection). Review the wording, then push it straight
+          to App Store Connect with the app's own API key. Nothing is typed into the web UI by hand.</p>
+
+        <form method="post" action="/jobs/{{ job.id }}/store-listing/generate" class="listing-gen">
+          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+          <div class="form-actions" style="margin-top:0;">
+            <button class="btn" type="submit">{{ 'Regenerate draft' if store_listing else 'Generate listing' }}</button>
+          </div>
+          <details style="margin-top:8px;">
+            <summary class="hint" style="cursor:pointer;">Optional hints for the draft</summary>
+            <div class="field"><label>Subtitle (≤30) — leave blank to derive from the one-liner
+              <input type="text" name="subtitle" maxlength="30" value=""></label></div>
+            <div class="field"><label>Extra keyword seeds (comma-separated, complementary to the name)
+              <input type="text" name="keywords_seed" value=""></label></div>
+            <div class="field"><label>Opening line — leave blank to use the spec one-liner
+              <input type="text" name="lead" value=""></label></div>
+          </details>
+        </form>
+
+        {% if store_listing %}
+        {% set L = store_listing %}
+        {% macro counter(field) %}
+          {% set c = L.lengths[field] %}
+          <span class="len {{ 'len--over' if c.over else '' }}">{{ c.used }}/{{ c.max }}</span>
+        {% endmacro %}
+
+        {% if L.warnings %}
+        <div class="listing-warn">
+          {% for w in L.warnings %}<div>⚠ {{ w }}</div>{% endfor %}
+        </div>
+        {% endif %}
+
+        <form method="post" action="/jobs/{{ job.id }}/store-listing/save" class="listing-edit">
+          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+          <div class="field"><label>Name {{ counter('app_name') }}
+            <input type="text" name="app_name" maxlength="30" value="{{ L.app_name }}"></label></div>
+          <div class="field"><label>Subtitle {{ counter('subtitle') }}
+            <input type="text" name="subtitle" maxlength="30" value="{{ L.subtitle }}"></label></div>
+          <div class="field"><label>Keywords {{ counter('keywords') }}
+            <input type="text" name="keywords" maxlength="100" value="{{ L.keywords }}"></label></div>
+          <div class="field"><label>Promotional text {{ counter('promotional_text') }}
+            <input type="text" name="promotional_text" maxlength="170" value="{{ L.promotional_text }}"></label></div>
+          <div class="field"><label>Description {{ counter('description') }}
+            <textarea name="description" rows="14">{{ L.description }}</textarea></label></div>
+          <div class="field"><label>Support URL
+            <input type="url" name="support_url" value="{{ L.support_url }}"></label></div>
+          <div class="field"><label>Marketing URL (optional)
+            <input type="url" name="marketing_url" value="{{ L.marketing_url }}"></label></div>
+
+          <div class="listing-links">
+            <div><span class="muted">Privacy Policy:</span>
+              {% if L.privacy_policy_url %}<a href="{{ L.privacy_policy_url }}" target="_blank" rel="noopener">{{ L.privacy_policy_url }}</a>
+              {% else %}<span style="color:var(--danger-text);">not published yet — run the legal pages step first</span>{% endif %}</div>
+            <div><span class="muted">Terms of Use:</span>
+              <a href="{{ L.terms_url }}" target="_blank" rel="noopener">{{ L.terms_url }}</a></div>
+          </div>
+
+          <div class="form-actions">
+            <button class="btn btn--ghost" type="submit">Save edits</button>
+          </div>
+        </form>
+
+        <form method="post" action="/jobs/{{ job.id }}/store-listing/push"
+              onsubmit="return confirm('Push this listing to App Store Connect for {{ job.source_app_metadata.get('bundle_id') if job.source_app_metadata else 'this app' }}? It overwrites the current draft version metadata.');">
+          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+          <div class="form-actions" style="margin-top:0;">
+            <button class="btn" type="submit"{% if not signing.configured %} disabled title="Upload the App Store Connect API key in the Build tab first"{% endif %}>Push to App Store Connect</button>
+          </div>
+          <p class="hint" style="margin-top:8px;">Writes description, keywords, promotional text and support URL onto the
+            editable version, and subtitle + privacy policy URL onto the app info. Skips a version already in review or on sale.
+            {% if not signing.configured %}<strong>Needs this app's API key</strong> (Build tab).{% endif %}</p>
+        </form>
+        {% endif %}
+
+        <hr style="border:none;border-top:1px solid var(--border);margin:20px 0;">
+        <h3 style="margin-top:0;">Auto-fill the rest of App Store Connect</h3>
+        <p class="hint">Fills the fields that need no wording — category, content-rights declaration, the
+          age-rating questionnaire (answered as an app with no objectionable content → 4+), and the Support URL
+          (a support page is published alongside the privacy policy). Run the legal pages and store listing steps first.</p>
+        <form method="post" action="/jobs/{{ job.id }}/store-metadata/autofill"
+              onsubmit="return confirm('Auto-fill category, content rights, age rating and support URL in App Store Connect?');">
+          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+          <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
+            <div class="field" style="margin-bottom:0;">
+              <label>Primary category
+                <select name="primary_category">
+                  {% for cat in store_categories %}<option value="{{ cat }}">{{ cat.replace('_',' ').title() }}</option>{% endfor %}
+                </select></label>
+            </div>
+            <div class="field" style="margin-bottom:0;">
+              <label>Secondary (optional)
+                <select name="secondary_category">
+                  <option value="">— none —</option>
+                  {% for cat in store_categories %}<option value="{{ cat }}">{{ cat.replace('_',' ').title() }}</option>{% endfor %}
+                </select></label>
+            </div>
+            <button class="btn" type="submit"{% if not signing.configured %} disabled title="Upload the App Store Connect API key in the Build tab first"{% endif %}>Auto-fill metadata</button>
+          </div>
+          <p class="hint" style="margin-top:8px;">The build is not attached automatically — pick the build for the version yourself.
+            App Privacy (data collection) is not set here; Apple's API does not expose it the same way.</p>
+        </form>
+
+        <hr style="border:none;border-top:1px solid var(--border);margin:20px 0;">
+        <h3 style="margin-top:0;">App Review contact</h3>
+        <p class="hint">The person Apple's review team contacts about this submission. Required before a version
+          can be submitted. Only Apple sees it — never public. The phone must be in <code>+&lt;country&gt; number</code> form.</p>
+        <form method="post" action="/jobs/{{ job.id }}/store-metadata/review-contact">
+          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+          <div style="display:flex;gap:12px;flex-wrap:wrap;">
+            <div class="field" style="margin-bottom:8px;flex:1;min-width:140px;">
+              <label>First name<input type="text" name="first_name" required></label></div>
+            <div class="field" style="margin-bottom:8px;flex:1;min-width:140px;">
+              <label>Last name<input type="text" name="last_name" required></label></div>
+          </div>
+          <div style="display:flex;gap:12px;flex-wrap:wrap;">
+            <div class="field" style="margin-bottom:8px;flex:1;min-width:160px;">
+              <label>Phone<input type="text" name="phone" placeholder="+380661243546" required></label></div>
+            <div class="field" style="margin-bottom:8px;flex:1;min-width:200px;">
+              <label>Email<input type="email" name="email" required></label></div>
+          </div>
+          <div class="field" style="margin-bottom:8px;">
+            <label>Notes for the reviewer (optional)<input type="text" name="notes"></label></div>
+          <div class="form-actions" style="margin-top:0;">
+            <button class="btn" type="submit"{% if not signing.configured %} disabled title="Upload the App Store Connect API key in the Build tab first"{% endif %}>Save review contact</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h3>App icon</h3>
+        <p class="hint">Draws our own 1024&times;1024 icon from the source app's icon: the same kind of
+          subject so it sits naturally among similar apps, but our palette and our own mark — no
+          traced shapes, no lettering. Opaque and unrounded, as App Store Connect requires.</p>
+        <div class="icon-row">
+          <img class="app-icon" src="/jobs/{{ job.id }}/app-icon.png?w=320"
+               alt="Generated app icon" width="128" height="128" decoding="async"
+               onerror="this.closest('.icon-row').classList.add('no-icon');this.remove();">
+          <div>
+            <form method="post" action="/jobs/{{ job.id }}/app-icon">
+              <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+              <div class="form-actions" style="margin-top:0;">
+                <button class="btn" type="submit">Generate icon</button>
+                {% if icon_versions %}
+                <a class="btn btn--ghost" href="/jobs/{{ job.id }}/app-icon.png?download=1">Download 1024&times;1024</a>
+                {% endif %}
+              </div>
+              <p class="hint" style="margin-top:8px;">Every run is kept — pick any earlier one below.
+                The download is the exact App Store file: 1024&times;1024 PNG, opaque, unrounded.</p>
+            </form>
+          </div>
+        </div>
+        {% set earlier = icon_versions | rejectattr('is_latest') | list %}
+        {% if earlier %}
+        <p class="hint" style="margin-top:16px;">Earlier generations ({{ earlier|length }}).
+          The current one is shown above — choose any of these to replace it.</p>
+        <div class="icon-history">
+          {% for iv in earlier %}
+          <div class="icon-candidate">
+            <div class="pic">
+              <img src="/jobs/{{ job.id }}/app-icon.png?w=160&v={{ iv.version_id }}"
+                   loading="lazy" decoding="async" alt="Icon from {{ iv.at }}">
+              <button class="del-x" type="button" title="Delete this icon"
+                      data-url="/jobs/{{ job.id }}/app-icon/delete"
+                      data-field="version_id" data-value="{{ iv.version_id }}"
+                      data-what="this icon">&times;</button>
+            </div>
+            <div class="cap">{{ iv.at }}</div>
+            <form method="post" action="/jobs/{{ job.id }}/app-icon/select">
+              <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+              <input type="hidden" name="version_id" value="{{ iv.version_id }}">
+              <button class="btn btn--ghost btn--sm" type="submit">Use</button>
+            </form>
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+      <div class="card">
+        <h3>App Store screenshots</h3>
+        <p class="hint">Renders the listing at 1290&times;2796 from this app's own generated screens,
+          in the app's palette. The source listing is studied for composition only — copy and screens
+          are ours, and no screen is used to claim a feature the app does not have.</p>
+        <form method="post" action="/jobs/{{ job.id }}/store-assets">
+          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+          <div class="form-actions" style="margin-top:0;">
+            <button class="btn" type="submit">Generate screenshots</button>
+            {% if store_slides %}
+            <a class="btn btn--ghost" href="/jobs/{{ job.id }}/store-assets.zip">Download all ({{ store_slides|length }})</a>
+            <a class="btn btn--ghost" href="/jobs/{{ job.id }}/store-assets.zip?size=iphone-65">as 6.5&Prime;</a>
+            {% endif %}
+          </div>
+          {% if store_slides %}<p class="hint" style="margin-top:8px;">Re-running replaces the current set.
+            The archive holds the original 1290&times;2796 PNGs — the 6.9&Prime; slot. App Store Connect
+            checks the pixel size against the slot you drop them into, so use
+            <em>as 6.5&Prime;</em> (1284&times;2778) if that is the slot your listing shows.</p>{% endif %}
+        </form>
+        {% if store_slides %}
+        <p class="hint" style="margin-top:14px;">Edit one slide at a time: describe what to fix and it is
+          refined in place from the existing HTML, not regenerated from scratch.</p>
+        <div class="thumbs">
+          {% for key in store_slides %}
+          {# real slide number from the object name — the set can start past 01 #}
+          {% set n = (key.split('/')|last)[:2]|int %}
+          <div class="thumb">
+            <div class="pic">
+              <a href="/jobs/{{ job.id }}/artifacts/object?key={{ key }}" target="_blank">
+                <img src="/jobs/{{ job.id }}/artifacts/object?key={{ key }}&w=320"
+                     loading="lazy" decoding="async" alt="Slide {{ n }}"></a>
+              <button class="del-x" type="button" title="Delete this slide"
+                      data-url="/jobs/{{ job.id }}/store-assets/slide/delete"
+                      data-field="index" data-value="{{ n }}"
+                      data-what="slide {{ '%02d'|format(n) }}">&times;</button>
+            </div>
+            <div class="cap">Slide {{ '%02d'|format(n) }} ·
+              <a href="/jobs/{{ job.id }}/artifacts/object?key={{ key }}&download=1">PNG</a></div>
+            <form method="post" action="/jobs/{{ job.id }}/store-assets/slide">
+              <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+              <input type="hidden" name="index" value="{{ n }}">
+              <textarea name="instructions" rows="2" placeholder="what to fix / improve…" style="font-size:12px;"></textarea>
+              <button class="btn btn--sm" type="submit" style="margin-top:5px;">Refine</button>
+            </form>
+
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="hint" style="margin-top:10px;">Nothing rendered yet.</p>
+        {% endif %}
+      </div>
+
+      <div class="card">
+        <h3>iPad screenshots</h3>
+        <p class="hint">App Store Connect keeps a separate set for tablets
+          (2048&times;2732). These are re-framed from the iPhone slides above — same wording, same
+          palette, same subject — for the wider canvas, with the phone mockup redrawn as a tablet.
+          Only the leading slides are made: a listing is judged on those, and the iPad set need not
+          match the iPhone set one for one.</p>
+        <form method="post" action="/jobs/{{ job.id }}/ipad-slides">
+          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+          <div class="form-actions" style="margin-top:0;">
+            <button class="btn" type="submit" {{ 'disabled' if not store_slides else '' }}>Generate iPad set</button>
+            {% if ipad_slides %}
+            <a class="btn btn--ghost" href="/jobs/{{ job.id }}/store-assets.zip?device=ipad">Download all ({{ ipad_slides|length }})</a>
+            {% endif %}
+            {% if not store_slides %}<span class="hint">Generate the iPhone slides first.</span>{% endif %}
+          </div>
+        </form>
+        {% if ipad_slides %}
+        <div class="thumbs" style="margin-top:14px;">
+          {% for key in ipad_slides %}
+          {% set n = (key.split('/')|last).replace('ipad_','')[:2]|int %}
+          <div class="thumb">
+            <div class="pic">
+              <a href="/jobs/{{ job.id }}/artifacts/object?key={{ key }}" target="_blank">
+                <img src="/jobs/{{ job.id }}/artifacts/object?key={{ key }}&w=320"
+                     loading="lazy" decoding="async" alt="iPad slide {{ n }}"></a>
+              <button class="del-x" type="button" title="Delete this iPad slide"
+                      data-url="/jobs/{{ job.id }}/store-assets/slide/delete"
+                      data-field="index" data-value="ipad_{{ '%02d'|format(n) }}"
+                      data-what="iPad slide {{ '%02d'|format(n) }}">&times;</button>
+            </div>
+            <div class="cap">iPad {{ '%02d'|format(n) }} &middot;
+              <a href="/jobs/{{ job.id }}/artifacts/object?key={{ key }}&download=1">PNG</a></div>
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="tab-panel panel-rework" role="tabpanel" aria-label="Rework">
+      <div class="card">
+        <h3>Rework <span class="muted" style="font-weight:400;">— fix bugs / apply changes</span></h3>
+        <p class="hint">Version {{ job.result_version }}. Describe the bugs or paste an updated spec —
+          the existing app is edited in place, re-pushed to the same repo and rebuilt. Runs only when
+          the pipeline is idle.</p>
+        {% set busy = job.state.value not in ['done', 'failed', 'cancelled'] %}
+        <form method="post" action="/jobs/{{ job.id }}/rework">
+          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+          <textarea name="instructions" rows="5"
+            placeholder="e.g. On the Sounds tab the slot cards overflow; the paywall Continue button does nothing; German locale is missing on Settings → Language."
+            {{ 'disabled' if busy else '' }}></textarea>
+          <div class="form-actions">
+            <button class="btn" type="submit" {{ 'disabled' if busy else '' }}>Apply rework</button>
+            {% if busy %}<span class="hint">Pipeline is busy…</span>{% endif %}
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h3>Re-verify <span class="muted" style="font-weight:400;">— structural web</span></h3>
+        <p class="hint">Static audit of the generated Flutter app against the navigation graph —
+          missing screens, dead links, missing edges and blank renders — with a fix loop. Runs only
+          when the pipeline is idle.</p>
+        {% set busy = job.state.value not in ['done', 'failed', 'cancelled', 'needs_input'] %}
+        {% if gen.selftest_report and gen.selftest_report.structural %}
+        {% set s = gen.selftest_report.structural %}
+        <p class="hint">Last structural audit:
+          <strong style="color:var(--text);">{{ 'ok' if s.ok else 'gaps' }}</strong>
+          &nbsp;·&nbsp; missing screens {{ (s.missing_screens or []) | length }}
+          &nbsp;·&nbsp; blank {{ (s.blank_screens or []) | length }}
+          &nbsp;·&nbsp; dead links {{ (s.dead_links or []) | length }}
+          &nbsp;·&nbsp; missing edges {{ (s.missing_edges or []) | length }}</p>
+        {% endif %}
+        <form method="post" action="/jobs/{{ job.id }}/verify-web">
+          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+          <div class="form-actions">
+            <button class="btn btn--ghost" type="submit" {{ 'disabled' if busy else '' }}>Re-verify (structural web)</button>
+            {% if busy %}<span class="hint">Pipeline is busy…</span>{% endif %}
+          </div>
+        </form>
+      </div>
+    </section>
+    {% endif %}
+
+  </div>
+</div>
 {% endblock %}
