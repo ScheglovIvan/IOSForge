@@ -8,7 +8,7 @@ build compiles. That is this module, and it does two things:
   in the pubspec, which is what lets Dart code show the mark on the splash, the
   paywall header or an about screen;
 * adds the ``flutter_launcher_icons`` dev dependency and its configuration, which
-  the CI step runs to produce every iOS/Android launcher size from that one file.
+  the CI step runs to produce every iOS launcher size from that one file.
 
 Both are idempotent: staging the same project twice leaves it unchanged, so a
 rebuild after an icon re-roll simply swaps the PNG.
@@ -34,8 +34,6 @@ LAUNCHER_CONFIG = f"""
   image_path: "{ICON_PATH}"
   remove_alpha_ios: true
   ios: true
-  android: true
-  min_sdk_android: 21
 """
 
 

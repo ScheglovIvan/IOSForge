@@ -1,14 +1,14 @@
 """Stage E — compliance/refinement loop driving the generated app toward >=95%.
 
-Pipeline (per .claude/state/DECISIONS.md, with the two user overrides applied):
-``build_apk`` -> ``render_generated`` (deep-link driven, NOT crawl-based) ->
+Pipeline (per .claude/state/DECISIONS.md, with the user overrides applied):
+``build_web`` -> ``render_generated_web`` (headless Chromium, ``/#/screen/<id>``) ->
 ``match_screens`` (pure, by id) -> ``evaluate`` (vision-judge ``claude -p`` +
 deterministic ``aggregate``) -> ``diffs_to_tasks`` (pure) -> ``apply_corrective``
-(claude task runner), wrapped by the ``refine_until_compliant`` driver.
+(claude task runner), wrapped by the ``refine_web_until_complete`` driver.
 
 User overrides vs the recorded spec:
-- The generated app is navigated by deep link ``iosforge://screen/<id>`` rather
-  than re-crawled with the uiautomator crawler; screens are matched by id.
+- The generated app is navigated by route ``/#/screen/<id>`` rather than
+  re-crawled with the uiautomator crawler; screens are matched by id.
 - ``status == "below_floor"`` does NOT block delivery: the Job stays DONE and the
   artifact is delivered; only the report content differs.
 
@@ -25,7 +25,6 @@ import re
 import shutil
 import subprocess
 import threading
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,7 +32,7 @@ from typing import Any
 
 from iosforge.common.config import Settings
 from iosforge.common.logging import get_logger
-from iosforge.mvp import claude_gen, emulator
+from iosforge.mvp import claude_gen
 from iosforge.mvp.paths import RunPaths
 
 log = get_logger("mvp.compliance")
@@ -124,65 +123,10 @@ class ComplianceWeights:
         )
 
 
-def build_apk(paths: RunPaths, *, timeout: int = 1800) -> Path:
-    """Build a debug APK from paths.flutter_app and copy it to paths.apk."""
-    bound = log.bind(stage="compliance.build_apk", run_dir=str(paths.run_dir))
-    res = subprocess.run(
-        [FLUTTER_BIN, "build", "apk", "--debug"],
-        cwd=paths.flutter_app,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
-    if res.returncode != 0:
-        bound.error("compliance.build_apk.failed", code=res.returncode, stderr=res.stderr[-2000:])
-        raise RuntimeError(f"flutter build apk exited {res.returncode}: {res.stderr[-500:]}")
-    built = paths.flutter_app / "build" / "app" / "outputs" / "flutter-apk" / "app-debug.apk"
-    if not built.exists():
-        raise RuntimeError(f"flutter build apk did not produce {built}")
-    shutil.copy2(built, paths.apk)
-    bound.info("compliance.build_apk.done", apk=str(paths.apk))
-    return paths.apk
-
-
 def _original_screen_ids(paths: RunPaths) -> list[str]:
     data = json.loads(paths.screens_json.read_text())
     screens = data.get("screens", []) if isinstance(data, dict) else []
     return [str(s["id"]) for s in screens if isinstance(s, dict) and "id" in s]
-
-
-def render_generated(paths: RunPaths, *, avd: str, timeout: int = 1800) -> dict[str, Any]:
-    """Install the generated APK and deep-link to each original screen id.
-
-    Drives navigation deterministically with ``am start ... iosforge://screen/<id>``
-    instead of the uiautomator crawler; screenshots land in
-    paths.generated_screens_dir keyed by original id.
-    """
-    bound = log.bind(stage="compliance.render", run_dir=str(paths.run_dir), avd=avd)
-    package = emulator.install_apk(paths.apk)
-    generated: list[dict[str, str]] = []
-    for sid in _original_screen_ids(paths):
-        emulator.adb(
-            "shell",
-            "am",
-            "start",
-            "-W",
-            "-a",
-            "android.intent.action.VIEW",
-            "-d",
-            f"iosforge://screen/{sid}",
-            package,
-            timeout=timeout,
-        )
-        time.sleep(2)
-        png = paths.generated_screens_dir / f"{sid}.png"
-        png.write_bytes(emulator.adb_raw("exec-out", "screencap", "-p"))
-        generated.append({"id": sid, "screenshot": f"generated_screens/{sid}.png"})
-    result = {"package": package, "screens": generated}
-    paths.generated_screens_json.write_text(json.dumps(result, indent=2, ensure_ascii=False))
-    bound.info("compliance.render.done", screens=len(generated))
-    return result
 
 
 def _discover_chromium(preferred: str = "") -> str:
@@ -268,8 +212,8 @@ def render_generated_web(
     writes the screenshot synchronously; software GL (SwiftShader) lets Flutter's
     CanvasKit paint without a GPU. Snap-confined Chromium can't write to ``/tmp``, so
     shots are staged in its snap home and moved into ``paths.generated_screens_dir``
-    (keyed by original id, same shape as the emulator :func:`render_generated`). The
-    HTTP server binds an ephemeral port and is always torn down.
+    (keyed by original id). The HTTP server binds an ephemeral port and is always
+    torn down.
     """
     bound = log.bind(stage="compliance.render_web", run_dir=str(paths.run_dir))
     web_dir = paths.flutter_app / "build" / "web"
@@ -870,33 +814,6 @@ def _refine(
         stop_reason=report.get("stop_reason"),
     )
     return report
-
-
-def refine_until_compliant(
-    paths: RunPaths,
-    *,
-    threshold: float,
-    soft_floor: float,
-    max_iterations: int,
-    weights: ComplianceWeights,
-    avd: str,
-    timeout: int = 1800,
-) -> dict[str, Any]:
-    """Emulator refine loop: APK build -> deep-link render -> evaluate -> correct."""
-
-    def _prepare() -> None:
-        build_apk(paths, timeout=timeout)
-        render_generated(paths, avd=avd, timeout=timeout)
-
-    return _refine(
-        paths,
-        _prepare,
-        threshold=threshold,
-        soft_floor=soft_floor,
-        max_iterations=max_iterations,
-        weights=weights,
-        timeout=timeout,
-    )
 
 
 def refine_until_compliant_web(

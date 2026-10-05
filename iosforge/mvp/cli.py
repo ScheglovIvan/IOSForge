@@ -38,13 +38,17 @@ def run(apk: Path, out_base: Path, max_screens: int, avd: str, do_build_check: b
     settings = get_settings()
     flutter_app = codegen.generate(paths, settings)
 
-    report = compliance.refine_until_compliant(
+    report = compliance.refine_web_until_complete(
         paths,
-        threshold=settings.compliance_threshold,
+        threshold=settings.frontend_verify_threshold,
         soft_floor=settings.compliance_soft_floor,
         max_iterations=settings.compliance_max_iterations,
         weights=compliance.ComplianceWeights.from_settings(settings),
-        avd=avd,
+        chromium_bin=settings.chromium_bin,
+        wait_ms=settings.web_render_wait_ms,
+        window=settings.web_render_window,
+        blank_max_bytes=settings.web_blank_max_bytes,
+        structural_gate=settings.verify_web_structural,
     )
     if do_build_check:
         claude_gen.build_check(flutter_app)

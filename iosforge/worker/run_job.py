@@ -507,13 +507,17 @@ def run_job(self, job_id: str) -> str:
 
             analyze.decompose(paths)
             codegen.generate(paths, settings)
-            report = compliance.refine_until_compliant(
+            report = compliance.refine_web_until_complete(
                 paths,
-                threshold=settings.compliance_threshold,
+                threshold=settings.frontend_verify_threshold,
                 soft_floor=settings.compliance_soft_floor,
                 max_iterations=settings.compliance_max_iterations,
                 weights=compliance.ComplianceWeights.from_settings(settings),
-                avd=settings.admin_avd,
+                chromium_bin=settings.chromium_bin,
+                wait_ms=settings.web_render_wait_ms,
+                window=settings.web_render_window,
+                blank_max_bytes=settings.web_blank_max_bytes,
+                structural_gate=settings.verify_web_structural,
             )
 
             zip_base = tmp / "flutter_app"

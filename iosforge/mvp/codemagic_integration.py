@@ -44,7 +44,7 @@ workflows:
       cocoapods: default
     scripts:
       - name: Scaffold platform folders
-        script: flutter create --platforms=ios,android .
+        script: flutter create --platforms=ios .
       - name: Set iOS deployment target 15.0
         script: |
           # Apphud SDK 3.x requires iOS 15.0+ (pod install fails below it); the
@@ -54,18 +54,16 @@ workflows:
           sed -i '' "s/platform :ios, '[0-9.]*'/platform :ios, '15.0'/" ios/Podfile || true
           perl -0pi -e "s/flutter_additional_ios_build_settings\\(target\\)/flutter_additional_ios_build_settings(target)\\n      target.build_configurations.each { |c| c.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0' }/g" ios/Podfile || true
           sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*/IPHONEOS_DEPLOYMENT_TARGET = 15.0/g" ios/Runner.xcodeproj/project.pbxproj || true
-      - name: Set display name and Android identity
+      - name: Set display name
         script: |
-          # Display name (user-visible) + Android applicationId/label are written from
-          # the build profile. The iOS PRODUCT_BUNDLE_IDENTIFIER is intentionally left
-          # at the flutter-create default (com.example.*): a custom iOS bundle id makes
-          # Xcode automatic-signing demand a Development Team even for --no-codesign, so
-          # the real iOS bundle id is applied together with signing (real profile, once
-          # Apple credentials are configured). __APP_NAME__ / __BUNDLE_ID__ are per-job.
+          # Display name (user-visible) is written from the build profile. The iOS
+          # PRODUCT_BUNDLE_IDENTIFIER is intentionally left at the flutter-create default
+          # (com.example.*): a custom iOS bundle id makes Xcode automatic-signing demand a
+          # Development Team even for --no-codesign, so the real iOS bundle id is applied
+          # together with signing (real profile, once Apple credentials are configured).
+          # __APP_NAME__ / __BUNDLE_ID__ are per-job.
           /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName __APP_NAME__" ios/Runner/Info.plist \
             || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string __APP_NAME__" ios/Runner/Info.plist
-          sed -i '' 's/applicationId "[^"]*"/applicationId "__BUNDLE_ID__"/' android/app/build.gradle || true
-          sed -i '' 's/android:label="[^"]*"/android:label="__APP_NAME__"/' android/app/src/main/AndroidManifest.xml || true
       - name: Inject iOS permission usage descriptions
         script: |
           # Real iOS permissions crash at runtime without their NS*UsageDescription in
@@ -182,7 +180,7 @@ workflows:
       cocoapods: default
     scripts:
       - name: Scaffold platform folders
-        script: flutter create --platforms=ios,android .
+        script: flutter create --platforms=ios .
       - name: Set iOS deployment target 15.0
         script: |
           sed -i '' "s/^# *platform :ios.*/platform :ios, '15.0'/" ios/Podfile || true
@@ -197,8 +195,6 @@ workflows:
           /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName __APP_NAME__" ios/Runner/Info.plist \
             || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string __APP_NAME__" ios/Runner/Info.plist
           sed -i '' "s/PRODUCT_BUNDLE_IDENTIFIER = [^;]*;/PRODUCT_BUNDLE_IDENTIFIER = __BUNDLE_ID__;/g" ios/Runner.xcodeproj/project.pbxproj || true
-          sed -i '' 's/applicationId "[^"]*"/applicationId "__BUNDLE_ID__"/' android/app/build.gradle || true
-          sed -i '' 's/android:label="[^"]*"/android:label="__APP_NAME__"/' android/app/src/main/AndroidManifest.xml || true
       - name: Inject iOS permission usage descriptions
         script: |
           if [ -f ios_permissions.json ]; then

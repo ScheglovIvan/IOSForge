@@ -142,8 +142,7 @@ def _integration_md(placements: list[dict[str, Any]]) -> str:
         "# Ad integration (google_mobile_ads)",
         "",
         "1. Merge `pubspec_snippet.yaml` into the app's `pubspec.yaml`.",
-        "2. Add `ios_info_plist_snippet.xml` to `ios/Runner/Info.plist` and",
-        "   `android_manifest_snippet.xml` inside `<application>` of the Android manifest.",
+        "2. Add `ios_info_plist_snippet.xml` to `ios/Runner/Info.plist`.",
         "3. Drop `ad_service.dart` + `ad_config.dart` under `lib/services/` and replace the",
         "   placeholder unit ids with the real ones from `admin/ads/admob.config.json`.",
         "4. In `main()`: `await AdService.instance.init();`",
@@ -184,12 +183,6 @@ def build_ad_bundle(spec: dict[str, Any], out_dir: Path) -> Path | None:
         "<!-- Add to ios/Runner/Info.plist -->\n"
         "<key>GADApplicationIdentifier</key>\n"
         f"<string>{_PLACEHOLDER_APP_ID}</string>\n"
-    )
-    (out_dir / "android_manifest_snippet.xml").write_text(
-        "<!-- Add inside <application> of android/app/src/main/AndroidManifest.xml -->\n"
-        "<meta-data\n"
-        '    android:name="com.google.android.gms.ads.APPLICATION_ID"\n'
-        f'    android:value="{_PLACEHOLDER_APP_ID}"/>\n'
     )
     (out_dir / "INTEGRATION.md").write_text(_integration_md(placements))
     (out_dir / "manifest.json").write_text(

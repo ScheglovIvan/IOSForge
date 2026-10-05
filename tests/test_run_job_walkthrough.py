@@ -104,7 +104,7 @@ def test_walkthrough_only_finishes_done_and_skips_codegen(
         claude_gen, "generate_from_tasks", lambda *a, **k: codegen_calls.append("generate")
     )
     monkeypatch.setattr(
-        compliance, "refine_until_compliant", lambda *a, **k: codegen_calls.append("refine")
+        compliance, "refine_web_until_complete", lambda *a, **k: codegen_calls.append("refine")
     )
 
     result = run_job_module.run_job.run(job_id)
@@ -157,7 +157,7 @@ def test_analysis_only_runs_filter_and_analyze_then_stops(
     monkeypatch.setattr(analyze, "decompose", lambda *a, **k: calls.append("decompose"))
     monkeypatch.setattr(claude_gen, "generate_from_tasks", lambda *a, **k: calls.append("generate"))
     monkeypatch.setattr(
-        compliance, "refine_until_compliant", lambda *a, **k: calls.append("refine")
+        compliance, "refine_web_until_complete", lambda *a, **k: calls.append("refine")
     )
 
     result = run_job_module.run_job.run(job_id)

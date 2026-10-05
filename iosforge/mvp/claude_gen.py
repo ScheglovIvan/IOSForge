@@ -474,10 +474,10 @@ Do exactly the work this task describes and nothing more:
   permission the app will request. Otherwise stay on the Flutter SDK + material widgets.
   The app MUST support deep-link navigation `iosforge://screen/<id>` that routes
   directly to the screen whose id matches `<id>` (the same ids used in
-  `app_spec.json` / `screens.json`). Add an `<intent-filter>` with
-  `<data android:scheme="iosforge"/>` to `android/app/src/main/AndroidManifest.xml`
-  and a router (e.g. `onGenerateRoute` / a platform deep-link handler) that parses
-  the incoming URI host/path and shows the matching screen.
+  `app_spec.json` / `screens.json`). Register the `iosforge` URL scheme under
+  `CFBundleURLTypes` in `ios/Runner/Info.plist` and a router (e.g. `onGenerateRoute`
+  / a platform deep-link handler) that parses the incoming URI host/path and shows
+  the matching screen.
   ALSO register a canonical web preview route `/screen/:id` (reachable in a browser
   at `/#/screen/<id>`) that shows the same screen for that `<id>` — this is used to
   verify each screen in headless Chromium, so it MUST render standalone.

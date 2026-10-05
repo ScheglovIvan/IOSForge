@@ -1,8 +1,7 @@
 """Tests for Stage E (compliance/refinement loop).
 
 Pure units (match_screens, aggregate, diffs_to_tasks) plus evaluate with a mocked
-vision-judge and refine_until_compliant with build/render/evaluate monkeypatched
-to canned sequences. No real flutter/emulator/adb/claude here.
+vision-judge and the web render/stage helpers. No real flutter/chromium/claude here.
 """
 
 from __future__ import annotations
@@ -207,93 +206,6 @@ def test_evaluate_uses_judge_json_and_writes_report(
     assert report["status"] == "soft_pass"
     assert rp.selftest_report_json.exists()
     assert json.loads(rp.selftest_report_json.read_text())["iteration"] == 1
-
-
-def _stub_loop(monkeypatch: pytest.MonkeyPatch, scores: list[float], applied: list[int]) -> None:
-    seq = iter(scores)
-    monkeypatch.setattr(compliance, "build_apk", lambda paths, **kw: paths.apk)
-    monkeypatch.setattr(compliance, "render_generated", lambda paths, **kw: {"screens": []})
-
-    def _fake_evaluate(paths: RunPaths, iteration: int, **kwargs: Any) -> dict[str, Any]:
-        score = next(seq)
-        status = "pass" if score >= kwargs["threshold"] else "soft_pass"
-        return {
-            "iteration": iteration,
-            "compliance_score": score,
-            "status": status,
-            "threshold": kwargs["threshold"],
-            "screens": [{"id": "0000", "score": score, "diffs": ["fix me"]}],
-        }
-
-    def _fake_apply(paths: RunPaths, corrective: dict[str, Any], **kw: Any) -> Path:
-        applied.append(len(corrective["tasks"]))
-        return paths.flutter_app
-
-    monkeypatch.setattr(compliance, "evaluate", _fake_evaluate)
-    monkeypatch.setattr(compliance, "apply_corrective", _fake_apply)
-
-
-def _run_loop(tmp_path: Path, max_iterations: int) -> dict[str, Any]:
-    rp = RunPaths.create(tmp_path)
-    rp.screens_json.write_text(json.dumps({"screens": [{"id": "0000"}]}))
-    return compliance.refine_until_compliant(
-        rp,
-        threshold=0.95,
-        soft_floor=0.80,
-        max_iterations=max_iterations,
-        weights=_WEIGHTS,
-        avd="mvp",
-    )
-
-
-def test_refine_stops_when_threshold_met(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    applied: list[int] = []
-    _stub_loop(monkeypatch, scores=[0.96], applied=applied)
-    report = _run_loop(tmp_path, max_iterations=3)
-    assert report["stop_reason"] == "threshold_met"
-    assert report["status"] == "pass"
-    assert applied == []
-
-
-def test_refine_feeds_corrective_then_stops_on_max_iterations(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    applied: list[int] = []
-    _stub_loop(monkeypatch, scores=[0.50, 0.70, 0.85], applied=applied)
-    report = _run_loop(tmp_path, max_iterations=3)
-    assert report["stop_reason"] == "max_iterations"
-    assert applied == [1, 1]
-
-
-def test_refine_stops_on_no_improvement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    applied: list[int] = []
-    _stub_loop(monkeypatch, scores=[0.50, 0.505], applied=applied)
-    report = _run_loop(tmp_path, max_iterations=5)
-    assert report["stop_reason"] == "no_improvement"
-    assert applied == [1]
-
-
-def test_refine_below_floor_returns_report_without_raising(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(compliance, "build_apk", lambda paths, **kw: paths.apk)
-    monkeypatch.setattr(compliance, "render_generated", lambda paths, **kw: {"screens": []})
-    monkeypatch.setattr(
-        compliance,
-        "evaluate",
-        lambda paths, iteration, **kw: {
-            "iteration": iteration,
-            "compliance_score": 0.3,
-            "status": "below_floor",
-            "threshold": kw["threshold"],
-            "screens": [],
-        },
-    )
-    monkeypatch.setattr(compliance, "apply_corrective", lambda paths, c, **kw: paths.flutter_app)
-
-    report = _run_loop(tmp_path, max_iterations=1)
-    assert report["status"] == "below_floor"
-    assert report["stop_reason"] == "max_iterations"
 
 
 def test_snap_stage_dir_only_for_snap_binary() -> None:

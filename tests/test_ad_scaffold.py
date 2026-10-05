@@ -34,7 +34,7 @@ def test_build_ad_bundle_emits_client_code(tmp_path: Path) -> None:
 
     assert ad_scaffold.GOOGLE_MOBILE_ADS_VERSION in (out / "pubspec_snippet.yaml").read_text()
     assert "GADApplicationIdentifier" in (out / "ios_info_plist_snippet.xml").read_text()
-    assert "APPLICATION_ID" in (out / "android_manifest_snippet.xml").read_text()
+    assert not (out / "android_manifest_snippet.xml").exists()
 
     integration = (out / "INTEGRATION.md").read_text()
     assert "Rewards" in integration and "rewarded" in integration

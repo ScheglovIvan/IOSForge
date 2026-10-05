@@ -211,10 +211,11 @@ def test_builtin_template_injects_ios_permissions() -> None:
 
 def test_builtin_template_has_identity_step_with_placeholders() -> None:
     y = cm._CODEMAGIC_YAML
-    assert "Set display name and Android identity" in y
-    assert "__BUNDLE_ID__" in y and "__APP_NAME__" in y
-    # display name (iOS) + applicationId/label (Android); iOS bundle id stays default
-    assert "CFBundleDisplayName" in y and "applicationId" in y and "android:label" in y
+    assert "Set display name" in y
+    assert "__APP_NAME__" in y
+    # display name (iOS) only; iOS bundle id stays default, no Android identity
+    assert "CFBundleDisplayName" in y
+    assert "applicationId" not in y and "android:label" not in y
     assert "PRODUCT_BUNDLE_IDENTIFIER =" not in y  # not changed for the unsigned build
 
 

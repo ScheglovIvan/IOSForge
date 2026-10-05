@@ -140,7 +140,7 @@ def render_constitution(spec: dict[str, Any]) -> str:
             "- This app **shows ads**. Add `google_mobile_ads` and use the ready bundle in"
             " `admin/ads/flutter/` (`AdService` + `AdConfig`) — do not hand-roll ad plumbing.",
             "- Initialize `AdService` in `main()`; inject the AdMob app id from"
-            " `admin/ads/admob.config.json` into `Info.plist` / `AndroidManifest.xml`.",
+            " `admin/ads/admob.config.json` into `Info.plist`.",
             "- Place ads at the discovered `monetization.ad_placements` (see"
             " `admin/ads/flutter/INTEGRATION.md`): banners embedded in-screen, interstitials on"
             " the given triggers (respect `ads_frequency_interstitial` from Remote Config),"
