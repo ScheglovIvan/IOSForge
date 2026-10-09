@@ -58,8 +58,6 @@ _AD_TOKENS = {
     "advertising",
     "advertisement",
     "interstitial",
-    "rewarded",
-    "sponsored",
     "admob",
 }
 _TEXT_CARRIERS = {
@@ -74,7 +72,7 @@ _TEXT_CARRIERS = {
     "overlay",
     "loading_status",
 }
-_AD_PHRASE = r"loading\s+ads?|(?:may|might|can)\s+contain\s+ads?|advertisements?"
+_AD_PHRASE = r"loading\s+ads?|(?:may|might|can)\s+contain\s+ads?"
 _AD_TEXT = re.compile(rf"\b(?:{_AD_PHRASE})\b", re.I)
 _MONETIZATION = {
     "paywall",
@@ -113,13 +111,14 @@ def is_ad_component(component: dict[str, Any]) -> bool:
 
     That is an ad type/role (``ad_banner``, ``NativeAdView``, ``interstitial``, ...) or a
     pure text carrier (disclaimer, label, loading overlay) whose data is ad text.
-    Paywalls, upsells and other components are never dropped for their data.
+    Components whose type/role names monetization (paywall, upsell, offer, ...) are
+    never dropped, even when it mentions ads ("remove_ads_upsell", "ad_free_offer").
     """
     kind = _words(component.get("type")) | _words(component.get("role"))
-    if kind & _AD_TOKENS:
-        return True
     if kind & _MONETIZATION:
         return False
+    if kind & _AD_TOKENS:
+        return True
     data = str(component.get("data") or "")
     return bool(kind & _TEXT_CARRIERS) and bool(_AD_TEXT.search(data) or _AD_LABEL.match(data))
 

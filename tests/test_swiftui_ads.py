@@ -22,7 +22,7 @@ def _write(app: Path, rel: str, text: str) -> None:
         {"type": "ad_banner", "role": "monetization"},
         {"type": "native_ad", "role": "feed"},
         {"type": "overlay", "role": "interstitial"},
-        {"type": "button", "role": "rewarded"},
+        {"type": "button", "role": "rewarded_ad"},
         {"type": "text", "role": "disclaimer", "data": "'This action may contain Ads'"},
         {"type": "loading_overlay", "role": "spinner", "data": "Loading ads..."},
         {"type": "AdBanner"},
@@ -44,6 +44,11 @@ def test_ad_components_are_detected(component: dict[str, Any]) -> None:
         {"type": "paywall", "role": "paywall", "data": "Unlimited scans; Remove ads; Weekly"},
         {"type": "feature_row", "role": "benefit", "data": "Ad-free experience"},
         {"type": "gadget_card", "role": "promo", "data": "Gadget picks"},
+        {"type": "promo_card", "role": "remove_ads_upsell", "data": "Go Pro"},
+        {"type": "paywall", "role": "ad_free_offer"},
+        {"type": "feature_row", "role": "no_ads_benefit"},
+        {"type": "badge", "role": "rewarded_points"},
+        {"type": "text", "role": "privacy", "data": "Your data is never used for advertisements."},
         {"type": "paywall_overlay", "role": "paywall", "data": "Go Pro; No ads"},
         {"type": "text", "role": "offer", "data": "Unlock all tools, no ads"},
     ],
@@ -156,3 +161,12 @@ def test_components_without_ads_are_untouched(data: str) -> None:
     spec = {"screens": [{"components": [{"type": "text", "role": "divider", "data": data}]}]}
     clean, removed = strip_ad_components(spec)
     assert removed == 0 and clean["screens"][0]["components"][0]["data"] == data
+
+
+def test_advertisement_only_counts_as_an_exact_label(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "App/Features/0003/Screen0003View.swift",
+        'Text("Your data is never used for advertisements.")\n',
+    )
+    assert ad_violations(tmp_path) == []
