@@ -77,7 +77,10 @@ def resolve_udid(configured: str = "") -> str:
     if configured:
         return configured
     require_toolchain()
-    devices = json.loads(xcode.simctl("list", "devices", "available", "-j") or "{}")
+    try:
+        devices = json.loads(xcode.simctl("list", "devices", "available", "-j") or "{}")
+    except (xcode.XcodeError, ValueError) as exc:
+        raise SimulatorUnavailable(f"cannot list simulators: {exc}") from exc
     phones = [
         device
         for runtime, items in devices.get("devices", {}).items()

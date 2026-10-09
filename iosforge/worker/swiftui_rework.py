@@ -132,6 +132,10 @@ def rework_swiftui(
         previous = job.state
         if not claim_job(db, job.id, REWORKABLE, JobState.CODEGEN):
             return f"job {job_id} cannot be reworked: another round claimed it"
+        if active_build(db, job.id) is not None:
+            job.state = previous
+            db.commit()
+            return f"job {job_id} cannot be reworked: a native delivery is in flight"
         stage = StageTimeline(job_id=job.id, stage=Stage.CODEGEN, started_at=utcnow())
         db.add(stage)
         db.commit()

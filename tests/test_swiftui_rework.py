@@ -378,3 +378,22 @@ def test_extend_route_rejects_bad_csrf(monkeypatch: pytest.MonkeyPatch) -> None:
         storage,  # type: ignore[arg-type]
     )
     assert response.status_code == 400
+
+
+def test_delivery_queued_before_the_claim_releases_the_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job, storage = _job()
+    session = _Session(job)
+    seen = _wire(monkeypatch, job, storage, session)
+    real_claim = swiftui_rework.claim_job
+
+    def claim_then_delivery(*a: Any) -> bool:
+        ok = real_claim(*a)
+        session.active = XcodeBuild(job_id=job.id, status="queued")
+        return ok
+
+    monkeypatch.setattr(swiftui_rework, "claim_job", claim_then_delivery)
+    out = swiftui_rework.rework_swiftui.run(str(job.id), "fix it")
+    assert "delivery is in flight" in out and job.state == JobState.DONE
+    assert seen["rounds"] == []

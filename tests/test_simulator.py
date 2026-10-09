@@ -148,3 +148,14 @@ def test_resolve_udid_prefers_configured_then_a_booted_iphone(
     monkeypatch.setattr(xcode, "simctl", lambda *a, **k: json.dumps({"devices": {}}))
     with pytest.raises(simulator.SimulatorUnavailable, match="IOS_SIMULATOR_UDID"):
         simulator.resolve_udid("")
+
+
+def test_resolve_udid_turns_simctl_errors_into_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(xcode, "toolchain_available", lambda: True)
+
+    def broken(*a: object, **k: object) -> str:
+        raise xcode.XcodeError("simctl list failed")
+
+    monkeypatch.setattr(xcode, "simctl", broken)
+    with pytest.raises(simulator.SimulatorUnavailable, match="cannot list simulators"):
+        simulator.resolve_udid("")
