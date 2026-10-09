@@ -143,7 +143,7 @@ def test_structural_gaps_park_the_job_without_delivery(monkeypatch: pytest.Monke
         "structural": {"ok": False, "missing_screens": [{"id": "session"}]},
     }  # fmt: skip
     job, session, seen = _wire(monkeypatch, report)
-    assert "hold delivery" in swiftui_build.build_swiftui.run(str(job.id))
+    assert "held for the operator" in swiftui_build.build_swiftui.run(str(job.id))
     assert job.state == JobState.NEEDS_INPUT and seen["queued"] == []
     assert any(isinstance(o, GenerationResult) for o in session.added)
     stage = next(o for o in session.added if isinstance(o, StageTimeline))
@@ -333,7 +333,7 @@ def test_visual_cap_without_structural_gaps_ships(monkeypatch: pytest.MonkeyPatc
 
 def test_report_without_a_structural_audit_is_held(monkeypatch: pytest.MonkeyPatch) -> None:
     job, session, seen = _wire(monkeypatch, {"compliance_score": 0.9, "stop_reason": "all_closed"})
-    assert "hold delivery" in swiftui_build.build_swiftui.run(str(job.id))
+    assert "held for the operator" in swiftui_build.build_swiftui.run(str(job.id))
     assert job.state == JobState.NEEDS_INPUT and seen["queued"] == []
     stage = next(o for o in session.added if isinstance(o, StageTimeline))
     assert "no structural audit" in (stage.error or "")
@@ -347,7 +347,7 @@ def test_clone_risk_is_held_even_when_structurally_complete(
         "structural": {"ok": True},
     }  # fmt: skip
     job, session, seen = _wire(monkeypatch, report)
-    assert "hold delivery" in swiftui_build.build_swiftui.run(str(job.id))
+    assert "held for the operator" in swiftui_build.build_swiftui.run(str(job.id))
     stage = next(o for o in session.added if isinstance(o, StageTimeline))
     assert job.state == JobState.NEEDS_INPUT and seen["queued"] == []
     assert "clone risk" in (stage.error or "")
@@ -360,6 +360,7 @@ def test_clone_risk_is_held_even_when_structurally_complete(
         ({"status": "pass", "structural": {"ok": False}}, False, False),
         ({"status": "clone_risk", "structural": {"ok": True}}, False, True),
         ({"status": "pass"}, True, True),
+        ({"status": "pass", "structural": {"ok": False}}, True, True),
     ],
 )
 def test_hold_reason_matrix(report: dict[str, Any], gate: bool, held: bool) -> None:

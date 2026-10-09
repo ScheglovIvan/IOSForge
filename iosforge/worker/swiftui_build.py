@@ -234,7 +234,7 @@ def build_swiftui(self: Any, job_id: str) -> str:
                 score=report.get("compliance_score"),
                 reason=reason,
             )
-            return f"job {job_id} built; structural gaps hold delivery"
+            return f"job {job_id} built; held for the operator: {reason}"
         try:
             queue_delivery(db, job)
         except Exception as exc:

@@ -117,8 +117,9 @@ class Settings(BaseSettings):
     frontend_verify_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
     # Headless Chromium for the store-slide renderer (empty = discover on PATH).
     chromium_bin: str = Field(default="")
-    # On loop exhaustion with structural gaps still open, end the Job in
-    # NEEDS_INPUT (human decides ship/rework) instead of silently DONE.
+    # With structural gaps still open after refine (or no audit), end the Job in
+    # NEEDS_INPUT (human decides ship/rework) instead of DONE. A clone-risk app is
+    # held regardless of this flag; visual scores alone never hold.
     web_verify_hard_gate: bool = Field(default=True)
     # Blank-render byte threshold: a rendered screen PNG smaller than this for a
     # 390x844 window is treated as a near-uniform / blank screen (no image lib).
