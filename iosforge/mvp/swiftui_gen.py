@@ -137,9 +137,11 @@ def prepare_workspace(paths: RunPaths, *, app_name: str, bundle_id: str) -> NavP
     """Stage inputs + reference into ``claude_ws`` and render the scaffold there."""
     ws = paths.claude_ws
     ws.mkdir(parents=True, exist_ok=True)
-    spec = json.loads(paths.app_spec_json.read_text())
+    spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
     model_spec, ad_components = strip_ad_components(spec)
-    (ws / "app_spec.json").write_text(json.dumps(model_spec, indent=2, ensure_ascii=False))
+    (ws / "app_spec.json").write_text(
+        json.dumps(model_spec, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     log.info("swiftui_gen.ads_stripped", components=ad_components)
     if paths.screens_dir.exists():
         shutil.copytree(paths.screens_dir, ws / "screens", dirs_exist_ok=True)
@@ -581,7 +583,9 @@ def main(argv: list[str] | None = None) -> int:
         paths, app_name=app_name, bundle_id=args.bundle_id, max_parallel=args.max_parallel
     )
     summary = report(result)
-    (paths.run_dir / "report.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False))
+    (paths.run_dir / "report.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     print(json.dumps({"run_dir": str(paths.run_dir), "errors": result.errors}, indent=2))
     if result.errors:
         return 1

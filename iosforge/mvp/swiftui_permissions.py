@@ -245,26 +245,20 @@ def kinds_for(name: str) -> list[PermissionKind]:
     return found
 
 
-def blank_comments_and_strings(source: str) -> str:
-    """Replace comment and string-literal contents with spaces, keeping offsets and lines.
+def lex_swift(source: str) -> list[tuple[str, int, int]]:
+    """Comment and string-literal spans of Swift ``source`` as ``(kind, start, end)``.
 
-    A small Swift lexer: handles ``//`` and nested ``/* */`` comments and ``"..."`` /
-    multi-line ``\"\"\"...\"\"\"`` strings with escapes, so a ``//`` inside a URL string
-    no longer hides the code after it and prose inside strings is never matched.
+    ``kind`` is ``"comment"`` (whole ``//`` / nested ``/* */`` comment) or ``"string"``
+    (the literal's contents, quotes excluded; ``"..."`` and multi-line
+    ``\"\"\"...\"\"\"`` with escapes).
     """
-    out = list(source)
+    spans: list[tuple[str, int, int]] = []
     i, n = 0, len(source)
-
-    def blank(start: int, end: int) -> None:
-        for j in range(start, min(end, n)):
-            if out[j] != "\n":
-                out[j] = " "
-
     while i < n:
         if source.startswith("//", i):
             end = source.find("\n", i)
             end = n if end == -1 else end
-            blank(i, end)
+            spans.append(("comment", i, end))
             i = end
         elif source.startswith("/*", i):
             depth, j = 1, i + 2
@@ -275,25 +269,40 @@ def blank_comments_and_strings(source: str) -> str:
                     depth, j = depth - 1, j + 2
                 else:
                     j += 1
-            blank(i, j)
+            spans.append(("comment", i, j))
             i = j
         elif source.startswith('"""', i):
             end = source.find('"""', i + 3)
-            end = n if end == -1 else end + 3
-            blank(i + 3, end - 3)
-            i = end
+            end = n if end == -1 else end
+            spans.append(("string", i + 3, end))
+            i = end + 3
         elif source[i] == '"':
             j = i + 1
             while j < n and source[j] not in '"\n':
                 j += 2 if source[j] == "\\" else 1
-            blank(i + 1, j)
+            spans.append(("string", i + 1, j))
             i = j + 1
         else:
             i += 1
+    return spans
+
+
+def blank_comments_and_strings(source: str) -> str:
+    """Replace comment and string-literal contents with spaces, keeping offsets and lines.
+
+    Built on :func:`lex_swift`, so a ``//`` inside a URL string no longer hides the
+    code after it and prose inside strings is never matched.
+    """
+    out = list(source)
+    for _, start, end in lex_swift(source):
+        for j in range(start, min(end, len(source))):
+            if out[j] != "\n":
+                out[j] = " "
     return "".join(out)
 
 
-def _line_of(source: str, offset: int) -> int:
+def line_of(source: str, offset: int) -> int:
+    """1-based line number of ``offset`` in ``source``."""
     return source.count("\n", 0, offset) + 1
 
 
@@ -316,7 +325,7 @@ def _file_violations(
                 api = re.sub(r"\s+", "", match.group(0))[:60]
                 found.setdefault(
                     match.start(),
-                    f"{rel}:{_line_of(source, match.start())}: error: {kind.case} permission "
+                    f"{rel}:{line_of(source, match.start())}: error: {kind.case} permission "
                     f"API `{api}` outside {PERMISSIONS_DIR}/ — {move}",
                 )
         for pattern in kind.capture:
@@ -334,7 +343,7 @@ def _file_violations(
                 )
                 found.setdefault(
                     match.start(),
-                    f"{rel}:{_line_of(source, match.start())}: error: {kind.case} capture "
+                    f"{rel}:{line_of(source, match.start())}: error: {kind.case} capture "
                     f"API `{api}` — {hint}",
                 )
     for pattern in _GENERIC_PROMPTS:
@@ -343,13 +352,13 @@ def _file_violations(
                 continue
             found.setdefault(
                 match.start(),
-                f"{rel}:{_line_of(source, match.start())}: error: permission API "
+                f"{rel}:{line_of(source, match.start())}: error: permission API "
                 f"`{match.group(0).strip()}` outside {PERMISSIONS_DIR}/ — {move}",
             )
     for match in _DIRECT_PROMPT_CALL.finditer(source):
         found.setdefault(
             match.start(),
-            f"{rel}:{_line_of(source, match.start())}: error: direct `.prompt()` call "
+            f"{rel}:{line_of(source, match.start())}: error: direct `.prompt()` call "
             "bypasses the headless gate — call Permissions.request(...) instead",
         )
     if declared is not None:
@@ -357,7 +366,7 @@ def _file_violations(
             if match.group(1) not in declared:
                 found.setdefault(
                     match.start(),
-                    f"{rel}:{_line_of(source, match.start())}: error: `{match.group(1)}` is not "
+                    f"{rel}:{line_of(source, match.start())}: error: `{match.group(1)}` is not "
                     "declared in app_spec.permissions — available prompters: "
                     f"{', '.join(sorted(declared)) or 'none'}",
                 )

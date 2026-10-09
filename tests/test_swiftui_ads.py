@@ -25,6 +25,9 @@ def _write(app: Path, rel: str, text: str) -> None:
         {"type": "button", "role": "rewarded"},
         {"type": "text", "role": "disclaimer", "data": "'This action may contain Ads'"},
         {"type": "loading_overlay", "role": "spinner", "data": "Loading ads..."},
+        {"type": "AdBanner"},
+        {"type": "NativeAdView"},
+        {"type": "view", "role": "bannerAd"},
     ],
 )
 def test_ad_components_are_detected(component: dict[str, Any]) -> None:
@@ -38,6 +41,9 @@ def test_ad_components_are_detected(component: dict[str, Any]) -> None:
         {"type": "card", "role": "paywall", "data": "Unlock everything, 3-day trial"},
         {"type": "banner", "role": "upsell", "data": "Get Pro"},
         {"type": "text", "role": "header", "data": "Address book"},
+        {"type": "paywall", "role": "paywall", "data": "Unlimited scans; Remove ads; Weekly"},
+        {"type": "feature_row", "role": "benefit", "data": "Ad-free experience"},
+        {"type": "gadget_card", "role": "promo", "data": "Gadget picks"},
     ],
 )
 def test_regular_components_are_kept(component: dict[str, Any]) -> None:
@@ -75,6 +81,11 @@ def test_strip_ad_components_returns_a_clean_copy() -> None:
         ('Button("Watch an ad to unlock") {}\n', "ad UI text"),
         ('Label("Remove Ads", systemImage: "xmark")\n', "ad UI text"),
         ('Text("Sponsored")\n', "ad UI text"),
+        ('/* " */ Text("Sponsored")\n', "ad UI text"),
+        ('Text("Ads by Example")\n', "ad UI text"),
+        ('Button("Watch video to unlock") {}\n', "ad UI text"),
+        ("@_exported import AppLovinSDK\n", "ad SDK `AppLovinSDK`"),
+        ("import GoogleMobileAdsMediationMeta\n", "ad SDK `GoogleMobileAdsMediationMeta`"),
     ],
 )
 def test_ad_code_and_text_fail_the_gate(tmp_path: Path, source: str, needle: str) -> None:
@@ -92,4 +103,34 @@ def test_regular_copy_and_comments_pass(tmp_path: Path) -> None:
         'Text("Add to playlist")\nText("Upgrade to Pro")\nText("Adjust the volume")\n'
         "let adjusted = loadAddress()\n",
     )
+    assert ad_violations(tmp_path) == []
+
+
+def test_paywall_keeps_its_component_but_loses_the_ad_phrase() -> None:
+    spec = {
+        "screens": [
+            {
+                "id": "0001",
+                "components": [
+                    {
+                        "type": "paywall",
+                        "role": "paywall",
+                        "data": "Unlimited scans; Remove ads; Weekly",
+                    }
+                ],
+            }
+        ]
+    }
+    clean, removed = strip_ad_components(spec)
+    assert removed == 0
+    assert clean["screens"][0]["components"][0]["data"] == "Unlimited scans; Weekly"
+
+
+def test_multiline_string_ad_text_fails_the_gate(tmp_path: Path) -> None:
+    _write(tmp_path, "App/Features/0000/Screen0000View.swift", 'let s = """\nLoading ads\n"""\n')
+    assert len(ad_violations(tmp_path)) == 1
+
+
+def test_gadget_identifier_is_not_an_ad_type(tmp_path: Path) -> None:
+    _write(tmp_path, "App/Features/0000/Screen0000View.swift", "let GADGET = 1\nlet x = GADGET\n")
     assert ad_violations(tmp_path) == []
