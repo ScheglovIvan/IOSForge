@@ -151,7 +151,8 @@ def generate_images(
     for slot in image_slots(spec):
         out = target / slot.file_name
         source = "placeholder"
-        if spend and out.exists():
+        marker = out.with_suffix(".source")
+        if spend and out.exists() and marker.is_file() and marker.read_text() == "replicate":
             source = "cached"
         elif spend:
             try:
@@ -167,6 +168,7 @@ def generate_images(
                 )
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_bytes(image_slides.to_png(data))
+                marker.write_text("replicate")
                 source = "replicate"
             except Exception as exc:
                 log.warning("swiftui_media.generate_failed", slot=slot.file_name, error=str(exc))
@@ -183,3 +185,25 @@ def generate_images(
     )
     log.info("swiftui_media.done", images=len(images), spend=spend)
     return images
+
+
+ICON_SIZE = 1024
+
+
+def placeholder_icon(spec: dict[str, Any], out: Path) -> Path:
+    """Opaque 1024 px stand-in app icon (palette gradient + initial) when none was generated."""
+    first, second = (_palette(spec) + ["#6C7BFF", "#9AE6D3"])[:2]
+    a, b = _hex(first), _hex(second)
+    img = Image.new("RGB", (ICON_SIZE, ICON_SIZE))
+    draw = ImageDraw.Draw(img)
+    for y in range(ICON_SIZE):
+        t = y / (ICON_SIZE - 1)
+        draw.line(
+            [(0, y), (ICON_SIZE, y)], fill=tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+        )
+    initial = (str(spec.get("app_name") or "A").strip()[:1] or "A").upper()
+    draw.ellipse((312, 312, 712, 712), fill=(255, 255, 255))
+    draw.text((480, 470), initial, fill=a)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    img.save(out)
+    return out

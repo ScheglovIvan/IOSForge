@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from iosforge.mvp import swiftui_integrations as integ
+from iosforge.mvp import swiftui_media
 from iosforge.mvp import swiftui_templates as tpl
 from iosforge.mvp.swiftui_navigation import Tab, derive_tabs, has_tab_bar, tab_owners
 from iosforge.mvp.swiftui_permissions import PERMISSIONS_DIR, PermissionKind, kinds_for
@@ -44,7 +46,21 @@ __all__ = [
 ]
 
 DEPLOYMENT_TARGET = "17.0"
-CONTRACT_DIRS = ("App/Navigation", "App/Headless", PERMISSIONS_DIR, "App/Support")
+CONTRACT_DIRS = (
+    "App/Navigation",
+    "App/Headless",
+    PERMISSIONS_DIR,
+    "App/Support",
+    "App/Monetization",
+)
+ICON_SET = "Resources/Assets.xcassets/AppIcon.appiconset"
+ICON_FILE = "app_icon.png"
+_CATALOG_CONTENTS = '{\n  "info" : {\n    "author" : "xcode",\n    "version" : 1\n  }\n}\n'
+_ICON_CONTENTS = (
+    '{\n  "images" : [\n    {\n      "filename" : "app_icon.png",\n      "idiom" : "universal",\n'
+    '      "platform" : "ios",\n      "size" : "1024x1024"\n    }\n  ],\n'
+    '  "info" : {\n    "author" : "xcode",\n    "version" : 1\n  }\n}\n'
+)
 MODEL_DIRS = ("App/Theme", "App/Components", "App/Features", "App/Fixtures")
 APP_ROOT_ENTRIES = {"project.yml", "App", "Resources", "Config"}
 
@@ -260,13 +276,21 @@ def render_project_yml(
     fonts: list[str],
     purpose_strings: dict[str, str],
     has_media: bool,
+    has_icon: bool = False,
+    integrations: integ.Integrations | None = None,
 ) -> str:
-    """XcodeGen spec: one iOS app target with a scheme, signing off, Info.plist in Config/."""
+    """XcodeGen spec: one iOS app target with a scheme, signing off, Info.plist in Config/.
+
+    Signing stays off in the project; archive/export pass signing settings on the
+    xcodebuild command line (:mod:`iosforge.mvp.ios_delivery`).
+    """
+    extras = integrations or integ.Integrations()
     lines = [
         f"name: {target}",
         "options:",
         "  deploymentTarget:",
         f'    iOS: "{DEPLOYMENT_TARGET}"',
+        *integ.project_packages(extras),
         "targets:",
         f"  {target}:",
         "    type: application",
@@ -279,6 +303,9 @@ def render_project_yml(
         lines += ["      - path: Resources/Fonts", '        includes: ["*.ttf", "*.otf"]']
     if has_media:
         lines += ["      - path: Resources/Media", "        type: folder"]
+    if has_icon:
+        lines.append("      - path: Resources/Assets.xcassets")
+    lines += integ.target_dependencies(extras)
     lines += [
         "    settings:",
         "      base:",
@@ -289,6 +316,7 @@ def render_project_yml(
         '        SWIFT_VERSION: "5.0"',
         "        CODE_SIGNING_ALLOWED: NO",
         '        TARGETED_DEVICE_FAMILY: "1"',
+        *(["        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon"] if has_icon else []),
         "    info:",
         "      path: Config/Info.plist",
         "      properties:",
@@ -304,6 +332,11 @@ def render_project_yml(
         lines += [f"          - {_yaml_str(font)}" for font in fonts]
     for key, text in sorted(purpose_strings.items()):
         lines.append(f"        {key}: {_yaml_str(text)}")
+    lines += [
+        line
+        for line in integ.info_properties(extras)
+        if line.split(":")[0].strip() not in purpose_strings
+    ]
     return "\n".join(lines) + "\n"
 
 
@@ -319,6 +352,8 @@ def render_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) 
     plan = build_plan(spec)
     target = target_name(identity.app_name)
     media = app_dir / "Resources" / "Media"
+    integrations = integ.load(app_dir)
+    has_icon = (app_dir / ICON_SET / ICON_FILE).is_file()
     files = {
         "project.yml": render_project_yml(
             target=target,
@@ -327,7 +362,11 @@ def render_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) 
             fonts=_bundled_fonts(app_dir),
             purpose_strings=_purpose_strings(spec, identity.app_name),
             has_media=media.is_dir() and any(media.iterdir()),
+            has_icon=has_icon,
+            integrations=integrations,
         ),
+        "App/Monetization/Subscriptions.swift": integ.render_subscriptions(integrations),
+        "App/Monetization/Attribution.swift": integ.render_attribution(integrations),
         "App/App.swift": tpl.render_app(target),
         "App/Navigation/ScreenID.swift": tpl.render_screen_id(plan.entries, plan.tabs),
         "App/Navigation/AppTab.swift": tpl.render_app_tab(plan.tabs, shows_bar=plan.shows_tab_bar),
@@ -337,9 +376,15 @@ def render_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) 
         f"{PERMISSIONS_DIR}/Permissions.swift": tpl.render_permissions(),
         "App/Support/MediaAsset.swift": tpl.MEDIA,
     }
-    for kind in declared_kinds(spec):
-        if kind.case in PROMPTERS:
-            name, text = render_prompter(kind.case)
+    if has_icon:
+        files["Resources/Assets.xcassets/Contents.json"] = _CATALOG_CONTENTS
+        files[f"{ICON_SET}/Contents.json"] = _ICON_CONTENTS
+    kinds = [k.case for k in declared_kinds(spec)]
+    if integrations.attribution and "tracking" not in kinds:
+        kinds.append("tracking")
+    for case in kinds:
+        if case in PROMPTERS:
+            name, text = render_prompter(case)
             files[f"{PERMISSIONS_DIR}/{name}"] = text
     return files
 
@@ -401,8 +446,14 @@ def write_scaffold(
     bundle_id: str,
     fonts_dir: Path | None = None,
     media_dir: Path | None = None,
+    integrations: integ.Integrations | None = None,
+    icon_png: Path | None = None,
 ) -> list[ScreenEntry]:
     """Render the full Xcode project skeleton into ``app_dir``; return its screens.
+
+    ``integrations`` (Apphud / Tenjin / encryption / SKAdNetwork inputs) are frozen into
+    ``Config/integrations.json``; ``icon_png`` becomes the AppIcon, else a placeholder icon
+    is drawn once from the palette so the app can always be archived.
 
     Contract files (:func:`render_contract`) are always rewritten; model-owned
     extension points (theme, tab bar, fixtures, screen views) are only created when
@@ -417,6 +468,14 @@ def write_scaffold(
                 shutil.copy2(font, dst / font.name)
     if media_dir is not None and media_dir.is_dir() and any(media_dir.iterdir()):
         shutil.copytree(media_dir, app_dir / "Resources" / "Media", dirs_exist_ok=True)
+    if integrations is not None:
+        integ.write(app_dir, integrations)
+    icon = app_dir / ICON_SET / ICON_FILE
+    if icon_png is not None and icon_png.is_file():
+        icon.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(icon_png, icon)
+    elif not icon.exists():
+        swiftui_media.placeholder_icon(spec, icon)
 
     enforce_contract(app_dir, spec, AppIdentity(app_name, bundle_id))
     extension_points = {

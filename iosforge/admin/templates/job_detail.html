@@ -259,6 +259,42 @@
 
     {% if can_ios_build %}
     <section class="tab-panel panel-ios" role="tabpanel" aria-label="iOS build">
+      {% if can_xcode_delivery %}
+      <div class="card">
+        <h3>iOS build <span class="muted" style="font-weight:400;">— native (Xcode)</span></h3>
+        {% set xrunning = xcode_build and xcode_build.status in ['queued', 'archiving'] %}
+        <form method="post" action="/jobs/{{ job.id }}/xcode-delivery">
+          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+          <div class="form-actions" style="margin-top:0;margin-bottom:12px;">
+            <button class="btn" type="submit" {{ 'disabled' if xrunning else '' }}>Archive &amp; export IPA</button>
+            {% if xrunning %}<span class="hint">A build is in progress…</span>{% endif %}
+          </div>
+        </form>
+        {% if xcode_build %}
+        <div class="table-wrap" style="margin-bottom:12px;">
+          <table class="kv">
+            <tr><th>Status</th><td>{{ build_pill(xcode_build.status) }}</td></tr>
+            <tr><th>Signed</th><td>{{ 'yes' if xcode_build.signed else 'no (unsigned IPA)' }}</td></tr>
+            <tr><th>Version</th><td class="mono">{{ xcode_build.version or '—' }} ({{ xcode_build.build_number or '—' }})</td></tr>
+            <tr><th>Duration</th><td class="mono">{{ (xcode_build.duration_ms // 1000 ~ ' s') if xcode_build.duration_ms else '—' }}</td></tr>
+          </table>
+        </div>
+        {% if xcode_build.status == 'failed' and xcode_build.message %}
+        <div class="alert alert--danger">Reason: {{ xcode_build.message }}</div>
+        {% endif %}
+        {% if xcode_build.status == 'ready_for_upload' %}
+        <p class="hint">Signed IPA ready. Uploading to App Store Connect is disabled (ios_delivery_upload).</p>
+        {% endif %}
+        <div class="form-actions">
+          {% if xcode_build.ipa_key %}<a class="btn btn--ghost" href="/jobs/{{ job.id }}/xcode-delivery/ipa">Download IPA</a>{% endif %}
+          <a class="btn btn--ghost" href="/jobs/{{ job.id }}/xcode-delivery/logs" target="_blank">View logs</a>
+        </div>
+        {% else %}
+        <p class="hint">No native build yet — press "Archive &amp; export IPA".</p>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% if (can_codemagic_build if can_codemagic_build is defined else can_ios_build) %}
       <div class="card">
         <h3>iOS build <span class="muted" style="font-weight:400;">— CodeMagic</span></h3>
         {% set running = build and build.status not in ['finished', 'failed', 'canceled', 'cancelled', 'timeout', 'skipped'] %}
@@ -301,6 +337,7 @@
         <p class="hint">No build yet — press "Run iOS build".</p>
         {% endif %}
       </div>
+      {% endif %}
     </section>
     {% endif %}
 

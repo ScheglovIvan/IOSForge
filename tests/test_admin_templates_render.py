@@ -187,3 +187,24 @@ def test_icon_gallery_is_hidden_when_there_is_only_the_current_one() -> None:
         "{{ 'shown' if e else 'hidden' }}"
     )
     assert tpl.render(icon_versions=[{"version_id": "v1", "is_latest": True}]) == "hidden"
+
+
+def test_job_detail_native_build_card() -> None:
+    job = NS(
+        id="job-3", state=NS(value="done"), source_app_metadata={}, candidate=None,
+        created_at=_NOW, updated_at=_NOW, error=None,
+    )  # fmt: skip
+    xbuild = NS(
+        status="ready_for_upload", signed=True, version="1.0", build_number="2610091200",
+        duration_ms=61000, message=None, ipa_key="jobs/job-3/ipa/Demo.ipa",
+    )  # fmt: skip
+    html = _render(
+        "job_detail.html", user=_USER, job=job, gen=None, build=None, can_ios_build=True,
+        can_codemagic_build=False, can_xcode_delivery=True, xcode_build=xbuild,
+        signing={"configured": False}, signed_ok=False, sign_error="", timeline=[],
+        codegen_tasks=[],
+    )  # fmt: skip
+    assert 'action="/jobs/job-3/xcode-delivery"' in html
+    assert "/jobs/job-3/xcode-delivery/ipa" in html and "2610091200" in html
+    assert "Uploading to App Store Connect is disabled" in html
+    assert 'action="/jobs/job-3/codemagic-build"' not in html

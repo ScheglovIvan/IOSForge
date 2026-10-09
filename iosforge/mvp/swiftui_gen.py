@@ -28,6 +28,7 @@ from typing import Any
 from iosforge.common.config import Settings
 from iosforge.common.logging import get_logger
 from iosforge.mvp import claude_gen, frida_ingest, simulator, swiftui_media, xcode
+from iosforge.mvp import swiftui_integrations as integ
 from iosforge.mvp.analyze import stage_archive_context, topo_layers
 from iosforge.mvp.feasibility import apply_scope
 from iosforge.mvp.paths import RunPaths
@@ -130,9 +131,15 @@ def _derived_data(paths: RunPaths) -> Path:
     return paths.run_dir / "DerivedData"
 
 
-def prompter_names(spec: dict[str, Any]) -> list[str]:
-    """Type names of the prompters the scaffold generates for ``spec``."""
-    return [PROMPTERS[k.case].type_name for k in declared_kinds(spec) if k.case in PROMPTERS]
+def prompter_names(spec: dict[str, Any], app_dir: Path | None = None) -> list[str]:
+    """Type names of the prompters the scaffold generates for ``spec`` (and ``app_dir``).
+
+    Attribution adds the ATT prompter even when the spec does not declare tracking.
+    """
+    cases = [k.case for k in declared_kinds(spec)]
+    if app_dir is not None and integ.load(app_dir).attribution and "tracking" not in cases:
+        cases.append("tracking")
+    return [PROMPTERS[case].type_name for case in cases if case in PROMPTERS]
 
 
 def prepare_workspace(paths: RunPaths, *, app_name: str, bundle_id: str) -> NavPlan:
@@ -208,7 +215,7 @@ def compile_errors(
     ]
     errors += _tab_bar_errors(app_dir)
     errors += _navigation_errors(app_dir)
-    errors += permission_violations(app_dir, declared=set(prompter_names(spec)))
+    errors += permission_violations(app_dir, declared=set(prompter_names(spec, app_dir)))
     errors += ad_violations(app_dir)
     if not xcode.toolchain_available():
         log.warning("swiftui_gen.toolchain_missing", app_dir=str(app_dir))
@@ -412,7 +419,7 @@ def generate(
             _workspace_app(paths), paths.claude_ws, model_spec, settings=settings
         ):
             images.setdefault(image.screen_id, []).append((image.file, image.description))
-    prompters = prompter_names(spec)
+    prompters = prompter_names(spec, _workspace_app(paths))
     by_task = {f"screen-{e.screen_id}": e for e in plan.entries}
     runs: list[TaskRun] = []
 
@@ -572,7 +579,7 @@ def correct(
     spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
     plan = build_plan(spec)
     by_id = {e.screen_id: e for e in plan.entries}
-    prompters = prompter_names(spec)
+    prompters = prompter_names(spec, paths.xcode_app)
     groups: dict[str, list[dict[str, Any]]] = {}
     for task in tasks:
         sid = _task_screen(task)

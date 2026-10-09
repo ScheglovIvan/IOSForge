@@ -145,6 +145,10 @@ def job_detail(
     gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
     can_ios_build = bool(gen and gen.codemagic and gen.codemagic.get("application_id"))
     scope_status = (job.source_app_metadata or {}).get("scope_status")
+    from iosforge.worker.swiftui_tasks import latest_xcode_build, sources_key
+
+    xcode_build = latest_xcode_build(db, job_id)
+    can_xcode_delivery = xcode_build is not None or storage.exists(sources_key(str(job_id)))
     return templates.TemplateResponse(
         request,
         "job_detail.html",
@@ -155,7 +159,10 @@ def job_detail(
             "codegen_tasks": _codegen_tasks(db, job_id),
             "gen": gen,
             "build": _latest_build(db, job_id),
-            "can_ios_build": can_ios_build,
+            "can_ios_build": can_ios_build or can_xcode_delivery,
+            "can_codemagic_build": can_ios_build,
+            "can_xcode_delivery": can_xcode_delivery,
+            "xcode_build": xcode_build,
             "store_slides": _store_slides(job_id),
             "ipad_slides": _ipad_slides(job_id),
             "icon_versions": _icon_versions(job_id),
@@ -885,6 +892,59 @@ async def jobs_scope_approve(
         scope_mode=scope.scope_mode,
     )
     return RedirectResponse(f"/jobs/{job_id}#t-scope", status_code=HTTP_303_SEE_OTHER)
+
+
+@router.post("/jobs/{job_id}/xcode-delivery")
+def jobs_xcode_delivery(
+    request: Request,
+    job_id: uuid.UUID,
+    csrf_token: str = Form(...),
+    user: SessionData = Depends(require_user),
+) -> Response:
+    if not csrf.verify(user.csrf_token, csrf_token):
+        return Response("Invalid request (CSRF).", status_code=400)
+    try:
+        from iosforge.worker.swiftui_tasks import run_xcode_delivery
+
+        run_xcode_delivery.apply_async(args=[str(job_id)], queue="delivery")
+        log.info("jobs.xcode_delivery_requested", job_id=str(job_id))
+    except Exception as exc:
+        log.error("jobs.xcode_delivery_enqueue_failed", job_id=str(job_id), error=str(exc))
+    return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
+
+
+@router.get("/jobs/{job_id}/xcode-delivery/logs")
+def jobs_xcode_delivery_logs(
+    job_id: uuid.UUID,
+    user: SessionData = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    from iosforge.worker.swiftui_tasks import latest_xcode_build
+
+    build = latest_xcode_build(db, job_id)
+    if build is None:
+        return Response("No build", status_code=404)
+    return PlainTextResponse(build.log_text or build.message or "(no logs yet)")
+
+
+@router.get("/jobs/{job_id}/xcode-delivery/ipa")
+def jobs_xcode_delivery_ipa(
+    job_id: uuid.UUID,
+    user: SessionData = Depends(require_user),
+    db: Session = Depends(get_db),
+    storage: ArtifactStorage = Depends(get_storage),
+) -> Response:
+    from iosforge.worker.swiftui_tasks import latest_xcode_build
+
+    build = latest_xcode_build(db, job_id)
+    if build is None or not build.ipa_key:
+        return Response("No IPA", status_code=404)
+    name = build.ipa_key.rsplit("/", 1)[-1]
+    return Response(
+        storage.get(build.ipa_key),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
 
 
 @router.get("/jobs/{job_id}/codemagic-build/logs")

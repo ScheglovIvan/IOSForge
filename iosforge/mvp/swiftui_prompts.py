@@ -50,6 +50,11 @@ HARD RULES
   `@Environment(\\.requestReview)`.
 - Real behaviour (tone playback, level metering, ...) uses Apple frameworks and starts from user
   actions; in headless mode screens show their fixture state instead.
+- Subscriptions only through the scaffold API (`App/Monetization/Subscriptions.swift`):
+  `await Subscriptions.products()` (`SubscriptionProduct`: id, title, price, period), buy with
+  `await Subscriptions.purchase(product.id)`, restore with `await Subscriptions.restore()`, call
+  `Subscriptions.paywallShown()` in `.onAppear` of a paywall and gate premium features with
+  `Subscriptions.hasPremium`. Never import StoreKit, ApphudSDK or TenjinSDK in screens.
 - Bundled fonts: `Font.custom("<postscript_name>", size:)` with names from `fonts.json`
   (files with `is_system: false`); system fonts otherwise. Bundled media:
   `MediaAsset.image("<file>")` / `MediaAsset.url("<file>")` where `<file>` is the file name of

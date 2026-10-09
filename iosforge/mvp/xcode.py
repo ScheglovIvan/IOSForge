@@ -120,6 +120,108 @@ def build(
     return BuildOutcome(ok=res.returncode == 0, errors=errors, log=output)
 
 
+@dataclass(frozen=True)
+class AuthKey:
+    """App Store Connect API key used by xcodebuild for automatic signing."""
+
+    key_path: Path
+    key_id: str
+    issuer_id: str
+
+    def args(self) -> list[str]:
+        return [
+            "-allowProvisioningUpdates",
+            "-authenticationKeyPath",
+            str(self.key_path),
+            "-authenticationKeyID",
+            self.key_id,
+            "-authenticationKeyIssuerID",
+            self.issuer_id,
+        ]
+
+
+def _outcome(cmd: list[str], *, cwd: Path, timeout: int, app_dir: Path) -> BuildOutcome:
+    try:
+        res = _run(cmd, cwd=cwd, timeout=timeout)
+    except XcodeError as exc:
+        return BuildOutcome(ok=False, errors=[str(exc)], log="")
+    output = f"{res.stdout}\n{res.stderr}"
+    errors = parse_errors(output, app_dir)
+    if res.returncode != 0 and not errors:
+        errors = [f"{cmd[0]} {cmd[1]} exited {res.returncode}: {output.strip()[-1500:]}"]
+    return BuildOutcome(ok=res.returncode == 0, errors=errors, log=output)
+
+
+def archive(
+    app_dir: Path,
+    scheme: str,
+    archive_path: Path,
+    *,
+    build_settings: dict[str, str],
+    auth: AuthKey | None = None,
+    timeout: int = 3600,
+) -> BuildOutcome:
+    """``xcodebuild archive`` for a generic iOS device with command-line build settings."""
+    project = next(app_dir.glob("*.xcodeproj"), None)
+    if project is None:
+        raise XcodeError(f"no .xcodeproj in {app_dir} (run generate_project first)")
+    cmd = [
+        XCODEBUILD_BIN,
+        "archive",
+        "-project",
+        project.name,
+        "-scheme",
+        scheme,
+        "-destination",
+        "generic/platform=iOS",
+        "-archivePath",
+        str(archive_path),
+        *(auth.args() if auth else []),
+        *(f"{key}={value}" for key, value in sorted(build_settings.items())),
+    ]
+    return _outcome(cmd, cwd=app_dir, timeout=timeout, app_dir=app_dir)
+
+
+def export_archive(
+    archive_path: Path,
+    export_dir: Path,
+    options_plist: Path,
+    *,
+    auth: AuthKey | None = None,
+    timeout: int = 1800,
+) -> BuildOutcome:
+    """``xcodebuild -exportArchive`` into ``export_dir`` (signed IPA per ExportOptions)."""
+    cmd = [
+        XCODEBUILD_BIN,
+        "-exportArchive",
+        "-archivePath",
+        str(archive_path),
+        "-exportPath",
+        str(export_dir),
+        "-exportOptionsPlist",
+        str(options_plist),
+        *(auth.args() if auth else []),
+    ]
+    return _outcome(cmd, cwd=archive_path.parent, timeout=timeout, app_dir=archive_path.parent)
+
+
+def upload_command(ipa: Path, auth: AuthKey) -> list[str]:
+    """``altool`` upload of a signed IPA to App Store Connect (built, not executed here)."""
+    return [
+        XCRUN_BIN,
+        "altool",
+        "--upload-app",
+        "--type",
+        "ios",
+        "--file",
+        str(ipa),
+        "--apiKey",
+        auth.key_id,
+        "--apiIssuer",
+        auth.issuer_id,
+    ]
+
+
 def built_app(derived_data: Path, scheme: str) -> Path:
     """Path of the simulator ``.app`` produced by :func:`build`."""
     return derived_data / "Build" / "Products" / "Debug-iphonesimulator" / f"{scheme}.app"

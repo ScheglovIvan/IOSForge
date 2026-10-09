@@ -115,6 +115,9 @@ class Job(Base):
     codemagic_builds: Mapped[list[CodemagicBuild]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
+    xcode_builds: Mapped[list[XcodeBuild]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
     timeline: Mapped[list[StageTimeline]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
@@ -317,6 +320,33 @@ class CodemagicBuild(Base):
     updated_at: Mapped[dt.datetime] = _ts_col(onupdate=True)
 
     job: Mapped[Job] = relationship(back_populates="codemagic_builds")
+
+
+class XcodeBuild(Base):
+    """One native SwiftUI delivery of a job: archive → IPA (→ gated upload) on a Mac worker."""
+
+    __tablename__ = "xcode_builds"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    signed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    build_number: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    ipa_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    upload_command: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    log_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    created_at: Mapped[dt.datetime] = _ts_col()
+    updated_at: Mapped[dt.datetime] = _ts_col(onupdate=True)
+
+    job: Mapped[Job] = relationship(back_populates="xcode_builds")
 
 
 class CodegenTask(Base):

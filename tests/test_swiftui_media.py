@@ -100,3 +100,21 @@ def test_screen_prompt_lists_replacement_images() -> None:
     )  # fmt: skip
     assert '`MediaAsset.image("generated/0006_header_photo.png")` — hand wiping' in text
     assert "Replacement images" not in screen_prompt(entry, plan, targets=[], prompters=[])
+
+
+def test_only_replicate_images_are_reused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(swiftui_media.image_slides, "is_configured", lambda s: True)
+    monkeypatch.setattr(swiftui_media.image_slides, "load_token", lambda s: "tok")
+    monkeypatch.setattr(swiftui_media.image_slides, "to_png", lambda data: data)
+    monkeypatch.setattr(
+        swiftui_media.image_slides, "generate_image", lambda p, u, **k: calls.append(p) or b"png"
+    )
+    target = tmp_path / "app/Resources/Media/generated"
+    target.mkdir(parents=True)
+    (target / "0006_header_photo.png").write_bytes(b"old placeholder")
+    settings = Settings(codegen_generate_images=True)
+    first = swiftui_media.generate_images(tmp_path / "app", tmp_path, SPEC, settings=settings)
+    assert [i.source for i in first] == ["replicate", "replicate"] and len(calls) == 2
+    second = swiftui_media.generate_images(tmp_path / "app", tmp_path, SPEC, settings=settings)
+    assert [i.source for i in second] == ["cached", "cached"] and len(calls) == 2

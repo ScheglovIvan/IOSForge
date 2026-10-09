@@ -237,6 +237,15 @@ class Settings(BaseSettings):
     # SwiftUI codegen: generate divergent replacement images for decorative photos the
     # capture could not provide (Replicate, costs money). Off = local placeholders.
     codegen_generate_images: bool = Field(default=False)
+    # Which stack build_frontend generates: the legacy Flutter path or native SwiftUI
+    # (Mac worker: Xcode + iOS Simulator). Switched to swiftui at the end of the pivot.
+    codegen_target: str = Field(default="flutter", pattern="^(flutter|swiftui)$")
+    # Native delivery (SwiftUI): Apple Developer team for automatic signing; empty means
+    # an unsigned archive + unsigned IPA only. Uploading to App Store Connect is an
+    # external action and stays off unless explicitly enabled.
+    xcode_team_id: str = Field(default="")
+    xcode_archive_timeout_s: int = Field(default=3600, gt=0)
+    ios_delivery_upload: bool = Field(default=False)
     # ATT prompt copy (Info.plist NSUserTrackingUsageDescription). Without ATT consent
     # attribution degrades to SKAN campaign-level aggregates (no keyword/creative).
     att_usage_description: str = Field(

@@ -463,6 +463,10 @@ struct {target}App: App {{
             RootView()
                 .environment(router)
                 .onOpenURL {{ router.handle($0) }}
+                .task {{
+                    Subscriptions.start()
+                    await Attribution.start()
+                }}
         }}
     }}
 }}
