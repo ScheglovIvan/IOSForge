@@ -25,6 +25,7 @@ from iosforge.mvp.swiftui_functional import FunctionalCheck
 
 MONETIZATION_DIR = "App/Monetization"
 CAPABILITIES_DIR = "App/Capabilities"
+EXTENSIONS_DIR = "BroadcastExtension"
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,8 @@ class CapabilityDescriptor:
     prompters: Callable[[CapabilityContext], tuple[str, ...]] = lambda ctx: ()
     rule_applies: Callable[[CapabilityContext], bool] = lambda ctx: True
     functional_check: Callable[[CapabilityContext], FunctionalCheck | None] = lambda ctx: None
+    extra_targets: Callable[[CapabilityContext, str, str], list[str]] = lambda ctx, t, b: []
+    embedded_targets: tuple[str, ...] = ()
 
 
 def _subscriptions_packages(ctx: CapabilityContext) -> tuple[SwiftPackage, ...]:
@@ -196,7 +199,17 @@ def target_dependencies(selected: list[Selected]) -> list[str]:
     lines: list[str] = []
     for package in packages(selected):
         lines += [f"      - package: {package.name}", f"        product: {package.product_name}"]
+    for item in selected:
+        lines += [f"      - target: {name}" for name in item.descriptor.embedded_targets]
     return ["    dependencies:", *lines] if lines else []
+
+
+def extra_targets(selected: list[Selected], target: str, bundle_id: str) -> list[str]:
+    """XcodeGen lines of the additional targets modules need (e.g. an app extension)."""
+    lines: list[str] = []
+    for item in selected:
+        lines += item.descriptor.extra_targets(item.context, target, bundle_id)
+    return lines
 
 
 def info_properties(selected: list[Selected], integrations: integ.Integrations) -> list[str]:
@@ -263,7 +276,7 @@ def capability_screen(ctx: CapabilityContext) -> str:
 
 def directories() -> tuple[str, ...]:
     """Every scaffold directory a module may own (all contract directories)."""
-    return tuple(dict.fromkeys([MONETIZATION_DIR, CAPABILITIES_DIR]))
+    return tuple(dict.fromkeys([MONETIZATION_DIR, CAPABILITIES_DIR, EXTENSIONS_DIR]))
 
 
 _LOAD_LOCK = threading.Lock()
@@ -277,9 +290,15 @@ def load_modules() -> None:
     with _LOAD_LOCK:
         if _LOADED:
             return
-        from iosforge.mvp import swiftui_cleaners, swiftui_content, swiftui_remote_api
+        from iosforge.mvp import (
+            swiftui_casting,
+            swiftui_cleaners,
+            swiftui_content,
+            swiftui_remote_api,
+        )
 
         swiftui_remote_api.register()
         swiftui_cleaners.register()
         swiftui_content.register()
+        swiftui_casting.register()
         _LOADED.append(True)

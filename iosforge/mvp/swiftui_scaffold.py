@@ -65,7 +65,14 @@ _ICON_CONTENTS = (
     '  "info" : {\n    "author" : "xcode",\n    "version" : 1\n  }\n}\n'
 )
 MODEL_DIRS = ("App/Theme", "App/Components", "App/Features", "App/Fixtures")
-APP_ROOT_ENTRIES = {"project.yml", "App", "Resources", "Config", functional.UI_TESTS_DIR}
+APP_ROOT_ENTRIES = {
+    "project.yml",
+    "App",
+    "Resources",
+    "Config",
+    functional.UI_TESTS_DIR,
+    caps.EXTENSIONS_DIR,
+}
 
 _FULL_SCREEN = re.compile(r"\b(paywall|subscription|upgrade)\b", re.I)
 _MODAL = re.compile(r"\b(sheet|modal|popup|pop-up|dialog|alert|picker)\b", re.I)
@@ -347,6 +354,7 @@ def render_project_yml(
         for line in caps.info_properties(modules, extras)
         if line.split(":")[0].strip() not in purpose_strings
     ]
+    lines += caps.extra_targets(modules, target, bundle_id)
     if functional_tests:
         lines += functional.project_target(target, bundle_id)
     return "\n".join(lines) + "\n"

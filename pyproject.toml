@@ -62,6 +62,7 @@ select = ["E", "F", "I", "UP", "B"]
 "iosforge/mvp/swiftui_remote_api.py" = ["E501"]
 "iosforge/mvp/swiftui_cleaners.py" = ["E501"]
 "iosforge/mvp/swiftui_content.py" = ["E501"]
+"iosforge/mvp/swiftui_casting.py" = ["E501"]
 
 # FastAPI's dependency-injection idiom puts Depends()/Form()/File() in defaults;
 # these are the documented pattern, not the B008 mutable-default footgun.

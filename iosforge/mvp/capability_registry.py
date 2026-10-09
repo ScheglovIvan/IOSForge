@@ -57,6 +57,13 @@ MODULES: dict[str, ModuleInfo] = {
             "bundled seed, premium items gated by the subscription",
         ),
         ModuleInfo(
+            "casting",
+            ("casting", "screen_mirroring"),
+            "TVs on the local network: Bonjour discovery (Google Cast / AirPlay services), a "
+            "connection and a stream start; AirPlay route picker; screen mirroring through a "
+            "ReplayKit broadcast extension",
+        ),
+        ModuleInfo(
             "attribution_tenjin",
             ("other",),
             "install attribution through Tenjin after the App Tracking Transparency prompt",
