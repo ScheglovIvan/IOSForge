@@ -117,7 +117,10 @@ def _wire(
 def test_clean_build_stores_the_result_and_queues_delivery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    report = {"compliance_score": 0.85, "stop_reason": "all_closed", "status": "pass"}
+    report = {
+        "compliance_score": 0.85, "stop_reason": "all_closed", "status": "pass",
+        "structural": {"ok": True},
+    }  # fmt: skip
     job, session, seen = _wire(monkeypatch, report)
 
     assert swiftui_build.build_swiftui.run(str(job.id)) == f"job {job.id} built"
@@ -135,7 +138,10 @@ def test_clean_build_stores_the_result_and_queues_delivery(
 
 
 def test_structural_gaps_park_the_job_without_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
-    report = {"compliance_score": 0.7, "stop_reason": "max_iterations", "status": "fail"}
+    report = {
+        "compliance_score": 0.7, "stop_reason": "max_iterations", "status": "fail",
+        "structural": {"ok": False, "missing_screens": [{"id": "session"}]},
+    }  # fmt: skip
     job, session, seen = _wire(monkeypatch, report)
     assert "hold delivery" in swiftui_build.build_swiftui.run(str(job.id))
     assert job.state == JobState.NEEDS_INPUT and seen["queued"] == []
@@ -189,7 +195,7 @@ def test_build_refuses_without_analysis(
 
 
 def test_failed_job_can_be_built_again(monkeypatch: pytest.MonkeyPatch) -> None:
-    report = {"compliance_score": 0.85, "stop_reason": "all_closed"}
+    report = {"compliance_score": 0.85, "stop_reason": "all_closed", "structural": {"ok": True}}
     job, _, seen = _wire(monkeypatch, report)
     job.state = JobState.FAILED
     assert swiftui_build.build_swiftui.run(str(job.id)) == f"job {job.id} built"
@@ -252,7 +258,7 @@ def test_build_task_is_on_the_mac_queue() -> None:
 def test_redelivered_build_closes_the_dead_run_and_builds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    report = {"compliance_score": 0.85, "stop_reason": "all_closed"}
+    report = {"compliance_score": 0.85, "stop_reason": "all_closed", "structural": {"ok": True}}
     job, session, seen = _wire(monkeypatch, report)
     dead = StageTimeline(job_id=job.id, stage=swiftui_build.Stage.CODEGEN)
     session.running = dead
@@ -312,3 +318,20 @@ def test_build_settings_redelivers_a_generated_swiftui_app(monkeypatch: pytest.M
     assert _save_settings(session, monkeypatch) == ["delivery"]
     job.state = JobState.CODEGEN
     assert _save_settings(session, monkeypatch) == []
+
+
+def test_visual_cap_without_structural_gaps_ships(monkeypatch: pytest.MonkeyPatch) -> None:
+    report = {
+        "compliance_score": 0.87, "stop_reason": "max_iterations", "status": "pass",
+        "structural": {"ok": True, "missing_screens": [], "blank_screens": []},
+    }  # fmt: skip
+    job, session, seen = _wire(monkeypatch, report)
+    assert swiftui_build.build_swiftui.run(str(job.id)) == f"job {job.id} built"
+    stage = next(o for o in session.added if isinstance(o, StageTimeline))
+    assert job.state == JobState.DONE and seen["queued"] == [job] and stage.error is None
+
+
+def test_report_without_a_structural_audit_is_held(monkeypatch: pytest.MonkeyPatch) -> None:
+    job, _, seen = _wire(monkeypatch, {"compliance_score": 0.9, "stop_reason": "all_closed"})
+    assert "hold delivery" in swiftui_build.build_swiftui.run(str(job.id))
+    assert job.state == JobState.NEEDS_INPUT and seen["queued"] == []

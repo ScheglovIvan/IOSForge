@@ -96,6 +96,11 @@ def _close_stale_stages(db: Session, job: Job) -> None:
         row.error = "interrupted: the build was restarted"
 
 
+def _structurally_complete(report: dict[str, Any]) -> bool:
+    """The structural audit of the last refine pass found no gaps (visual scores aside)."""
+    return bool((report.get("structural") or {}).get("ok"))
+
+
 def _gate_reason(report: dict[str, Any]) -> str:
     structural = report.get("structural") or {}
     counts = ", ".join(
@@ -176,7 +181,7 @@ def build_swiftui(self: Any, job_id: str) -> str:
                 version = job.result_version or 1
                 key = store_sources(storage, job_id, paths.xcode_app, version=version)
                 save_built_scope(storage, job_id, scope)
-            gated = settings.web_verify_hard_gate and report.get("stop_reason") != "all_closed"
+            gated = settings.web_verify_hard_gate and not _structurally_complete(report)
             db.add(
                 GenerationResult(
                     job_id=job.id,
