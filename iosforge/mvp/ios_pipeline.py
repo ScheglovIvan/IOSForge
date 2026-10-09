@@ -28,7 +28,11 @@ def _generate(args: argparse.Namespace) -> RunPaths:
     spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
     app_name = args.app_name or str(spec.get("app_name") or "Generated App")
     result = swiftui_gen.generate(
-        paths, app_name=app_name, bundle_id=args.bundle_id, max_parallel=args.max_parallel
+        paths,
+        app_name=app_name,
+        bundle_id=args.bundle_id,
+        max_parallel=args.max_parallel,
+        settings=get_settings(),
     )
     (paths.run_dir / "report.json").write_text(
         json.dumps(swiftui_gen.report(result), indent=2, ensure_ascii=False), encoding="utf-8"

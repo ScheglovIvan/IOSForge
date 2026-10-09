@@ -25,8 +25,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from iosforge.common.config import Settings
 from iosforge.common.logging import get_logger
-from iosforge.mvp import claude_gen, frida_ingest, xcode
+from iosforge.mvp import claude_gen, frida_ingest, swiftui_media, xcode
 from iosforge.mvp.analyze import stage_archive_context, topo_layers
 from iosforge.mvp.feasibility import apply_scope
 from iosforge.mvp.paths import RunPaths
@@ -394,11 +395,22 @@ def generate(
     fix_attempts: int = 3,
     max_parallel: int = 4,
     diverge_content: bool = True,
+    settings: Settings | None = None,
 ) -> SwiftUIResult:
-    """Generate the SwiftUI app for ``paths.app_spec_json`` into ``paths.xcode_app``."""
+    """Generate the SwiftUI app for ``paths.app_spec_json`` into ``paths.xcode_app``.
+
+    With ``settings`` the decorative image slots get replacement images first
+    (:func:`iosforge.mvp.swiftui_media.generate_images`).
+    """
     bound = log.bind(stage="codegen", target="swiftui", run_dir=str(paths.run_dir))
     plan = prepare_workspace(paths, app_name=app_name, bundle_id=bundle_id)
     spec = json.loads(paths.app_spec_json.read_text())
+    images: dict[str, list[tuple[str, str]]] = {}
+    if settings is not None:
+        for image in swiftui_media.generate_images(
+            _workspace_app(paths), paths.claude_ws, spec, settings=settings
+        ):
+            images.setdefault(image.screen_id, []).append((image.file, image.description))
     prompters = prompter_names(spec)
     by_task = {f"screen-{e.screen_id}": e for e in plan.entries}
     runs: list[TaskRun] = []
@@ -441,6 +453,7 @@ def generate(
                             prompters=prompters,
                             observed=_observed(paths, by_task[tid]),
                             diverge_content=diverge_content,
+                            images=images.get(by_task[tid].screen_id),
                         ),
                         _screen_owner(by_task[tid]),
                         timeout=task_timeout,

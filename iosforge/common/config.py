@@ -234,6 +234,9 @@ class Settings(BaseSettings):
     # exact App Store canvas is reached afterwards by growing the background.
     replicate_resolution: str = Field(default="4K")
     replicate_timeout_s: int = Field(default=600, gt=0)
+    # SwiftUI codegen: generate divergent replacement images for decorative photos the
+    # capture could not provide (Replicate, costs money). Off = local placeholders.
+    codegen_generate_images: bool = Field(default=False)
     # ATT prompt copy (Info.plist NSUserTrackingUsageDescription). Without ATT consent
     # attribution degrades to SKAN campaign-level aggregates (no keyword/creative).
     att_usage_description: str = Field(

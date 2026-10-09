@@ -166,6 +166,7 @@ def screen_prompt(
     prompters: list[str],
     observed: bool = True,
     diverge_content: bool = True,
+    images: list[tuple[str, str]] | None = None,
 ) -> str:
     """Screen task: one ``app_spec`` screen → its view, fixtures and sub-views.
 
@@ -180,6 +181,13 @@ def screen_prompt(
             "navigate elsewhere render normally but their action is a no-op."
         )
     tabs = {t.root.screen_id: t for t in plan.tabs}
+    image_block = ""
+    if images:
+        listed = "\n".join(f'  - `MediaAsset.image("{file}")` — {desc}' for file, desc in images)
+        image_block = (
+            "- Replacement images made for this clone (use them where the original shows these "
+            f"photos/illustrations; never recreate the original's pictures):\n{listed}\n"
+        )
     if observed:
         reference = f"""- `screens/{entry.screen_id}.png` — screenshot of the original screen.
   Match its layout, hierarchy, proportions, colours and typography closely (ignore its tab bar:
@@ -203,7 +211,7 @@ INPUTS (ground truth, read them all):
 - `{COMPONENTS_MD}` and `{APP_DIR}/App/Components/` — build the screen from these components;
   add only screen-specific sub-views.
 - The theme in `{APP_DIR}/App/Theme/` — use its colours, fonts and styles.
-
+{image_block}
 OUTPUT (write ONLY these paths; anything else is discarded):
 - Replace `{APP_DIR}/{entry.view_path}` with the real screen. Keep `struct {entry.type_name}: View`
   with no initialiser parameters. Sub-views, view models and `*{SERVICE_SUFFIX}` files go under
