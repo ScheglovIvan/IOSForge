@@ -2,11 +2,13 @@
 
 Contract code under ``App/Capabilities`` built on Apple frameworks only:
 
-* ``photos_cleaner`` — ``PhotosCleaner``: fingerprints every library photo (difference
-  hash of a 9x8 grey thumbnail), groups identical fingerprints and deletes the extra
-  copies through PhotoKit (the system asks the user to confirm).
-* ``contacts_cleaner`` — ``ContactsCleaner``: groups contacts by normalised full name (or
-  phone number) and deletes the extra copies.
+* ``photos_cleaner`` — ``PhotosCleaner``: buckets library photos by pixel size and a
+  difference hash of a 9x8 grey thumbnail (flat images skipped), confirms each bucket by
+  a SHA-256 of the image data, and deletes the exact copies through PhotoKit (the system
+  asks the user to confirm and keeps them in Recently Deleted).
+* ``contacts_cleaner`` — ``ContactsCleaner``: groups cards with the same name that share a
+  phone number or email, copies the missing numbers and emails into the kept card and
+  deletes the others (screens must confirm first: the deletion is permanent).
 * ``storage_scan`` — ``StorageScan``: device capacity / free space and the app's own
   cache size, and clears that cache.
 
@@ -37,6 +39,8 @@ SCAN_PATTERN = r"\b(scan|find|search|analy[sz]e|detect|check)\b"
 CLEAN_PATTERN = r"\b(delete|clean|remove|merge|clear)\b|free up"
 SCAN_ID = "iosforge.scan"
 CLEAN_ID = "iosforge.clean"
+CONFIRM_ID = "iosforge.confirm"
+CONFIRM_PATTERN = "merge|delete|confirm|yes"
 MARK_RULE = (
     f'\n  Mark the scan button `.accessibilityIdentifier("{SCAN_ID}")` and the delete / clean /'
     f' merge\n  button `.accessibilityIdentifier("{CLEAN_ID}")`.'
@@ -44,10 +48,11 @@ MARK_RULE = (
 PHOTOS_ALLOW = "Allow Full Access|Allow Access to All Photos|Allow|OK"
 CONTACTS_ALLOW = "Allow Full Access|Continue|Allow|OK"
 
-PHOTOS_SWIFT = f"""import Photos
+PHOTOS_SWIFT = f"""import CryptoKit
+import Photos
 import UIKit
 
-/// A set of identical photos: the first is kept, the others are the duplicates.
+/// A set of byte-identical photos: the first (oldest) is kept, the others are the copies.
 struct PhotoDuplicateGroup: Identifiable {{
     let id = UUID()
     let assets: [PHAsset]
@@ -64,7 +69,9 @@ enum PhotosCleaner {{
         var errorDescription: String? {{ message }}
     }}
 
-    /// Scans the library (asks for access first) and returns the duplicate groups.
+    /// Scans the library (asks for access first) and returns the groups of exact copies.
+    /// Candidates share pixel size and a perceptual hash; a group is only formed from
+    /// photos whose image data is identical, so similar shots are never treated as copies.
     static func scan() async throws -> [PhotoDuplicateGroup] {{
         guard !Headless.isActive else {{ return [] }}
         guard await Permissions.request(PhotosPermission.self) else {{
@@ -77,13 +84,21 @@ enum PhotosCleaner {{
         let result = PHAsset.fetchAssets(with: .image, options: options)
         var assets: [PHAsset] = []
         result.enumerateObjects {{ asset, _, _ in assets.append(asset) }}
-        var buckets: [UInt64: [PHAsset]] = [:]
+        var candidates: [String: [PHAsset]] = [:]
         for asset in assets {{
-            if let value = await fingerprint(asset) {{
-                buckets[value, default: []].append(asset)
-            }}
+            guard let value = await fingerprint(asset), value != 0, value != UInt64.max else {{ continue }}
+            candidates["\\(asset.pixelWidth)x\\(asset.pixelHeight):\\(value)", default: []].append(asset)
         }}
-        let groups = buckets.values.filter {{ $0.count > 1 }}.map {{ PhotoDuplicateGroup(assets: $0) }}
+        var groups: [PhotoDuplicateGroup] = []
+        for bucket in candidates.values where bucket.count > 1 {{
+            var identical: [String: [PHAsset]] = [:]
+            for asset in bucket {{
+                if let digest = await digest(asset) {{
+                    identical[digest, default: []].append(asset)
+                }}
+            }}
+            groups += identical.values.filter {{ $0.count > 1 }}.map {{ PhotoDuplicateGroup(assets: $0) }}
+        }}
         let duplicates = groups.reduce(0) {{ $0 + $1.duplicates }}
         Functional.record("photos.scanned", ["photos": String(assets.count), "duplicates": String(duplicates)])
         if duplicates > 0 {{
@@ -92,13 +107,19 @@ enum PhotosCleaner {{
         return groups
     }}
 
-    /// Deletes every duplicate (keeps the first photo of each group); returns how many.
+    /// Deletes every copy (keeps the first photo of each group); returns how many.
+    /// The system asks the user to confirm and keeps the photos in Recently Deleted.
     @discardableResult
     static func deleteDuplicates(in groups: [PhotoDuplicateGroup]) async throws -> Int {{
         let extras = groups.flatMap {{ $0.assets.dropFirst() }}
         guard !extras.isEmpty, !Headless.isActive else {{ return 0 }}
-        try await PHPhotoLibrary.shared().performChanges {{
-            PHAssetChangeRequest.deleteAssets(extras as NSArray)
+        do {{
+            try await PHPhotoLibrary.shared().performChanges {{
+                PHAssetChangeRequest.deleteAssets(extras as NSArray)
+            }}
+        }} catch {{
+            Functional.record("photos.error", ["reason": error.localizedDescription])
+            throw error
         }}
         Functional.record("photos.deleted", ["count": String(extras.count)])
         return extras.count
@@ -123,6 +144,20 @@ enum PhotosCleaner {{
                 continuation.resume(returning: image)
             }}
         }}
+    }}
+
+    private static func digest(_ asset: PHAsset) async -> String? {{
+        let options = PHImageRequestOptions()
+        options.version = .current
+        options.deliveryMode = .highQualityFormat
+        options.isNetworkAccessAllowed = false
+        let data: Data? = await withCheckedContinuation {{ continuation in
+            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) {{ data, _, _, _ in
+                continuation.resume(returning: data)
+            }}
+        }}
+        guard let data else {{ return nil }}
+        return SHA256.hash(data: data).map {{ String(format: "%02x", $0) }}.joined()
     }}
 
     private static func fingerprint(_ asset: PHAsset) async -> UInt64? {{
@@ -154,7 +189,8 @@ enum PhotosCleaner {{
 CONTACTS_SWIFT = f"""import Contacts
 import Foundation
 
-/// Contacts that are the same person: the first is kept, the others are the duplicates.
+/// Cards of the same person: same name and at least one shared phone number or email.
+/// The first card is kept and receives the others' missing numbers and emails.
 struct ContactDuplicateGroup: Identifiable {{
     let id = UUID()
     let name: String
@@ -172,13 +208,6 @@ enum ContactsCleaner {{
         var errorDescription: String? {{ message }}
     }}
 
-    private static let keys: [CNKeyDescriptor] = [
-        CNContactGivenNameKey as CNKeyDescriptor,
-        CNContactFamilyNameKey as CNKeyDescriptor,
-        CNContactPhoneNumbersKey as CNKeyDescriptor,
-        CNContactIdentifierKey as CNKeyDescriptor,
-    ]
-
     /// Reads the contacts (asks for access first) and returns the duplicate groups.
     static func scan() async throws -> [ContactDuplicateGroup] {{
         guard !Headless.isActive else {{ return [] }}
@@ -186,44 +215,117 @@ enum ContactsCleaner {{
             Functional.record("contacts.error", ["reason": "access denied"])
             throw Failure(message: "Contacts access was not granted.")
         }}
-        var all: [CNContact] = []
-        try CNContactStore().enumerateContacts(with: CNContactFetchRequest(keysToFetch: keys)) {{ contact, _ in
-            all.append(contact)
-        }}
-        var buckets: [String: [CNContact]] = [:]
-        for contact in all {{
-            let name = "\\(contact.givenName) \\(contact.familyName)"
-                .trimmingCharacters(in: .whitespaces).lowercased()
-            let phone = contact.phoneNumbers.first?.value.stringValue.filter(\\.isNumber) ?? ""
-            let key = name.isEmpty ? phone : name
-            guard !key.isEmpty else {{ continue }}
-            buckets[key, default: []].append(contact)
-        }}
-        let groups = buckets.filter {{ $0.value.count > 1 }}
-            .map {{ ContactDuplicateGroup(name: $0.key.capitalized, contacts: $0.value) }}
-            .sorted {{ $0.name < $1.name }}
+        let (count, groups) = try await Task.detached {{ () throws -> (Int, [ContactDuplicateGroup]) in
+            let all = try fetchAll()
+            return (all.count, group(all))
+        }}.value
         let duplicates = groups.reduce(0) {{ $0 + $1.duplicates }}
-        Functional.record("contacts.scanned", ["contacts": String(all.count), "duplicates": String(duplicates)])
+        Functional.record("contacts.scanned", ["contacts": String(count), "duplicates": String(duplicates)])
         if duplicates > 0 {{
             Functional.record("contacts.duplicates_found", ["duplicates": String(duplicates)])
         }}
         return groups
     }}
 
-    /// Deletes the extra copies of every group; returns how many contacts were removed.
+    /// Merges every group: copies the missing phone numbers and emails into the first card,
+    /// then deletes the other cards. Deletion is permanent, so screens confirm first.
+    /// Returns how many cards were removed.
     @discardableResult
-    static func merge(_ groups: [ContactDuplicateGroup]) throws -> Int {{
-        let extras = groups.flatMap {{ $0.contacts.dropFirst() }}
-        guard !extras.isEmpty, !Headless.isActive else {{ return 0 }}
-        let request = CNSaveRequest()
-        for contact in extras {{
-            if let mutable = contact.mutableCopy() as? CNMutableContact {{
-                request.delete(mutable)
+    static func merge(_ groups: [ContactDuplicateGroup]) async throws -> Int {{
+        let work = groups.filter {{ $0.contacts.count > 1 }}
+        guard !work.isEmpty, !Headless.isActive else {{ return 0 }}
+        do {{
+            let (removed, copied) = try await Task.detached {{ try save(work) }}.value
+            Functional.record("contacts.merged", ["count": String(removed), "copied": String(copied)])
+            return removed
+        }} catch {{
+            Functional.record("contacts.error", ["reason": error.localizedDescription])
+            throw error
+        }}
+    }}
+
+    nonisolated private static func fetchAll() throws -> [CNContact] {{
+        let keys: [CNKeyDescriptor] = [
+            CNContactGivenNameKey as CNKeyDescriptor,
+            CNContactFamilyNameKey as CNKeyDescriptor,
+            CNContactPhoneNumbersKey as CNKeyDescriptor,
+            CNContactEmailAddressesKey as CNKeyDescriptor,
+            CNContactIdentifierKey as CNKeyDescriptor,
+        ]
+        var all: [CNContact] = []
+        try CNContactStore().enumerateContacts(with: CNContactFetchRequest(keysToFetch: keys)) {{ contact, _ in
+            all.append(contact)
+        }}
+        return all
+    }}
+
+    nonisolated private static func name(_ contact: CNContact) -> String {{
+        "\\(contact.givenName) \\(contact.familyName)".trimmingCharacters(in: .whitespaces).lowercased()
+    }}
+
+    nonisolated private static func phoneKey(_ phone: CNPhoneNumber) -> String {{
+        let digits = phone.stringValue.filter(\\.isNumber)
+        return digits.isEmpty ? "" : "tel:" + String(digits.suffix(10))
+    }}
+
+    nonisolated private static func emailKey(_ email: NSString) -> String {{
+        let value = (email as String).trimmingCharacters(in: .whitespaces).lowercased()
+        return value.isEmpty ? "" : "mail:" + value
+    }}
+
+    nonisolated private static func handles(_ contact: CNContact) -> Set<String> {{
+        var result = Set(contact.phoneNumbers.map {{ phoneKey($0.value) }})
+        result.formUnion(contact.emailAddresses.map {{ emailKey($0.value) }})
+        result.remove("")
+        return result
+    }}
+
+    nonisolated private static func group(_ all: [CNContact]) -> [ContactDuplicateGroup] {{
+        let named = Dictionary(grouping: all.filter {{ !name($0).isEmpty }}, by: name)
+        var groups: [ContactDuplicateGroup] = []
+        for (key, people) in named where people.count > 1 {{
+            var clusters: [(contacts: [CNContact], handles: Set<String>)] = []
+            for person in people {{
+                let own = handles(person)
+                guard !own.isEmpty else {{ continue }}
+                var joined = (contacts: [person], handles: own)
+                for index in clusters.indices.reversed() where !clusters[index].handles.isDisjoint(with: own) {{
+                    joined = (clusters[index].contacts + joined.contacts, clusters[index].handles.union(joined.handles))
+                    clusters.remove(at: index)
+                }}
+                clusters.append(joined)
             }}
+            groups += clusters.filter {{ $0.contacts.count > 1 }}
+                .map {{ ContactDuplicateGroup(name: key.capitalized, contacts: $0.contacts) }}
+        }}
+        return groups.sorted {{ $0.name < $1.name }}
+    }}
+
+    nonisolated private static func save(_ groups: [ContactDuplicateGroup]) throws -> (Int, Int) {{
+        let request = CNSaveRequest()
+        var removed = 0
+        var copied = 0
+        for group in groups {{
+            guard let keeper = group.contacts[0].mutableCopy() as? CNMutableContact else {{ continue }}
+            var known = handles(keeper)
+            for card in group.contacts.dropFirst() {{
+                for phone in card.phoneNumbers where known.insert(phoneKey(phone.value)).inserted {{
+                    keeper.phoneNumbers.append(CNLabeledValue(label: phone.label, value: phone.value))
+                    copied += 1
+                }}
+                for email in card.emailAddresses where known.insert(emailKey(email.value)).inserted {{
+                    keeper.emailAddresses.append(CNLabeledValue(label: email.label, value: email.value))
+                    copied += 1
+                }}
+                if let extra = card.mutableCopy() as? CNMutableContact {{
+                    request.delete(extra)
+                    removed += 1
+                }}
+            }}
+            request.update(keeper)
         }}
         try CNContactStore().execute(request)
-        Functional.record("contacts.merged", ["count": String(extras.count)])
-        return extras.count
+        return (removed, copied)
     }}
 }}
 """
@@ -265,8 +367,10 @@ enum StorageScan {{
         for folder in cacheFolders() {{
             let items = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
             for item in items {{
-                freed += size(of: item)
-                try? FileManager.default.removeItem(at: item)
+                let bytes = size(of: item)
+                if (try? FileManager.default.removeItem(at: item)) != nil {{
+                    freed += bytes
+                }}
             }}
         }}
         Functional.record("storage.cleaned", ["freed": String(freed)])
@@ -302,16 +406,19 @@ PHOTOS_RULE = (
     "Duplicate photos only through the scaffold module (`App/Capabilities/PhotosCleaner.swift`):\n"
     "  a scan `Button` runs `let groups = try await PhotosCleaner.scan()` in a `Task` (it asks\n"
     "  for access itself), the screen lists the groups (`PhotoDuplicateGroup.assets`,\n"
-    "  `PhotosCleaner.thumbnail(for:)`) and shows the duplicate count, and a delete / clean\n"
-    "  `Button` calls `try await PhotosCleaner.deleteDuplicates(in: groups)`. Never import\n"
-    "  Photos in screens and never fake results; in headless mode show the fixtures."
+    "  `PhotosCleaner.thumbnail(for:)`) for review and shows the duplicate count, and a delete /\n"
+    "  clean `Button` calls `try await PhotosCleaner.deleteDuplicates(in: groups)` (the system\n"
+    "  confirms). Never import Photos in screens and never fake results; headless shows fixtures."
 )
 CONTACTS_RULE = (
     "Duplicate contacts only through the scaffold module (`App/Capabilities/ContactsCleaner.swift`):\n"
     "  a scan `Button` runs `let groups = try await ContactsCleaner.scan()` in a `Task` (it asks\n"
     "  for access itself), the screen lists the groups (`ContactDuplicateGroup.name`,\n"
-    "  `.duplicates`) and a merge / delete `Button` calls `try ContactsCleaner.merge(groups)`.\n"
-    "  Never import Contacts in screens and never fake results; headless shows fixtures."
+    "  `.duplicates`). The merge `Button` only opens an `.alert` that says the extra cards are\n"
+    '  deleted after their numbers and emails are copied; the alert\'s destructive `Button("Merge")`\n'
+    f'  (`.accessibilityIdentifier("{CONFIRM_ID}")`) runs `try await ContactsCleaner.merge(groups)`\n'
+    "  in a `Task`. Never merge without that confirmation, never import Contacts in screens and\n"
+    "  never fake results; headless shows fixtures."
 )
 STORAGE_RULE = (
     "Storage only through the scaffold module (`App/Capabilities/StorageScan.swift`): a scan /\n"
@@ -353,6 +460,7 @@ def _contacts_check(ctx: caps.CapabilityContext) -> FunctionalCheck | None:
             Step("allow", CONTACTS_ALLOW, timeout=4),
             Step("pause", timeout=4),
             Step("tap", CLEAN_PATTERN, timeout=20, identifier=CLEAN_ID),
+            Step("tap", CONFIRM_PATTERN, timeout=10, identifier=CONFIRM_ID),
             Step("pause", timeout=3),
         ),
         expect_events=("contacts.duplicates_found", "contacts.merged"),
@@ -403,7 +511,9 @@ SEED_VCARD = (
     "BEGIN:VCARD\nVERSION:3.0\nN:Duplicate;Iosforge;;;\nFN:Iosforge Duplicate\n"
     "TEL;TYPE=CELL:+15550100\nEND:VCARD\n"
     "BEGIN:VCARD\nVERSION:3.0\nN:Duplicate;Iosforge;;;\nFN:Iosforge Duplicate\n"
-    "TEL;TYPE=CELL:+15550100\nEND:VCARD\n"
+    "TEL;TYPE=CELL:+1 555 0100\nEMAIL:seed@iosforge.dev\nEND:VCARD\n"
+    "BEGIN:VCARD\nVERSION:3.0\nN:Duplicate;Iosforge;;;\nFN:Iosforge Duplicate\n"
+    "TEL;TYPE=CELL:+15550177\nEND:VCARD\n"
     "BEGIN:VCARD\nVERSION:3.0\nN:Unique;Iosforge;;;\nFN:Iosforge Unique\n"
     "TEL;TYPE=CELL:+15550199\nEND:VCARD\n"
 )

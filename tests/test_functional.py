@@ -324,19 +324,24 @@ def test_run_safely_retries_infra_and_never_raises(
 def test_mock_environment_rejects_foreign_and_colliding_keys() -> None:
     from contextlib import ExitStack
 
+    where = swf.MockContext(udid="U", bundle_id="dev.x")
     with ExitStack() as stack:
         merged = functional.mock_environment(
-            stack, [_check("a", env={"IOSFORGE_X": "1"}), _check("b", env={"IOSFORGE_X": "1"})]
+            stack,
+            [_check("a", env={"IOSFORGE_X": "1"}), _check("b", env={"IOSFORGE_X": "1"})],
+            where,
         )
         assert merged == {"IOSFORGE_X": "1"}
         with pytest.raises(ValueError, match="collides"):
             functional.mock_environment(
-                stack, [_check("a", env={"IOSFORGE_X": "1"}), _check("b", env={"IOSFORGE_X": "2"})]
+                stack,
+                [_check("a", env={"IOSFORGE_X": "1"}), _check("b", env={"IOSFORGE_X": "2"})],
+                where,
             )
         with pytest.raises(ValueError, match="must start with IOSFORGE_"):
-            functional.mock_environment(stack, [_check(env={"API_KEY": "s"})])
+            functional.mock_environment(stack, [_check(env={"API_KEY": "s"})], where)
         with pytest.raises(functional.FunctionalConfigError, match="unknown mock"):
-            functional.mock_environment(stack, [_check(mock="nowhere")])
+            functional.mock_environment(stack, [_check(mock="nowhere")], where)
 
 
 def test_journal_is_read_and_cleared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

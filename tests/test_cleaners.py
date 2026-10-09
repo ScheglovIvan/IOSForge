@@ -47,6 +47,7 @@ CONTACTS_SCREEN = """import SwiftUI
 struct Screen0001View: View {
     @State private var groups: [ContactDuplicateGroup] = []
     @State private var status = "Not scanned"
+    @State private var confirming = false
 
     var body: some View {
         VStack(spacing: 16) {
@@ -57,10 +58,18 @@ struct Screen0001View: View {
                     status = "\\(groups.count) groups"
                 }
             }
-            Button("Merge") {
-                let merged = (try? ContactsCleaner.merge(groups)) ?? 0
-                status = "Merged \\(merged)"
-            }
+            Button("Merge duplicates") { confirming = true }
+                .alert("Merge duplicates?", isPresented: $confirming) {
+                    Button("Merge", role: .destructive) {
+                        Task {
+                            let merged = (try? await ContactsCleaner.merge(groups)) ?? 0
+                            status = "Merged \\(merged)"
+                        }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("Extra cards are deleted after their numbers and emails are copied.")
+                }
         }
     }
 }
@@ -128,8 +137,57 @@ def test_seed_photos_contain_exactly_one_duplicate(tmp_path: Path) -> None:
     assert Image.open(files[1]).size == (480, 360)
 
 
-def test_seed_vcard_has_a_duplicate_person() -> None:
-    assert swiftui_cleaners.SEED_VCARD.count("FN:Iosforge Duplicate") == 2
+def test_seed_vcard_has_one_duplicate_and_a_namesake() -> None:
+    cards = swiftui_cleaners.SEED_VCARD.split("END:VCARD")
+    same_name = [c for c in cards if "FN:Iosforge Duplicate" in c]
+    digits = ["".join(ch for ch in c.split("TEL;TYPE=CELL:")[1].split("\n")[0] if ch.isdigit())
+              for c in same_name]  # fmt: skip
+    assert len(same_name) == 3 and digits[0] == digits[1] != digits[2]
+    assert "EMAIL:" in same_name[1] and "EMAIL:" not in same_name[0]
+
+
+def test_cleaner_modules_never_merge_by_name_or_hash_alone() -> None:
+    contacts = swiftui_cleaners.CONTACTS_SWIFT
+    assert "isDisjoint(with: own)" in contacts and "CNContactEmailAddressesKey" in contacts
+    assert "request.update(keeper)" in contacts and "contacts.error" in contacts
+    photos = swiftui_cleaners.PHOTOS_SWIFT
+    assert "SHA256.hash" in photos and "pixelWidth" in photos and "value != 0" in photos
+    assert "photos.error" in photos
+    assert swiftui_cleaners.CONFIRM_ID in swiftui_cleaners.CONTACTS_RULE
+    assert ".alert" in swiftui_cleaners.CONTACTS_RULE
+
+
+def test_contacts_check_confirms_before_merging() -> None:
+    spec = _spec("contacts_cleaner", "contacts_cleaner")
+    check = caps.functional_checks(caps.select(spec, caps.integ.Integrations()))[0]
+    kinds = [(step.kind, step.identifier) for step in check.steps]
+    clean = kinds.index(("tap", swiftui_cleaners.CLEAN_ID))
+    assert kinds[clean + 1] == ("tap", swiftui_cleaners.CONFIRM_ID)
+
+
+def test_patterns_are_word_bounded() -> None:
+    import re
+
+    assert not re.search(swiftui_cleaners.CLEAN_PATTERN, "Start Free Trial", re.I)
+    assert re.search(swiftui_cleaners.CLEAN_PATTERN, "Delete duplicates", re.I)
+    assert not re.search(swiftui_cleaners.SCAN_PATTERN, "Unlock Premium", re.I)
+
+
+def test_system_and_allow_steps_render_into_the_driver() -> None:
+    from iosforge.mvp import swiftui_functional as swf
+
+    spec = _spec("photos_cleaner", "photos_cleaner")
+    checks = caps.functional_checks(caps.select(spec, caps.integ.Integrations()))
+    source = swf.render_ui_tests(checks, [])
+    assert 'tapSystemAlert("Delete"' in source and "allowIfAsked(" in source
+
+
+def test_privacy_policy_covers_the_cleaner_permissions() -> None:
+    from iosforge.mvp import legal_pages
+
+    practices = legal_pages._PERMISSION_PRACTICES
+    assert "on your device" in practices["NSContactsUsageDescription"].detail
+    assert "NSPhotoLibraryUsageDescription" in practices
 
 
 def _run(tmp_path: Path, module: str, kind: str, screen: str) -> dict[str, Any]:

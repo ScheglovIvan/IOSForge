@@ -109,6 +109,18 @@ _PERMISSION_PRACTICES: dict[str, DataPractice] = {
         "Used only while you are scanning, and the image is processed on your "
         "device. No photograph is stored or transmitted.",
     ),
+    "NSPhotoLibraryUsageDescription": DataPractice(
+        "Photo library",
+        "Used to find duplicate photos. Photos are compared on your device; none "
+        "is uploaded, stored by us or shared, and a photo is deleted only after "
+        "you confirm it in the system dialog.",
+    ),
+    "NSContactsUsageDescription": DataPractice(
+        "Contacts",
+        "Used to find and merge duplicate contact cards. Your contacts are read and "
+        "compared on your device only; they are never uploaded or shared, and cards "
+        "are merged only after you confirm.",
+    ),
     "NSUserTrackingUsageDescription": DataPractice(
         "Tracking permission",
         "If you allow tracking, the advertising identifier your device provides is "
