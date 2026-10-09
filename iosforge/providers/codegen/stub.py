@@ -55,7 +55,7 @@ class StubCodegenTarget:
         )
         return CodegenResult(
             source_ref=source_ref,
-            target_kind="flutter-ios",
+            target_kind="swiftui-ios",
             decisions={"needs_admin": False, "needs_content": False},
             logs=(
                 f"stub codegen: prompt_set={prompts.prompt_set} v{prompts.version}, "
@@ -83,7 +83,7 @@ class StubBuildProvider:
         opts: BuildOptions | None = None,
     ) -> BuildResult:
         build_id = f"stub-build-{len(self._builds) + 1}"
-        ext = "zip" if target is BuildTarget.WEB else "ipa"
+        ext = "app" if target is BuildTarget.SIMULATOR else "ipa"
         artifact_ref = ArtifactRef(
             bucket="iosforge",
             key=f"jobs/stub/builds/{build_id}.{ext}",

@@ -204,7 +204,7 @@ def test_build_stub_contract() -> None:
         size=42,
         content_type="application/zip",
     )
-    result = provider.build(source, BuildTarget.WEB, BuildOptions())
+    result = provider.build(source, BuildTarget.SIMULATOR, BuildOptions())
     assert isinstance(result, BuildResult)
     assert result.status is BuildStatus.SUCCEEDED
     assert isinstance(result.artifact_ref, ArtifactRef)

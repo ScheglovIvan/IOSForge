@@ -33,6 +33,27 @@ from pydantic import BaseModel, Field
 
 from iosforge.storage import ArtifactRef
 
+#: Navigation contract every generated app MUST honour (SPEC §5.5, SwiftUI pivot).
+#:
+#: To let the Vision Judge render a single screen headlessly on the iOS
+#: Simulator, the generated app must accept a ``screen-id`` and deep-link
+#: straight to that screen, bypassing normal navigation. This replaces the old
+#: Flutter web route ``/#/screen/:id``. A :class:`CodegenTarget` implementation
+#: must emit an app that supports BOTH entry points:
+#:
+#: * launch argument — ``simctl launch <udid> <bundle> -screen-id <id>`` (read
+#:   from ``ProcessInfo.processInfo.arguments`` / ``UserDefaults``);
+#: * custom URL scheme — ``iosforge://screen/<id>`` (opened via
+#:   ``simctl openurl <udid> <url>``).
+#:
+#: Given either, the app opens directly on the matching screen with no operator
+#: interaction so ``simctl io <udid> screenshot`` captures exactly that screen.
+SCREEN_NAV_CONTRACT: str = (
+    "generated app accepts a screen-id via launch argument "
+    "(-screen-id <id>) or custom URL scheme (iosforge://screen/<id>) and "
+    "deep-links headlessly to that screen for Simulator screenshotting"
+)
+
 # --------------------------------------------------------------------------- #
 # Shared domain types (Pydantic). Inputs/outputs of the provider interfaces.
 # --------------------------------------------------------------------------- #
@@ -131,16 +152,17 @@ class CodegenResult(BaseModel):
     """Generated sources + decisions (SPEC §5.5 output)."""
 
     source_ref: ArtifactRef  # generated sources in the store
-    target_kind: str  # e.g. 'flutter-ios'
+    target_kind: str = "swiftui-ios"  # e.g. 'swiftui-ios'
     decisions: dict[str, object] = Field(default_factory=dict)  # admin/content needed?
     logs: str | None = None
 
 
 class BuildTarget(StrEnum):
-    """What we compile (SPEC §5.5): web for self-test, ios for the final build."""
+    """What we compile (SPEC §5.5): a Simulator build for the Vision Judge
+    self-test, a signed iOS archive for the final App Store build."""
 
-    WEB = "web"
-    IOS = "ios"
+    SIMULATOR = "simulator"
+    IOS_ARCHIVE = "ios_archive"
 
 
 class BuildStatus(StrEnum):
@@ -190,7 +212,7 @@ class Provider(Protocol):
     """Common provider surface: a stable implementation key for ProviderConfig."""
 
     def name(self) -> str:
-        """Implementation key (e.g. ``firebase``, ``flutter-ios``) for ProviderConfig."""
+        """Implementation key (e.g. ``firebase``, ``swiftui-ios``) for ProviderConfig."""
         ...
 
 
@@ -274,8 +296,9 @@ class CodegenTarget(Protocol):
 class BuildProvider(Protocol):
     """Compile/build generated sources for a target (SPEC §5.5).
 
-    Implementations: ``local-web`` (Flutter web/Chrome self-test) and
-    ``remote-ios`` (Codemagic, final Flutter->iOS). Aligned with the BuildProvider
+    Implementations: ``simulator`` (``xcodebuild`` + iOS Simulator for the Vision
+    Judge self-test) and ``xcodebuild-archive`` (final signed IPA via
+    ``xcodebuild archive``/``-exportArchive``). Aligned with the BuildProvider
     contract already in API_MAP.
     """
 
@@ -345,6 +368,7 @@ __all__ = [
     "PromptSetProvider",
     "PromptSetVersion",
     "Provider",
+    "SCREEN_NAV_CONTRACT",
     "ScreenShot",
     "ScreenSource",
     "WalkthroughResult",

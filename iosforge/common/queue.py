@@ -45,6 +45,7 @@ STAGE_QUEUES: dict[Stage, str] = {
     Stage.ACQUISITION: "acquisition",
     Stage.WALKTHROUGH: "walkthrough",
     Stage.ANALYSIS: "codegen",
+    Stage.SCOPE: "codegen",
     Stage.CODEGEN: "codegen",
     Stage.VERIFY: "codegen",
     Stage.GITHUB_UPLOAD: "codegen",
