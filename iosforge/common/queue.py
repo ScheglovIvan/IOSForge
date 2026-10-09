@@ -224,6 +224,7 @@ def make_celery_app(
             "iosforge.worker.run_job",
             "iosforge.worker.swiftui_tasks",
             "iosforge.worker.swiftui_rework",
+            "iosforge.worker.swiftui_build",
         ],
     )
     app.conf.update(
