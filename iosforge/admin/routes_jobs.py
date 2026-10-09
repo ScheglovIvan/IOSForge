@@ -144,10 +144,12 @@ def job_detail(
         return Response("Not found", status_code=404)
     gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
     scope_status = (job.source_app_metadata or {}).get("scope_status")
+    from iosforge.worker.swiftui_build import build_refusal
     from iosforge.worker.swiftui_tasks import latest_xcode_build
 
     xcode_build = latest_xcode_build(db, job_id)
     can_xcode_delivery = xcode_build is not None or _has_sources(storage, job_id)
+    can_build = job.state in (JobState.DONE, JobState.FAILED) and build_refusal(db, job) is None
     return templates.TemplateResponse(
         request,
         "job_detail.html",
@@ -160,6 +162,7 @@ def job_detail(
             "build": _latest_build(db, job_id),
             "can_ios_build": can_xcode_delivery or _latest_build(db, job_id) is not None,
             "can_xcode_delivery": can_xcode_delivery,
+            "can_build": can_build,
             "xcode_build": xcode_build,
             "store_slides": _store_slides(job_id),
             "ipad_slides": _ipad_slides(job_id),

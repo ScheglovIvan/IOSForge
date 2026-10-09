@@ -45,6 +45,9 @@ class _Session:
             return self.running
         return self.existing
 
+    def scalars(self, stmt: object) -> list[StageTimeline]:
+        return [self.running] if self.running is not None else []
+
     def add(self, obj: object) -> None:
         if getattr(obj, "id", "x") is None:
             obj.id = uuid.uuid4()  # type: ignore[attr-defined]
@@ -174,15 +177,14 @@ def test_build_refuses_unbuildable_jobs(
     assert session.added == [] and job.state == state
 
 
-def test_build_refuses_without_analysis_or_while_running(
+def test_build_refuses_without_analysis(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     job, session, _ = _wire(monkeypatch, {})
     session.walk = None
     assert "no finished analysis" in swiftui_build.build_swiftui.run(str(job.id))
-    session.walk = WalkthroughResult(job_id=job.id, screen_map={"screens": []})
-    session.running = StageTimeline(job_id=job.id)
-    assert "already running" in swiftui_build.build_swiftui.run(str(job.id))
+    session.walk = WalkthroughResult(job_id=job.id, screen_map={})
+    assert "no finished analysis" in swiftui_build.build_swiftui.run(str(job.id))
     assert session.added == []
 
 
@@ -245,3 +247,68 @@ def test_scope_ids_follow_the_approved_scope(
 
 def test_build_task_is_on_the_mac_queue() -> None:
     assert swiftui_build.build_swiftui.queue == swiftui_tasks.XCODE_QUEUE
+
+
+def test_redelivered_build_closes_the_dead_run_and_builds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {"compliance_score": 0.85, "stop_reason": "all_closed"}
+    job, session, seen = _wire(monkeypatch, report)
+    dead = StageTimeline(job_id=job.id, stage=swiftui_build.Stage.CODEGEN)
+    session.running = dead
+    assert swiftui_build.build_swiftui.run(str(job.id)) == f"job {job.id} built"
+    assert dead.finished_at is not None and "restarted" in (dead.error or "")
+    assert job.state == JobState.DONE and seen["queued"] == [job]
+
+
+def test_admin_guard_still_refuses_while_a_build_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    job, session, _ = _wire(monkeypatch, {})
+    session.running = StageTimeline(job_id=job.id)
+    assert swiftui_build.build_refusal(session, job) == "a build is already running"  # type: ignore[arg-type]
+    assert swiftui_build.build_refusal(session, job, check_running=False) is None  # type: ignore[arg-type]
+
+
+def _save_settings(session: _Session, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    from iosforge.admin import routes_jobs
+    from iosforge.admin.session import SessionData
+
+    calls: list[str] = []
+    monkeypatch.setattr(routes_jobs, "_enqueue_build", lambda job_id: calls.append("build"))
+    monkeypatch.setattr(swiftui_tasks, "queue_delivery", lambda db, job: calls.append("delivery"))
+    user = SessionData(user_id="u", username="op", csrf_token="t")
+    response = routes_jobs.jobs_build_settings(
+        None,
+        session.job.id,
+        "t",
+        "test",
+        "",
+        "",
+        "",
+        "",
+        "",
+        user,
+        session,  # type: ignore[arg-type]
+    )
+    assert response.status_code == 303
+    return calls
+
+
+def test_build_settings_builds_only_a_buildable_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    job, session, _ = _wire(monkeypatch, {})
+    job.state = JobState.DONE
+    assert _save_settings(session, monkeypatch) == ["build"]
+    job.source_app_metadata = {"scope_status": "proposed"}
+    assert _save_settings(session, monkeypatch) == []
+    job.source_app_metadata, job.state = {}, JobState.ANALYSIS
+    assert _save_settings(session, monkeypatch) == []
+
+
+def test_build_settings_redelivers_a_generated_swiftui_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    job, session, _ = _wire(monkeypatch, {})
+    job.state = JobState.DONE
+    session.existing = GenerationResult(
+        job_id=job.id, sources_key="jobs/x/sources/v1/xcode_app.zip"
+    )
+    assert _save_settings(session, monkeypatch) == ["delivery"]
+    job.state = JobState.CODEGEN
+    assert _save_settings(session, monkeypatch) == []

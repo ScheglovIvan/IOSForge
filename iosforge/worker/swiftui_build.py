@@ -47,11 +47,13 @@ log = get_logger("worker.swiftui_build")
 BUILDABLE = (JobState.DONE, JobState.CODEGEN, JobState.FAILED)
 
 
-def build_refusal(db: Session, job: Job) -> str | None:
+def build_refusal(db: Session, job: Job, *, check_running: bool = True) -> str | None:
     """Why the job cannot be built now (None when it can).
 
     A build needs a finished analysis, no generated app yet, no scope proposal awaiting
-    approval, and a job that is idle (DONE / FAILED) or handed over for codegen.
+    approval, and a job that is idle (DONE / FAILED) or handed over for codegen. The
+    admin also refuses while a CODEGEN stage is open; the task itself does not, so a
+    build redelivered after its worker died still runs.
     """
     if job.state not in BUILDABLE:
         return f"job is {job.state}"
@@ -62,6 +64,8 @@ def build_refusal(db: Session, job: Job) -> str | None:
         return "no finished analysis"
     if db.scalar(select(GenerationResult).where(GenerationResult.job_id == job.id)):
         return "already built"
+    if not check_running:
+        return None
     running = db.scalar(
         select(StageTimeline).where(
             StageTimeline.job_id == job.id,
@@ -77,6 +81,19 @@ def build_refusal(db: Session, job: Job) -> str | None:
 def enqueue_build(job_id: str) -> None:
     """Queue the job's SwiftUI build on the Mac queue (pipeline chain and admin)."""
     build_swiftui.apply_async(args=[job_id], queue=XCODE_QUEUE)
+
+
+def _close_stale_stages(db: Session, job: Job) -> None:
+    stale = db.scalars(
+        select(StageTimeline).where(
+            StageTimeline.job_id == job.id,
+            StageTimeline.stage == Stage.CODEGEN,
+            StageTimeline.finished_at.is_(None),
+        )
+    )
+    for row in stale:
+        row.finished_at = utcnow()
+        row.error = "interrupted: the build was restarted"
 
 
 def _gate_reason(report: dict[str, Any]) -> str:
@@ -110,7 +127,7 @@ def build_swiftui(self: Any, job_id: str) -> str:
         job = db.get(Job, uuid.UUID(job_id))
         if job is None:
             return f"job {job_id} not found"
-        refusal = build_refusal(db, job)
+        refusal = build_refusal(db, job, check_running=False)
         if refusal:
             log.info("build_swiftui.refused", job_id=job_id, reason=refusal)
             return f"job {job_id} not built: {refusal}"
@@ -118,6 +135,7 @@ def build_swiftui(self: Any, job_id: str) -> str:
             return f"job {job_id} not built: another build claimed it"
         job.state = JobState.CODEGEN
         job.codegen_target = "swiftui"
+        _close_stale_stages(db, job)
         stage = StageTimeline(job_id=job.id, stage=Stage.CODEGEN, started_at=utcnow())
         db.add(stage)
         db.commit()

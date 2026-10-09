@@ -157,6 +157,17 @@
     {% endif %}
 
     <section class="tab-panel panel-build" role="tabpanel" aria-label="Build and sign">
+      {% if can_build %}
+      <div class="card">
+        <h3>SwiftUI app</h3>
+        <p class="hint">No generated app yet. Builds on the Mac worker: codegen, Vision Judge on the
+          iOS Simulator, then the native archive.</p>
+        <form method="post" action="/jobs/{{ job.id }}/build">
+          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+          <div class="form-actions"><button class="btn" type="submit">Build app</button></div>
+        </form>
+      </div>
+      {% endif %}
       <div class="card">
         <h3>Build settings</h3>
         {% set meta = job.source_app_metadata or {} %}
