@@ -127,7 +127,10 @@ def test_scaffold_with_a_check_renders_the_functional_layer(
     assert 'app.open(URL(string: "iosforge://screen/0001")!)' in tests
     assert '["iosforge.screen.0001"].firstMatch' in tests
     screen_id = (paths.xcode_app / "App/Navigation/ScreenID.swift").read_text()
-    assert 'Screen0001View().accessibilityIdentifier("iosforge.screen.0001")' in screen_id
+    assert (
+        "Screen0001View().accessibilityElement(children: .contain)"
+        '.accessibilityIdentifier("iosforge.screen.0001")' in screen_id
+    )
     assert 'try waitForText(app, "ECHO:HELLO", timeout: 10.0)' in tests
     assert "enum Functional" in (paths.xcode_app / swf.FUNCTIONAL_SWIFT).read_text()
     assert [c.name for c in functional.app_checks(paths, _echo_spec())] == ["echo"]
@@ -309,13 +312,13 @@ def test_run_safely_retries_infra_and_never_raises(
 
     def boom_counting(p: RunPaths, **kw: Any) -> dict[str, Any]:
         calls.append(1)
-        raise KeyError("unknown mock")
+        raise functional.FunctionalConfigError("unknown mock")
 
     monkeypatch.setattr(functional, "run", boom_counting)
     report = functional.run_safely(paths, udid="U")
     assert report["infra_error"] and "unknown mock" in report["error"] and len(calls) == 1
     assert json.loads((paths.run_dir / functional.REPORT_NAME).read_text())["infra_error"]
-    assert functional.infra_errors(report)[0]["message"].startswith("'unknown mock'")
+    assert functional.infra_errors(report)[0]["message"] == "unknown mock"
 
 
 def test_mock_environment_rejects_foreign_and_colliding_keys() -> None:
@@ -332,7 +335,7 @@ def test_mock_environment_rejects_foreign_and_colliding_keys() -> None:
             )
         with pytest.raises(ValueError, match="must start with IOSFORGE_"):
             functional.mock_environment(stack, [_check(env={"API_KEY": "s"})])
-        with pytest.raises(KeyError, match="unknown mock"):
+        with pytest.raises(functional.FunctionalConfigError, match="unknown mock"):
             functional.mock_environment(stack, [_check(mock="nowhere")])
 
 
@@ -400,7 +403,7 @@ def test_driver_rejects_colliding_test_names_and_escapes_literals() -> None:
     assert swf.swift_literal('say "hi"\n\x07') == '"say \\"hi\\"\\n\\u{7}"'
     tests = swf.render_ui_tests([_check()], [])
     assert "no text field on screen to type '\\(text)' into" in tests
-    assert 'try tapAction(app, matching: "send", timeout: 10.0)' in tests
+    assert 'try tapAction(app, matching: "send", identifier: "", timeout: 10.0)' in tests
 
 
 @pytest.mark.mac

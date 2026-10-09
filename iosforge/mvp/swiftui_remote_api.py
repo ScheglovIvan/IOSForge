@@ -7,11 +7,14 @@ Screens only call that API (rule injected into every screen prompt). In function
 the base URL comes from ``IOSFORGE_REMOTE_API_URL`` (the local stub of :func:`stub_server`)
 and every request / response is journaled.
 
-``config`` keys (all optional): ``base_url``, ``path``, ``method`` (``POST`` | ``GET``),
-``input_field`` (request field carrying the user's text), ``output_field`` (dotted path
-into the JSON response, numeric parts index arrays) and ``headers`` (static, non-secret
-headers). A real production endpoint / key is the operator's input; functional
-verification proves the screen → module → stub integration only.
+``config`` keys (all optional): ``path``, ``method`` (``POST`` | ``GET``), ``input_field``
+(request field carrying the user's text), ``output_field`` (dotted path into the JSON
+response, numeric parts index arrays) and ``headers`` (static headers; secret-looking ones
+are dropped). The BASE URL is never taken from the analysis — an endpoint observed in the
+original app's traffic is that app's private backend — but only from the operator's
+build setting (``Job.source_app_metadata["remote_api_base_url"]`` →
+``Integrations.remote_api_url``); until then the module renders as not configured.
+Functional verification proves the screen → module → stub integration only.
 """
 
 from __future__ import annotations
@@ -33,7 +36,12 @@ KEY = "remote_api"
 MOCK = "remote_api_stub"
 STUB_REPLY = "IOSFORGE-STUB-REPLY"
 PROBE_INPUT = "hello from iosforge"
-ACTION_PATTERN = r"ask|send|generate|submit|translate|search|go|run|check|get|answer|create"
+ACTION_PATTERN = (
+    r"\b(ask|send|generate|submit|translate|search|answer|convert|summari[sz]e|explain|"
+    r"rewrite|identify|analy[sz]e|calculate)\b"
+)
+ACTION_ID = "iosforge.action"
+_SECRET_HEADER = re.compile(r"auth|token|key|secret|cookie|session|password", re.I)
 DEFAULT_INPUT_FIELD = "prompt"
 DEFAULT_OUTPUT_FIELD = "answer"
 
@@ -55,9 +63,14 @@ def _first_field(shape: object, preferred: tuple[str, ...], fallback: str) -> st
 
 def _base_url(value: object) -> str:
     text = str(value or "").strip()
-    if not re.fullmatch(r"https?://[^\s<>]+", text):
+    if not re.fullmatch(r"https://[^\s<>?#]+", text):
         return UNCONFIGURED_URL
-    return text
+    return text.rstrip("/")
+
+
+def _path(value: object) -> str:
+    text = str(value or "/").strip().split("?")[0].split("#")[0]
+    return "/" + text.lstrip("/")
 
 
 def _config(ctx: caps.CapabilityContext) -> dict[str, Any]:
@@ -70,8 +83,8 @@ def _config(ctx: caps.CapabilityContext) -> dict[str, Any]:
     headers = config.get("headers")
     method = str(config.get("method") or "POST").upper()
     return {
-        "base_url": _base_url(config.get("base_url")),
-        "path": str(config.get("path") or "/"),
+        "base_url": _base_url(ctx.integrations.remote_api_url),
+        "path": _path(config.get("path")),
         "method": method if method in ("POST", "GET") else "POST",
         "input_field": str(
             config.get("input_field")
@@ -81,9 +94,11 @@ def _config(ctx: caps.CapabilityContext) -> dict[str, Any]:
             config.get("output_field")
             or _first_field(config.get("response"), (), DEFAULT_OUTPUT_FIELD)
         ),
-        "headers": {str(k): str(v) for k, v in headers.items()}
-        if isinstance(headers, dict)
-        else {},
+        "headers": {
+            str(k): str(v)
+            for k, v in (headers.items() if isinstance(headers, dict) else [])
+            if not _SECRET_HEADER.search(str(k))
+        },
     }
 
 
@@ -144,8 +159,7 @@ enum RemoteAPI {{
     }}
 
     private static func makeRequest(_ input: String) throws -> URLRequest {{
-        let trimmedBase = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
-        guard var components = URLComponents(string: trimmedBase + path) else {{
+        guard var components = URLComponents(string: baseURL + path) else {{
             throw Failure(message: "Invalid service address.")
         }}
         if method == "GET" {{
@@ -186,9 +200,10 @@ SCREEN_RULE = (
     "  user's action call `let answer = try await RemoteAPI.send(text)` in a `Task`, show a\n"
     "  progress state while it runs, render the returned text on screen and show the error\n"
     "  message on failure. Keep the input in a `TextField`/`TextEditor` and the action in a\n"
-    "  `Button` whose label says what it does (Ask / Send / Translate / Generate ...). Never use\n"
-    "  URLSession, hard-coded answers or timers instead of the call; in headless mode show the\n"
-    "  fixture answer."
+    "  `Button` whose label says what it does (Ask / Send / Translate / Generate ...) and mark that\n"
+    f'  button `.accessibilityIdentifier("{ACTION_ID}")`. Never use URLSession, hard-coded answers\n'
+    "  or timers instead of the call. In headless mode `send` throws: show the fixture answer\n"
+    "  instead of the error."
 )
 
 
@@ -202,7 +217,7 @@ def functional_check(ctx: caps.CapabilityContext) -> FunctionalCheck | None:
         screen_id=screen,
         steps=(
             Step("type", PROBE_INPUT),
-            Step("tap", ACTION_PATTERN, timeout=10),
+            Step("tap", ACTION_PATTERN, timeout=10, identifier=ACTION_ID),
             Step("wait_text", STUB_REPLY, timeout=20),
         ),
         expect_events=("remote_api.request", "remote_api.response"),

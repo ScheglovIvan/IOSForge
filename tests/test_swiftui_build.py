@@ -292,6 +292,7 @@ def _save_settings(session: _Session, monkeypatch: pytest.MonkeyPatch) -> list[s
         "",
         "",
         "",
+        "",
         user,
         session,  # type: ignore[arg-type]
     )

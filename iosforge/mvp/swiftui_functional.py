@@ -48,6 +48,7 @@ class Step:
     kind: str
     value: str = ""
     timeout: float = 10.0
+    identifier: str = ""
 
 
 @dataclass(frozen=True)
@@ -133,7 +134,8 @@ def _step(step: Step) -> str:
         return f"        typeIntoFirstField(app, {_swift(step.value)})"
     if step.kind == "tap":
         return (
-            f"        try tapAction(app, matching: {_swift(step.value)}, timeout: {step.timeout})"
+            f"        try tapAction(app, matching: {_swift(step.value)}, "
+            f"identifier: {_swift(step.identifier)}, timeout: {step.timeout})"
         )
     if step.kind == "wait_text":
         return f"        try waitForText(app, {_swift(step.value)}, timeout: {step.timeout})"
@@ -190,6 +192,7 @@ final class FunctionalTests: XCTestCase {{
             for field in [app.textFields.firstMatch, app.textViews.firstMatch, app.searchFields.firstMatch]
             where field.exists && field.isHittable {{
                 field.tap()
+                _ = app.keyboards.firstMatch.waitForExistence(timeout: 5)
                 field.typeText(text)
                 return
             }}
@@ -198,7 +201,14 @@ final class FunctionalTests: XCTestCase {{
         XCTFail("no text field on screen to type '\\(text)' into")
     }}
 
-    private func tapAction(_ app: XCUIApplication, matching pattern: String, timeout: TimeInterval) throws {{
+    private func tapAction(_ app: XCUIApplication, matching pattern: String, identifier: String, timeout: TimeInterval) throws {{
+        if !identifier.isEmpty {{
+            let marked = app.buttons[identifier].firstMatch
+            if marked.waitForExistence(timeout: 2) && marked.isHittable {{
+                marked.tap()
+                return
+            }}
+        }}
         let exact = try NSRegularExpression(pattern: "^(?:" + pattern + ")$", options: [.caseInsensitive])
         let loose = try NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
         let deadline = Date().addingTimeInterval(timeout)

@@ -114,12 +114,18 @@ def verdict(
     }
 
 
+class FunctionalConfigError(ValueError):
+    """A functional check is misconfigured (deterministic: retrying cannot help)."""
+
+
 def _merge(environment: dict[str, str], values: dict[str, str], source: str) -> None:
     for key, value in values.items():
         if not key.startswith("IOSFORGE_"):
-            raise ValueError(f"{source}: mock setting {key!r} must start with IOSFORGE_")
+            raise FunctionalConfigError(f"{source}: mock setting {key!r} must start with IOSFORGE_")
         if key in environment and environment[key] != value:
-            raise ValueError(f"{source}: mock setting {key!r} collides with another check")
+            raise FunctionalConfigError(
+                f"{source}: mock setting {key!r} collides with another check"
+            )
         environment[key] = value
 
 
@@ -130,7 +136,9 @@ def mock_environment(stack: ExitStack, checks: list[FunctionalCheck]) -> dict[st
         if check.mock:
             factory = MOCKS.get(check.mock)
             if factory is None:
-                raise KeyError(f"functional check {check.name!r} needs unknown mock {check.mock!r}")
+                raise FunctionalConfigError(
+                    f"functional check {check.name!r} needs unknown mock {check.mock!r}"
+                )
             _merge(environment, stack.enter_context(factory(check)), check.name)
         _merge(environment, check.env, check.name)
     return environment
@@ -198,7 +206,7 @@ def run_safely(
     for _ in range(2):
         try:
             report = run(paths, udid=udid, spec=spec, timeout=timeout)
-        except (KeyError, ValueError) as exc:
+        except FunctionalConfigError as exc:
             log.error("functional.config_error", error=str(exc))
             report = {"ok": False, "infra_error": True, "checks": [], "error": str(exc)[:600]}
             _write(paths, report)

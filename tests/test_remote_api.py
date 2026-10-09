@@ -94,11 +94,12 @@ def test_stub_answers_post_and_get_at_the_output_path() -> None:
 
 def test_service_renders_the_configured_endpoint(tmp_path: Path) -> None:
     app = tmp_path / "xcode_app"
+    caps.integ.write(app, caps.integ.Integrations(remote_api_url="https://x.io/"))
     spec = _spec({"base_url": "https://x.io/", "path": "/q", "method": "get", "input_field": "q",
                   "output_field": "result", "headers": {"Accept": "application/json"}})  # fmt: skip
     swiftui_gen.write_scaffold(app, spec, app_name="Ask", bundle_id="dev.iosforge.ask")
     service = (app / "App/Capabilities/RemoteAPI.swift").read_text()
-    assert 'static let defaultBaseURL = "https://x.io/"' in service
+    assert 'static let defaultBaseURL = "https://x.io"' in service
     assert 'static let method = "GET"' in service and 'static let inputField = "q"' in service
     assert '"Accept": "application/json",' in service
     assert 'Functional.value("REMOTE_API_URL")' in service
@@ -156,6 +157,7 @@ def test_config_is_inferred_from_the_analysis_shapes(tmp_path: Path) -> None:
     swiftui_gen.write_scaffold(app, _spec(config), app_name="T", bundle_id="dev.iosforge.t")
     service = (app / "App/Capabilities/RemoteAPI.swift").read_text()
     assert f'static let defaultBaseURL = "{remote.UNCONFIGURED_URL}"' in service
+    assert "backend proxy" not in service
     assert 'static let inputField = "text"' in service
     assert 'static let outputField = "translation"' in service
     assert "needs its service endpoint configured" in service
@@ -212,3 +214,47 @@ def test_spec_without_capabilities_is_left_alone() -> None:
     storage = _Storage()
     storage.objects["jobs/j2/app_spec/app_spec.json"] = json.dumps(_spec_three_screens()).encode()
     assert not feasibility.save_routed_spec(storage, "j2", _scope())  # type: ignore[arg-type]
+
+
+def test_observed_endpoint_of_the_original_is_never_called(tmp_path: Path) -> None:
+    config = {
+        "base_url": "https://api.original-app.com",
+        "path": "v1/ask?key=AIzaSECRET",
+        "headers": {
+            "Authorization": "Bearer sk-live",
+            "X-Api-Key": "k",
+            "Accept": "application/json",
+        },
+    }
+    app = tmp_path / "xcode_app"
+    swiftui_gen.write_scaffold(app, _spec(config), app_name="T", bundle_id="dev.iosforge.t")
+    service = (app / "App/Capabilities/RemoteAPI.swift").read_text()
+    assert "original-app" not in service and remote.UNCONFIGURED_URL in service
+    assert 'static let path = "/v1/ask"' in service and "AIza" not in service
+    assert "sk-live" not in service and "X-Api-Key" not in service
+    assert '"Accept": "application/json",' in service
+
+
+def test_operator_endpoint_must_be_https_without_query(tmp_path: Path) -> None:
+    for url, expected in (
+        ("https://my.backend.io/", "https://my.backend.io"),
+        ("http://my.backend.io", remote.UNCONFIGURED_URL),
+        ("https://my.backend.io?x=1", remote.UNCONFIGURED_URL),
+    ):
+        app = tmp_path / f"app{abs(hash(url))}"
+        caps.integ.write(app, caps.integ.Integrations(remote_api_url=url))
+        swiftui_gen.write_scaffold(app, _spec(), app_name="T", bundle_id="dev.iosforge.t")
+        service = (app / "App/Capabilities/RemoteAPI.swift").read_text()
+        assert f'static let defaultBaseURL = "{expected}"' in service
+
+
+def test_action_step_prefers_the_marked_button() -> None:
+    ctx = caps.CapabilityContext(_spec(), caps.integ.Integrations(), _spec()["capabilities"][0])
+    check = remote.DESCRIPTOR.functional_check(ctx)
+    assert check is not None
+    tap = check.steps[1]
+    assert tap.identifier == remote.ACTION_ID and r"\bgo\b" not in tap.value
+    import re
+
+    assert not re.search(tap.value, "Go Pro", re.I) and re.search(tap.value, "Translate", re.I)
+    assert remote.ACTION_ID in remote.SCREEN_RULE

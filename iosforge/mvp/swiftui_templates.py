@@ -119,7 +119,9 @@ def render_screen_id(
             f"        case .{e.case_name}: {('.' + tab.case_name) if tab else 'nil'}"
         )
     owners = "\n".join(owner_lines)
-    marker = '.accessibilityIdentifier("iosforge.screen.{}")'
+    marker = (
+        '.accessibilityElement(children: .contain).accessibilityIdentifier("iosforge.screen.{}")'
+    )
     views = "\n".join(
         f"        case .{e.case_name}: {e.type_name}()"
         + (marker.format(e.screen_id) if screen_markers else "")

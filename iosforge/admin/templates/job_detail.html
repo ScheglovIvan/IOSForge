@@ -238,6 +238,16 @@
             <p class="hint">Also one key per app. Traffic sources are connected in the Tenjin dashboard —
               no rebuild needed to add one. Empty = attribution SDK is not wired in.</p>
           </div>
+          <div class="field">
+            <label>Remote API endpoint <span class="muted">(remote_api capability)</span></label>
+            <input type="url" name="remote_api_base_url" value="{{ meta.get('remote_api_base_url', '') }}"
+              placeholder="https://your-backend.example.com" pattern="https://[^?#]+">
+            <p class="hint">Your own backend the clone's API capability calls (https, no query). The
+              original app's endpoint is never used. Empty = the feature reports it is not configured.</p>
+          </div>
+          {% if meta.get('scope_routing_error') %}
+          <div class="alert alert--danger">Capability routing was not saved: {{ meta.get('scope_routing_error') }}</div>
+          {% endif %}
           <div class="form-actions">
             <button class="btn" type="submit" {{ 'disabled' if bs_busy else '' }}>Save &amp; rebuild</button>
             {% if bs_busy %}<span class="hint">Pipeline is busy…</span>{% endif %}

@@ -14,6 +14,7 @@ module named by its ``module`` key (:mod:`iosforge.mvp.capability_registry`).
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -249,6 +250,7 @@ def directories() -> tuple[str, ...]:
     return tuple(dict.fromkeys([MONETIZATION_DIR, CAPABILITIES_DIR]))
 
 
+_LOAD_LOCK = threading.Lock()
 _LOADED: list[bool] = []
 
 
@@ -256,7 +258,10 @@ def load_modules() -> None:
     """Register the built-in capability modules once (lazily, to avoid import cycles)."""
     if _LOADED:
         return
-    _LOADED.append(True)
-    from iosforge.mvp import swiftui_remote_api
+    with _LOAD_LOCK:
+        if _LOADED:
+            return
+        from iosforge.mvp import swiftui_remote_api
 
-    swiftui_remote_api.register()
+        swiftui_remote_api.register()
+        _LOADED.append(True)

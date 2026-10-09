@@ -260,6 +260,7 @@ def jobs_build_settings(
     apphud_api_key: str = Form(""),
     tenjin_api_key: str = Form(""),
     appstore_apple_id: str = Form(""),
+    remote_api_base_url: str = Form(""),
     user: SessionData = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> Response:
@@ -292,6 +293,9 @@ def jobs_build_settings(
         return Response("Invalid Tenjin SDK key.", status_code=400)
     if appstore_apple_id and not re.fullmatch(r"[0-9]{5,15}", appstore_apple_id):
         return Response("Invalid App Store Apple ID (numbers only).", status_code=400)
+    remote_api_base_url = (remote_api_base_url or "").strip().rstrip("/")
+    if remote_api_base_url and not re.fullmatch(r"https://[^\s<>?#]{4,200}", remote_api_base_url):
+        return Response("Invalid remote API endpoint (https, no query).", status_code=400)
 
     meta = dict(job.source_app_metadata or {})
     meta["build_profile"] = profile
@@ -301,6 +305,7 @@ def jobs_build_settings(
     meta["apphud_api_key"] = apphud_api_key
     meta["tenjin_api_key"] = tenjin_api_key
     meta["appstore_apple_id"] = appstore_apple_id
+    meta["remote_api_base_url"] = remote_api_base_url
     job.source_app_metadata = meta  # reassign so SQLAlchemy persists the JSONB change
     db.commit()
 
@@ -879,8 +884,10 @@ async def jobs_scope_approve(
     ref = feasibility.save_scope(storage, str(job_id), scope)
     try:
         feasibility.save_routed_spec(storage, str(job_id), scope)
+        meta.pop("scope_routing_error", None)
     except Exception as exc:
-        log.error("jobs.scope_routing_not_saved", job_id=str(job_id), error=str(exc))
+        log.exception("jobs.scope_routing_not_saved", job_id=str(job_id), error=str(exc))
+        meta["scope_routing_error"] = str(exc)[:500]
 
     meta["scope_status"] = "approved"
     meta["scope_version_id"] = ref.version_id
