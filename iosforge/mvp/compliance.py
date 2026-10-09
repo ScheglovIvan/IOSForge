@@ -32,8 +32,9 @@ from typing import Any
 
 from iosforge.common.config import Settings
 from iosforge.common.logging import get_logger
-from iosforge.mvp import claude_gen
+from iosforge.mvp import claude_gen, simulator, xcode
 from iosforge.mvp.paths import RunPaths
+from iosforge.mvp.swiftui_ads import is_ad_component
 
 log = get_logger("mvp.compliance")
 
@@ -53,14 +54,23 @@ _NAV_CALL_RES: tuple[tuple[re.Pattern[str], str], ...] = (
 _GOROUTE_WINDOW = 240
 
 JUDGE_PROMPT = """\
-You are judging how faithfully a generated Flutter app reproduces an original
-Android app, screen by screen, from screenshots.
+You are judging how faithfully a generated native iOS (SwiftUI) app reproduces an
+original iOS app, screen by screen, from screenshots.
 
 In this directory:
 - `screens/<id>.png` — the ORIGINAL (target) screenshots.
-- `generated_screens/<id>.png` — the GENERATED app's screenshots, rendered by
-  deep link `iosforge://screen/<id>`. A missing file means that screen failed to
-  render.
+- `generated_screens/<id>.png` — the GENERATED app's screenshots, rendered on the
+  iOS Simulator by launching the app with `-screen-id <id>`. A missing file means
+  that screen failed to render.
+- `removed_ads.json` (when present) — per screen id, the advertising the ORIGINAL
+  showed and the clone removes ON PURPOSE (ad events captured on the device, ad
+  components removed from the spec, analysis notes).
+
+The clone ships WITHOUT advertising. Ad banners, native ad cards, app-open /
+interstitial / rewarded overlays, "Loading ads" states and "may contain ads"
+disclaimers on an ORIGINAL screenshot are NOT expected in the clone: never lower
+`structure_score` for their absence and never list them in `diffs` — judge the
+structure as if the ad were not on the original (the content around it reflows).
 
 This clone DELIBERATELY uses a different visual design (new palette, gradients,
 fonts, button styles) while keeping the SAME structure. So do NOT reward visual
@@ -356,6 +366,124 @@ def aggregate(
         },
         "screens": screens,
     }
+
+
+_SENTENCE = re.compile(r"(?<=[.;!?])\s+")
+_AD_WORD = re.compile(r"\b(?:ads?|advert\w*|interstitial)\b", re.I)
+_PROJECT_NAME = re.compile(r"^name:\s*(\S+)", re.M)
+_PROJECT_BUNDLE = re.compile(r"PRODUCT_BUNDLE_IDENTIFIER:\s*(\S+)")
+REMOVED_ADS_JSON = "removed_ads.json"
+
+
+def removed_ads(paths: RunPaths) -> dict[str, list[str]]:
+    """Per original screen, the advertising the clone removes on purpose (facts, not vision).
+
+    Sources: Frida ``ads_raw.json`` ad events (provider + format per screen), app_spec
+    components that are ads, and app_spec ``layout_notes`` sentences about removed ads.
+    """
+    facts: dict[str, list[str]] = {}
+
+    def add(screen: object, fact: str) -> None:
+        sid = str(screen)
+        if sid and sid != "None" and fact not in facts.setdefault(sid, []):
+            facts[sid].append(fact)
+
+    if paths.ads_raw_json.is_file():
+        raw = json.loads(paths.ads_raw_json.read_text(encoding="utf-8"))
+        for event in raw.get("ad_events", []) if isinstance(raw, dict) else []:
+            if isinstance(event, dict):
+                provider = event.get("provider", "ad network")
+                add(event.get("screen"), f"captured ad: {provider} {event.get('format', 'ad')}")
+    if paths.app_spec_json.is_file():
+        spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
+        for screen in spec.get("screens", []) if isinstance(spec, dict) else []:
+            if not isinstance(screen, dict):
+                continue
+            for component in screen.get("components", []) or []:
+                if isinstance(component, dict) and is_ad_component(component):
+                    add(
+                        screen.get("id"),
+                        f"ad component: {component.get('type')} / {component.get('role')} "
+                        f"{str(component.get('data') or '')[:80]}".strip(),
+                    )
+            for note in _SENTENCE.split(str(screen.get("layout_notes") or "")):
+                if _AD_WORD.search(note):
+                    add(screen.get("id"), f"analysis note: {note.strip()}")
+    return facts
+
+
+def _project_value(paths: RunPaths, pattern: re.Pattern[str], what: str) -> str:
+    project = paths.xcode_app / "project.yml"
+    match = pattern.search(project.read_text(encoding="utf-8")) if project.is_file() else None
+    if match is None:
+        raise RuntimeError(f"no {what} in {project}")
+    return match.group(1)
+
+
+def build_ios(paths: RunPaths, *, timeout: int = 1800) -> Path:
+    """XcodeGen + xcodebuild the generated ``xcode_app`` for the iOS Simulator; return the .app.
+
+    Raises :class:`~iosforge.mvp.simulator.SimulatorUnavailable` off-Mac and
+    ``RuntimeError`` with the build errors when the project does not compile.
+    """
+    simulator.require_toolchain()
+    scheme = _project_value(paths, _PROJECT_NAME, "target name")
+    derived = paths.run_dir / "DerivedData"
+    xcode.generate_project(paths.xcode_app)
+    outcome = xcode.build(paths.xcode_app, scheme, derived_data=derived, timeout=timeout)
+    (paths.run_dir / "xcodebuild.log").write_text(outcome.log, encoding="utf-8")
+    if not outcome.ok:
+        raise RuntimeError(f"xcodebuild failed: {outcome.errors[:20]}")
+    return xcode.built_app(derived, scheme)
+
+
+def render_generated_ios(
+    paths: RunPaths,
+    env: simulator.SimEnvironment,
+    *,
+    app: Path,
+    screen_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Install ``app`` and render each original screen on the iOS Simulator.
+
+    Pins the environment once, relaunches per screen with ``-screen-id`` and the job
+    locale, keeps only stable frames (:func:`~iosforge.mvp.simulator.capture_stable`)
+    and writes the same ``generated_screens.json`` the web renderer produced (plus
+    per-screen ``frames`` / ``frame_diff`` evidence), so matching, judging and scoring
+    are unchanged. Also writes ``removed_ads.json`` into the judge workspace.
+    """
+    bound = log.bind(stage="compliance.render_ios", run_dir=str(paths.run_dir))
+    simulator.require_toolchain()
+    bundle_id = _project_value(paths, _PROJECT_BUNDLE, "bundle id")
+    simulator.pin_environment(env)
+    xcode.install(env.udid, app)
+    generated: list[dict[str, Any]] = []
+    for sid in screen_ids if screen_ids is not None else _original_screen_ids(paths):
+        shot = simulator.render_screen(
+            env, bundle_id, sid, paths.generated_screens_dir / f"{sid}.png"
+        )
+        generated.append(
+            {
+                "id": sid,
+                "screenshot": f"generated_screens/{sid}.png",
+                "frames": shot.frames,
+                "frame_diff": round(shot.diff, 5),
+                "blank": shot.blank,
+            }
+        )
+    result = {
+        "package": "ios",
+        "locale": env.locale,
+        "appearance": env.appearance,
+        "screens": generated,
+    }
+    paths.generated_screens_json.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    paths.claude_ws.mkdir(parents=True, exist_ok=True)
+    (paths.claude_ws / REMOVED_ADS_JSON).write_text(
+        json.dumps(removed_ads(paths), indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    bound.info("compliance.render_ios.done", screens=len(generated), locale=env.locale)
+    return result
 
 
 def _prepare_judge_workspace(paths: RunPaths) -> None:

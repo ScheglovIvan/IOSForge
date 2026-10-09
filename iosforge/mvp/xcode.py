@@ -143,9 +143,32 @@ def install(udid: str, app: Path) -> None:
     simctl("install", udid, str(app))
 
 
-def launch_screen(udid: str, bundle_id: str, screen_id: str) -> None:
-    """Relaunch the app headlessly on ``screen_id`` (SCREEN_NAV_CONTRACT entry point)."""
-    simctl("launch", "--terminate-running-process", udid, bundle_id, "-screen-id", screen_id)
+def launch_screen(
+    udid: str, bundle_id: str, screen_id: str, *, extra_args: tuple[str, ...] = ()
+) -> None:
+    """Relaunch the app headlessly on ``screen_id`` (SCREEN_NAV_CONTRACT entry point).
+
+    ``extra_args`` are appended app launch arguments (e.g. ``-AppleLanguages (en)``).
+    """
+    simctl(
+        "launch",
+        "--terminate-running-process",
+        udid,
+        bundle_id,
+        "-screen-id",
+        screen_id,
+        *extra_args,
+    )
+
+
+def set_appearance(udid: str, appearance: str) -> None:
+    """Pin the simulator's light/dark appearance (SIMULATOR_ENV_CONTRACT)."""
+    simctl("ui", udid, "appearance", appearance)
+
+
+def set_content_size(udid: str, size: str) -> None:
+    """Pin the Dynamic Type content size category (e.g. ``large``, the iOS default)."""
+    simctl("ui", udid, "content_size", size)
 
 
 def screenshot(udid: str, out: Path) -> Path:
