@@ -119,7 +119,13 @@ def hold_reason(report: dict[str, Any], *, structural_gate: bool) -> str | None:
         return None
     counts = ", ".join(
         f"{key.replace('_', ' ')} {len(structural.get(key) or [])}"
-        for key in ("missing_screens", "blank_screens", "dead_links", "missing_edges")
+        for key in (
+            "missing_screens",
+            "blank_screens",
+            "dead_links",
+            "missing_edges",
+            "functional_failures",
+        )
     )
     return (
         f"held for the operator: structural gaps remain after refine "

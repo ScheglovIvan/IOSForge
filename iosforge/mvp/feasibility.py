@@ -205,9 +205,12 @@ def _parse_proposal(payload: dict[str, Any], spec: dict[str, Any]) -> ScopeDecis
 
 def _coerce_tier(value: object) -> Literal[1, 2, 3, 4] | None:
     try:
-        tier = int(float(str(value)))
+        number = float(str(value))
     except ValueError:
         return None
+    if not number.is_integer():
+        return None
+    tier = int(number)
     if tier == 1:
         return 1
     if tier == 2:

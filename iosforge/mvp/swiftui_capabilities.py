@@ -20,6 +20,7 @@ from typing import Any
 
 from iosforge.mvp import capability_registry
 from iosforge.mvp import swiftui_integrations as integ
+from iosforge.mvp.swiftui_functional import FunctionalCheck
 
 MONETIZATION_DIR = "App/Monetization"
 CAPABILITIES_DIR = "App/Capabilities"
@@ -66,8 +67,7 @@ class CapabilityDescriptor:
     info_properties: Callable[[CapabilityContext], list[str]] = lambda ctx: []
     prompters: Callable[[CapabilityContext], tuple[str, ...]] = lambda ctx: ()
     rule_applies: Callable[[CapabilityContext], bool] = lambda ctx: True
-    mock: str = ""
-    functional_check: str = ""
+    functional_check: Callable[[CapabilityContext], FunctionalCheck | None] = lambda ctx: None
 
 
 def _subscriptions_packages(ctx: CapabilityContext) -> tuple[SwiftPackage, ...]:
@@ -224,6 +224,22 @@ def screen_rules(selected: list[Selected]) -> list[str]:
         for item in selected
         if item.descriptor.screen_api_rule and item.descriptor.rule_applies(item.context)
     ]
+
+
+def functional_checks(selected: list[Selected]) -> list[FunctionalCheck]:
+    """The functional checks of the selected modules (modules without one add none)."""
+    checks: list[FunctionalCheck] = []
+    for item in selected:
+        check = item.descriptor.functional_check(item.context)
+        if check is not None:
+            checks.append(check)
+    return checks
+
+
+def capability_screen(ctx: CapabilityContext) -> str:
+    """The first screen that surfaces the module's capability (where its check runs)."""
+    screens = ctx.capability.get("screens") or []
+    return str(screens[0]) if screens else ""
 
 
 def directories() -> tuple[str, ...]:

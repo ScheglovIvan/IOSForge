@@ -271,8 +271,8 @@ def test_launch_screens_render_into_the_scaffold(tmp_path: Path) -> None:
     assert "router.presentLaunch()" in (app / "App/App.swift").read_text()
     router = (app / "App/Navigation/Router.swift").read_text()
     assert 'let key = "iosforge.launch_shown.\\(entry.screen.rawValue)"' in router
-    assert "        selectedTab = .home\n        presentLaunch()\n" in router
-    assert "    @MainActor\n    func finishOnboarding()" in router
+    assert "        Task { @MainActor in self.presentLaunch() }\n" in router
+    assert "    @MainActor\n    func finishOnboarding()" not in router
 
 
 def test_no_launch_screens_keep_the_entry_point_plain(tmp_path: Path) -> None:
@@ -339,3 +339,4 @@ def test_old_scope_json_without_routing_still_loads() -> None:
 
 def test_tier_coercion_accepts_float_strings() -> None:
     assert feasibility._coerce_tier("2.0") == 2 and feasibility._coerce_tier(None) is None
+    assert feasibility._coerce_tier("inf") is None and feasibility._coerce_tier("2.7") is None

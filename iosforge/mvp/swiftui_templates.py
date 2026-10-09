@@ -347,11 +347,10 @@ def render_router(*, launch: bool = False) -> str:
     """``Router``; with ``launch`` it also presents the launch screens (after onboarding too)."""
     if not launch:
         return ROUTER
-    finish = "    func finishOnboarding() {"
-    router = ROUTER.replace(finish, "    @MainActor\n" + finish, 1)
-    router = router.replace(
+    router = ROUTER.replace(
         "        onboarding = nil\n        selectedTab = .home\n    }\n",
-        "        onboarding = nil\n        selectedTab = .home\n        presentLaunch()\n    }\n",
+        "        onboarding = nil\n        selectedTab = .home\n"
+        "        Task { @MainActor in self.presentLaunch() }\n    }\n",
         1,
     )
     return router.replace(

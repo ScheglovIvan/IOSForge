@@ -8,6 +8,7 @@ real toolchain is only exercised on the Mac worker. A missing toolchain makes
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -122,6 +123,90 @@ def build(
     if res.returncode != 0 and not errors:
         errors = [f"xcodebuild exited {res.returncode}: {output.strip()[-1500:]}"]
     return BuildOutcome(ok=res.returncode == 0, errors=errors, log=output)
+
+
+_TEST_CASE = re.compile(r"Test Case '-\[[\w.]+ (test\w*)\]' (passed|failed)")
+_TEST_FAILURE = re.compile(r"error: -\[[\w.]+ (test\w*)\] : (.+)")
+
+
+@dataclass(frozen=True)
+class UITestOutcome:
+    """Result of an ``xcodebuild test`` run: which test methods passed or failed (and why)."""
+
+    ok: bool
+    passed: list[str]
+    failed: dict[str, str]
+    log: str
+
+
+def parse_ui_tests(output: str) -> tuple[list[str], dict[str, str]]:
+    """Passed test names and failed test name → first failure message, from xcodebuild output."""
+    passed: list[str] = []
+    failed: dict[str, str] = {}
+    reasons: dict[str, str] = {}
+    for match in _TEST_FAILURE.finditer(output):
+        reasons.setdefault(match.group(1), match.group(2).strip())
+    for match in _TEST_CASE.finditer(output):
+        name, verdict = match.group(1), match.group(2)
+        if verdict == "passed":
+            if name not in passed:
+                passed.append(name)
+        else:
+            failed[name] = reasons.get(name, "test failed")
+    return passed, failed
+
+
+def run_ui_tests(
+    app_dir: Path,
+    scheme: str,
+    *,
+    udid: str,
+    derived_data: Path,
+    environment: dict[str, str] | None = None,
+    only: list[str] | None = None,
+    timeout: int = 1800,
+) -> UITestOutcome:
+    """``xcodebuild test`` of the scheme's UI tests on simulator ``udid``, signing off.
+
+    ``environment`` values reach the test runner (``TEST_RUNNER_`` prefix), which forwards
+    them to the app it launches; ``only`` limits the run to ``Target/Class/method`` ids.
+    """
+    project = next(app_dir.glob("*.xcodeproj"), None)
+    if project is None:
+        raise XcodeError(f"no .xcodeproj in {app_dir} (run generate_project first)")
+    env = {**os.environ, **{f"TEST_RUNNER_{k}": v for k, v in (environment or {}).items()}}
+    cmd = [
+        XCODEBUILD_BIN,
+        "test",
+        "-project",
+        project.name,
+        "-scheme",
+        scheme,
+        "-destination",
+        f"id={udid}",
+        "-derivedDataPath",
+        str(derived_data),
+        "CODE_SIGNING_ALLOWED=NO",
+        *[f"-only-testing:{test}" for test in only or []],
+    ]
+    try:
+        res = _run(cmd, cwd=app_dir, timeout=timeout, env=env)
+    except XcodeError as exc:
+        return UITestOutcome(ok=False, passed=[], failed={"xcodebuild": str(exc)}, log="")
+    output = f"{res.stdout}\n{res.stderr}"
+    passed, failed = parse_ui_tests(output)
+    if res.returncode != 0 and not failed:
+        failed["xcodebuild"] = f"xcodebuild test exited {res.returncode}: {output.strip()[-1500:]}"
+    return UITestOutcome(
+        ok=res.returncode == 0 and not failed, passed=passed, failed=failed, log=output
+    )
+
+
+def app_data_container(udid: str, bundle_id: str) -> Path | None:
+    """The app's data container on the simulator (None when the app is not installed)."""
+    res = _run([XCRUN_BIN, "simctl", "get_app_container", udid, bundle_id, "data"], timeout=60)
+    path = res.stdout.strip()
+    return Path(path) if res.returncode == 0 and path else None
 
 
 @dataclass(frozen=True)

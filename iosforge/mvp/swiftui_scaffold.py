@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from iosforge.mvp import swiftui_capabilities as caps
+from iosforge.mvp import swiftui_functional as functional
 from iosforge.mvp import swiftui_integrations as integ
 from iosforge.mvp import swiftui_media
 from iosforge.mvp import swiftui_templates as tpl
@@ -53,6 +54,7 @@ CONTRACT_DIRS = (
     PERMISSIONS_DIR,
     "App/Support",
     *caps.directories(),
+    functional.UI_TESTS_DIR,
 )
 ICON_SET = "Resources/Assets.xcassets/AppIcon.appiconset"
 ICON_FILE = "app_icon.png"
@@ -63,7 +65,7 @@ _ICON_CONTENTS = (
     '  "info" : {\n    "author" : "xcode",\n    "version" : 1\n  }\n}\n'
 )
 MODEL_DIRS = ("App/Theme", "App/Components", "App/Features", "App/Fixtures")
-APP_ROOT_ENTRIES = {"project.yml", "App", "Resources", "Config"}
+APP_ROOT_ENTRIES = {"project.yml", "App", "Resources", "Config", functional.UI_TESTS_DIR}
 
 _FULL_SCREEN = re.compile(r"\b(paywall|subscription|upgrade)\b", re.I)
 _MODAL = re.compile(r"\b(sheet|modal|popup|pop-up|dialog|alert|picker)\b", re.I)
@@ -280,6 +282,7 @@ def render_project_yml(
     has_icon: bool = False,
     integrations: integ.Integrations | None = None,
     selected: list[caps.Selected] | None = None,
+    functional_tests: bool = False,
 ) -> str:
     """XcodeGen spec: one iOS app target with a scheme, signing off, Info.plist in Config/.
 
@@ -298,7 +301,11 @@ def render_project_yml(
         f"  {target}:",
         "    type: application",
         "    platform: iOS",
-        "    scheme: {}",
+        *(
+            ["    scheme:", f"      testTargets: [{functional.UI_TEST_TARGET}]"]
+            if functional_tests
+            else ["    scheme: {}"]
+        ),
         "    sources:",
         "      - path: App",
     ]
@@ -340,6 +347,8 @@ def render_project_yml(
         for line in caps.info_properties(modules, extras)
         if line.split(":")[0].strip() not in purpose_strings
     ]
+    if functional_tests:
+        lines += functional.project_target(target, bundle_id)
     return "\n".join(lines) + "\n"
 
 
@@ -357,6 +366,7 @@ def render_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) 
     media = app_dir / "Resources" / "Media"
     integrations = integ.load(app_dir)
     selected = caps.select(spec, integrations)
+    checks = caps.functional_checks(selected)
     launch = launch_screens(spec, plan)
     has_icon = (app_dir / ICON_SET / ICON_FILE).is_file()
     files = {
@@ -370,6 +380,7 @@ def render_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) 
             has_icon=has_icon,
             integrations=integrations,
             selected=selected,
+            functional_tests=bool(checks),
         ),
         **caps.render_files(selected),
         "App/App.swift": tpl.render_app(target, caps.startup_calls(selected), launch=bool(launch)),
@@ -381,6 +392,7 @@ def render_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) 
         f"{PERMISSIONS_DIR}/Permissions.swift": tpl.render_permissions(),
         "App/Support/MediaAsset.swift": tpl.MEDIA,
     }
+    files.update(functional.render_files(checks, [item["screen_id"] for item in launch]))
     if has_icon:
         files["Resources/Assets.xcassets/Contents.json"] = _CATALOG_CONTENTS
         files[f"{ICON_SET}/Contents.json"] = _ICON_CONTENTS

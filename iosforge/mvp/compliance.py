@@ -28,7 +28,7 @@ from typing import Any
 
 from iosforge.common.config import Settings
 from iosforge.common.logging import get_logger
-from iosforge.mvp import claude_gen, simulator, swiftui_gen, xcode
+from iosforge.mvp import claude_gen, functional, simulator, swiftui_gen, xcode
 from iosforge.mvp.paths import RunPaths
 from iosforge.mvp.swiftui_ads import is_ad_component
 from iosforge.mvp.swiftui_permissions import blank_comments_and_strings
@@ -497,6 +497,19 @@ def diffs_to_tasks(report: dict[str, Any], iteration: int) -> dict[str, Any]:
                     "deps": [],
                 }
             )
+        for finding in structural.get("functional_failures", []):
+            sid = str(finding.get("id"))
+            tasks.append(
+                {
+                    "id": f"functional-{iteration}-{sid}-{finding.get('capability')}",
+                    "type": "fix_functional",
+                    "title": f"Make capability {finding.get('capability')} work on screen {sid}",
+                    "screens": [sid],
+                    "capability": str(finding.get("capability")),
+                    "message": str(finding.get("message")),
+                    "deps": [],
+                }
+            )
         for finding in structural.get("blank_screens", []):
             sid = str(finding.get("id"))
             tasks.append(
@@ -795,9 +808,13 @@ def verify_ios(
     """One-pass iOS check: build, render every screen on the Simulator, vision-judge."""
     app = build_ios(paths)
     render_generated_ios(paths, env, app=app)
-    return evaluate(
+    report = evaluate(
         paths, 0, weights=weights, threshold=threshold, soft_floor=soft_floor, history=[]
     )
+    spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
+    if functional.app_checks(paths, spec):
+        report["functional"] = functional.run(paths, udid=env.udid, spec=spec)
+    return report
 
 
 def refine_ios_until_complete(
@@ -822,9 +839,15 @@ def refine_ios_until_complete(
     are the unchanged :func:`_refine`.
     """
 
+    spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
+    functional_report: dict[str, Any] = {}
+
     def _prepare() -> None:
         app = build_ios(paths, timeout=timeout)
         render_generated_ios(paths, env, app=app)
+        if functional.app_checks(paths, spec):
+            functional_report.clear()
+            functional_report.update(functional.run(paths, udid=env.udid, spec=spec))
 
     def _audit() -> dict[str, Any]:
         structural = nav_audit_ios(paths)
@@ -842,6 +865,10 @@ def refine_ios_until_complete(
                 flagged[str(screen["id"])] = {"id": str(screen["id"]), "reason": reason}
         structural["blank_screens"] = list(flagged.values())
         structural["ok"] = bool(structural["ok"]) and not structural["blank_screens"]
+        if functional_report:
+            structural["functional"] = dict(functional_report)
+            structural["functional_failures"] = functional.failing_screens(functional_report)
+            structural["ok"] = structural["ok"] and bool(functional_report.get("ok"))
         return structural
 
     return _refine(

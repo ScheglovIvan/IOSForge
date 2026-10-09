@@ -278,6 +278,13 @@ def _corrective_task_text(task: dict[str, object], entry: ScreenEntry) -> str:
             "The screen renders blank or failed to render. Implement it fully so it draws its "
             f"content on the first frame in headless mode (`-screen-id {entry.screen_id}`)."
         )
+    if kind == "fix_functional":
+        return (
+            f"The capability `{task.get('capability')}` does NOT WORK on this screen — its "
+            f"functional check failed: {task.get('message')}. Wire the screen to the capability "
+            "module API from the rules (a real call from the user action, the result shown on "
+            "screen); never fake it with timers or fixtures outside headless mode. Keep the layout."
+        )
     if kind == "add_edge":
         via = task.get("via_element") or "the matching control"
         target = f"`router.show(.{task.get('to_case')})` (screen {task.get('to')})"
