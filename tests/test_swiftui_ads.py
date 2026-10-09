@@ -44,6 +44,8 @@ def test_ad_components_are_detected(component: dict[str, Any]) -> None:
         {"type": "paywall", "role": "paywall", "data": "Unlimited scans; Remove ads; Weekly"},
         {"type": "feature_row", "role": "benefit", "data": "Ad-free experience"},
         {"type": "gadget_card", "role": "promo", "data": "Gadget picks"},
+        {"type": "paywall_overlay", "role": "paywall", "data": "Go Pro; No ads"},
+        {"type": "text", "role": "offer", "data": "Unlock all tools, no ads"},
     ],
 )
 def test_regular_components_are_kept(component: dict[str, Any]) -> None:
@@ -133,4 +135,39 @@ def test_multiline_string_ad_text_fails_the_gate(tmp_path: Path) -> None:
 
 def test_gadget_identifier_is_not_an_ad_type(tmp_path: Path) -> None:
     _write(tmp_path, "App/Features/0000/Screen0000View.swift", "let GADGET = 1\nlet x = GADGET\n")
+    assert ad_violations(tmp_path) == []
+
+
+@pytest.mark.parametrize("text", ["Watch video tutorial", "Watch video guide", "Watch videos"])
+def test_plain_video_text_is_not_an_ad(tmp_path: Path, text: str) -> None:
+    _write(tmp_path, "App/Features/0000/Screen0000View.swift", f'Text("{text}")\n')
+    assert ad_violations(tmp_path) == []
+    clean, removed = strip_ad_components(
+        {"screens": [{"components": [{"type": "card", "data": text}]}]}
+    )
+    assert removed == 0 and clean["screens"][0]["components"][0]["data"] == text
+
+
+def test_video_ad_offers_are_still_ads(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "App/Features/0000/Screen0000View.swift",
+        'Text("Watch a video ad")\nText("Watch video to earn coins")\n',
+    )
+    assert len(ad_violations(tmp_path)) == 2
+
+
+def test_scrub_drops_dangling_joiners() -> None:
+    clean, _ = strip_ad_components(
+        {
+            "screens": [
+                {"components": [{"type": "card", "data": "Remove ads and unlock all features"}]}
+            ]
+        }
+    )
+    assert clean["screens"][0]["components"][0]["data"] == "unlock all features"
+
+
+def test_import_matches_whole_module_names(tmp_path: Path) -> None:
+    _write(tmp_path, "App/Features/0000/Screen0000View.swift", "import StartAppKit\n")
     assert ad_violations(tmp_path) == []

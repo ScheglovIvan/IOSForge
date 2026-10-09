@@ -73,15 +73,32 @@ _TEXT_CARRIERS = {
 }
 _AD_PHRASE = (
     r"loading\s+ads?|(?:may|might|can)\s+contain\s+ads?|advertisements?|advertising|"
-    r"sponsored|ads\s+by\b[^;,.]*|watch\s+(?:an?\s+)?(?:ad|video(?:\s+ad)?)(?:\s+to\s+\w+)?|"
+    r"sponsored|ads\s+by\b[^;,.]*|watch\s+(?:an?\s+)?ad(?:\s+to\s+\w+)?|"
+    r"watch\s+(?:an?\s+)?video\s+(?:ad\b|to\s+(?:unlock|get|earn|claim|continue|remove)\b)|"
     r"remove\s+(?:all\s+)?ads|ad[-\s]free(?:\s+experience)?|no\s+(?:more\s+)?ads"
 )
 _AD_TEXT = re.compile(rf"\b(?:{_AD_PHRASE})\b", re.I)
 _AD_PHRASE_IN_DATA = re.compile(rf"\s*[;,/•|-]?\s*\b(?:{_AD_PHRASE})\b\s*[;,/•|-]?", re.I)
+_MONETIZATION = {
+    "paywall",
+    "upsell",
+    "offer",
+    "plan",
+    "promo",
+    "price",
+    "pricing",
+    "subscription",
+    "pro",
+    "premium",
+    "trial",
+    "purchase",
+    "benefit",
+}
+_LEADING_JOINER = re.compile(r"^(?:and|&|or|plus)\s+", re.I)
 _AD_LABEL = re.compile(r"^\s*(?:ad|ads)\s*$", re.I)
 _AD_IMPORT = re.compile(
     rf"^\s*(?:@_exported\s+)?import\s+(?:(?:struct|class|enum|protocol|func|typealias|var|let)"
-    rf"\s+)?((?:{'|'.join(AD_SDK_MODULES)})\w*)",
+    rf"\s+)?((?:{'|'.join(AD_SDK_MODULES)})(?:Mediation\w*|Adapter\w*)?)\b",
     re.M,
 )
 _AD_TYPES = re.compile(
@@ -105,12 +122,15 @@ def is_ad_component(component: dict[str, Any]) -> bool:
     kind = _words(component.get("type")) | _words(component.get("role"))
     if kind & _AD_TOKENS:
         return True
+    if kind & _MONETIZATION:
+        return False
     return bool(kind & _TEXT_CARRIERS) and bool(_AD_TEXT.search(str(component.get("data") or "")))
 
 
 def _scrub(data: str) -> str:
     cleaned = _AD_PHRASE_IN_DATA.sub("; ", data)
-    return re.sub(r"(?:\s*;\s*)+", "; ", cleaned).strip(" ;")
+    parts = [_LEADING_JOINER.sub("", part.strip()) for part in re.split(r"\s*;\s*", cleaned)]
+    return "; ".join(part for part in parts if part)
 
 
 def strip_ad_components(spec: dict[str, Any]) -> tuple[dict[str, Any], int]:
