@@ -136,6 +136,7 @@ def job_integrations(
         skadnetwork_plist=Path(settings.skadnetwork_ids_path),
         export_compliance_exempt=exempt if isinstance(exempt, bool) else None,
         remote_api_url=str(meta.get("remote_api_base_url") or ""),
+        content_feed_url=str(meta.get("content_feed_url") or ""),
     )
 
 

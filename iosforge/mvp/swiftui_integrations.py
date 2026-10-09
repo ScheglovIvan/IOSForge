@@ -48,6 +48,7 @@ class Integrations:
     skadnetwork_ids: list[str] = field(default_factory=list)
     products: list[FixtureProduct] = field(default_factory=list)
     remote_api_url: str = ""
+    content_feed_url: str = ""
 
     @property
     def subscriptions(self) -> bool:
@@ -103,6 +104,7 @@ def collect(
     skadnetwork_plist: Path,
     export_compliance_exempt: bool | None,
     remote_api_url: str = "",
+    content_feed_url: str = "",
 ) -> Integrations:
     """Gather the job's integration inputs (provisioning outputs + build metadata)."""
     apphud = _read_json(apphud_config)
@@ -116,6 +118,7 @@ def collect(
         skadnetwork_ids=skadnetwork_ids(skadnetwork_plist) if tenjin.get("sdk_key") else [],
         products=fixture_products(spec, [str(p) for p in apphud.get("products") or []]),
         remote_api_url=remote_api_url,
+        content_feed_url=content_feed_url,
     )
 
 
@@ -154,6 +157,7 @@ def load(app_dir: Path) -> Integrations:
         "tenjin_key",
         "att_usage_description",
         "remote_api_url",
+        "content_feed_url",
     ):
         value = data.get(name)
         values[name] = value if isinstance(value, str) else getattr(defaults, name)

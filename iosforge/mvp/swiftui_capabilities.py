@@ -204,7 +204,23 @@ def info_properties(selected: list[Selected], integrations: integ.Integrations) 
     lines = integ.app_properties(integrations)
     for item in selected:
         lines += item.descriptor.info_properties(item.context)
-    return lines
+    return _dedupe_properties(lines)
+
+
+def _dedupe_properties(lines: list[str]) -> list[str]:
+    """Keep the first block of every top-level Info.plist key (modules may repeat one)."""
+    kept: list[str] = []
+    seen: set[str] = set()
+    skipping = False
+    for line in lines:
+        top = line.startswith(" " * 8) and not line.startswith(" " * 9)
+        if top:
+            key = line.strip().split(":", 1)[0]
+            skipping = key in seen
+            seen.add(key)
+        if not skipping:
+            kept.append(line)
+    return kept
 
 
 def prompter_kinds(selected: list[Selected]) -> list[str]:
@@ -261,8 +277,9 @@ def load_modules() -> None:
     with _LOAD_LOCK:
         if _LOADED:
             return
-        from iosforge.mvp import swiftui_cleaners, swiftui_remote_api
+        from iosforge.mvp import swiftui_cleaners, swiftui_content, swiftui_remote_api
 
         swiftui_remote_api.register()
         swiftui_cleaners.register()
+        swiftui_content.register()
         _LOADED.append(True)

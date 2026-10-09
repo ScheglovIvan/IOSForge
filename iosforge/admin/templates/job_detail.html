@@ -245,6 +245,13 @@
             <p class="hint">Your own backend the clone's API capability calls (https, no query). The
               original app's endpoint is never used. Empty = the feature reports it is not configured.</p>
           </div>
+          <div class="field">
+            <label>Content feed URL <span class="muted">(content_feed capability)</span></label>
+            <input type="url" name="content_feed_url" value="{{ meta.get('content_feed_url', '') }}"
+              placeholder="https://your-cdn.example.com/feed.json" pattern="https://[^#@]+">
+            <p class="hint">Your JSON feed of items ({id, title, subtitle, body, premium}). Empty = the app
+              ships the bundled content seed.</p>
+          </div>
           {% if meta.get('scope_routing_error') %}
           <div class="alert alert--danger">Capability routing was not saved: {{ meta.get('scope_routing_error') }}</div>
           {% endif %}
