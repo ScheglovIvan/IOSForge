@@ -237,7 +237,7 @@ enum ContactsCleaner {{
         guard !work.isEmpty, !Headless.isActive else {{ return 0 }}
         do {{
             let (removed, copied) = try await Task.detached {{ try save(work) }}.value
-            merged.formUnion(work.flatMap {{ $0.contacts.map(\.identifier) }})
+            merged.formUnion(work.flatMap {{ $0.contacts.dropFirst().map(\\.identifier) }})
             Functional.record("contacts.merged", ["count": String(removed), "copied": String(copied)])
             return removed
         }} catch {{
