@@ -279,7 +279,7 @@
             <tr><th>Duration</th><td class="mono">{{ (xcode_build.duration_ms // 1000 ~ ' s') if xcode_build.duration_ms else '—' }}</td></tr>
           </table>
         </div>
-        {% if xcode_build.status == 'failed' and xcode_build.message %}
+        {% if xcode_build.status in ['failed', 'upload_failed'] and xcode_build.message %}
         <div class="alert alert--danger">Reason: {{ xcode_build.message }}</div>
         {% endif %}
         {% if xcode_build.status == 'ready_for_upload' %}

@@ -111,3 +111,25 @@ def test_attribution_declares_the_att_prompter(tmp_path: Path) -> None:
     )
     assert "TrackingPermission" in swiftui_gen.prompter_names(spec, app)
     assert swiftui_gen.prompter_names(spec) == []
+
+
+def test_load_tolerates_a_damaged_or_tampered_file(tmp_path: Path) -> None:
+    target = tmp_path / integ.INTEGRATIONS_JSON
+    target.parent.mkdir(parents=True)
+    target.write_text("{not json")
+    assert integ.load(tmp_path) == integ.Integrations()
+    target.write_text(
+        json.dumps(
+            {
+                "apphud_key": "app_x",
+                "tenjin_key": 7,
+                "rogue": True,
+                "skadnetwork_ids": "nope",
+                "products": [{"product_id": "p1", "title": "Week", "extra": 1}, "bad", {}],
+            }
+        )
+    )
+    loaded = integ.load(tmp_path)
+    assert loaded.apphud_key == "app_x" and loaded.tenjin_key == ""
+    assert loaded.skadnetwork_ids == []
+    assert loaded.products == [integ.FixtureProduct("p1", "Week", "", "")]

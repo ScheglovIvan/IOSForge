@@ -46,11 +46,15 @@ def toolchain_available() -> bool:
 
 
 def _run(
-    cmd: list[str], *, cwd: Path | None = None, timeout: int = 600
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout: int = 600,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
+            cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout, check=False
         )
     except subprocess.TimeoutExpired as exc:
         raise XcodeError(f"{cmd[0]} timed out after {timeout}s") from exc
@@ -206,7 +210,11 @@ def export_archive(
 
 
 def upload_command(ipa: Path, auth: AuthKey) -> list[str]:
-    """``altool`` upload of a signed IPA to App Store Connect (built, not executed here)."""
+    """``altool`` upload of a signed IPA to App Store Connect (built, not executed here).
+
+    altool finds the key as ``AuthKey_<key_id>.p8`` in ``API_PRIVATE_KEYS_DIR``, which
+    :func:`iosforge.mvp.ios_delivery.upload` points at a private copy of ``key_path``.
+    """
     return [
         XCRUN_BIN,
         "altool",

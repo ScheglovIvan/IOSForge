@@ -2,8 +2,13 @@
 
 The SwiftUI app travels between tasks as ``jobs/<id>/sources/xcode_app.zip``. Every task
 here needs the Apple toolchain; on a host without it the task fails loudly
-(``SimulatorUnavailable``) instead of pretending to succeed — routing these tasks to a
-Mac worker is a deployment decision (Mac ↔ Linux connectivity), not code.
+(``SimulatorUnavailable``) instead of pretending to succeed. The tasks go to their own
+``xcode`` queue, outside the stage queues Linux workers serve, so only a worker started
+with ``-Q xcode`` on a Mac picks them up; wiring that worker to the broker is a
+deployment decision (Mac ↔ Linux connectivity), not code.
+
+Delivery never changes ``Job.state``: like the CodeMagic build it is an operator action
+on a finished job, tracked only by its ``XcodeBuild`` row and the DELIVERY timeline.
 """
 
 from __future__ import annotations
@@ -42,6 +47,9 @@ log = get_logger("worker.swiftui")
 
 SOURCES_NAME = "xcode_app.zip"
 LOG_LIMIT = 200_000
+XCODE_QUEUE = "xcode"
+ACTIVE_STATUSES = ("queued", "archiving")
+DELIVERABLE_STATES = (JobState.DONE, JobState.NEEDS_INPUT)
 
 
 def sources_key(job_id: str) -> str:
@@ -108,6 +116,32 @@ def job_integrations(
     )
 
 
+def active_build(db: Session, job_id: uuid.UUID) -> XcodeBuild | None:
+    """The job's native delivery that is still queued or archiving (if any)."""
+    return db.scalar(
+        select(XcodeBuild)
+        .where(XcodeBuild.job_id == job_id, XcodeBuild.status.in_(ACTIVE_STATUSES))
+        .order_by(XcodeBuild.created_at.desc())
+    )
+
+
+def queue_delivery(db: Session, job: Job) -> XcodeBuild | None:
+    """Record a ``queued`` delivery and enqueue it on the Mac queue (None if one is active)."""
+    if active_build(db, job.id) is not None:
+        return None
+    build = XcodeBuild(job_id=job.id, status="queued")
+    db.add(build)
+    db.commit()
+    try:
+        run_xcode_delivery.apply_async(args=[str(job.id), str(build.id)], queue=XCODE_QUEUE)
+    except Exception as exc:
+        build.status = "failed"
+        build.message = f"enqueue failed: {exc}"[:4000]
+        db.commit()
+        raise
+    return build
+
+
 def _icon(storage: ArtifactStorage, job_id: str, out: Path) -> Path | None:
     key = build_key(job_id=job_id, kind="app_icon", name="app_icon.png")
     if not storage.exists(key):
@@ -116,13 +150,16 @@ def _icon(storage: ArtifactStorage, job_id: str, out: Path) -> Path | None:
     return out
 
 
-@celery_app.task(base=PipelineTask, name="iosforge.run_xcode_delivery", bind=True)
-def run_xcode_delivery(self: Any, job_id: str) -> str:
+@celery_app.task(
+    base=PipelineTask, name="iosforge.run_xcode_delivery", bind=True, queue=XCODE_QUEUE
+)
+def run_xcode_delivery(self: Any, job_id: str, build_id: str | None = None) -> str:
     """Archive the job's SwiftUI app and export an IPA (upload stays gated).
 
     Refreshes the contract with the job's current identity, integrations and icon,
-    then runs :func:`iosforge.mvp.ios_delivery.deliver`. Records an ``XcodeBuild`` row
-    and a DELIVERY timeline stage, and leaves the job DONE (or FAILED with the error).
+    then runs :func:`iosforge.mvp.ios_delivery.deliver`. Fills the ``queued``
+    ``XcodeBuild`` row (or a new one) and a DELIVERY timeline stage; the job's state
+    is left untouched.
     """
     settings = get_settings()
     storage = S3ArtifactStorage()
@@ -131,9 +168,12 @@ def run_xcode_delivery(self: Any, job_id: str) -> str:
         job = db.get(Job, uuid.UUID(job_id))
         if job is None:
             return f"job {job_id} not found"
-        build = XcodeBuild(job_id=job.id, status="archiving", started_at=utcnow())
-        db.add(build)
-        job.state = JobState.DELIVERY
+        build = db.get(XcodeBuild, uuid.UUID(build_id)) if build_id else None
+        if build is None:
+            build = XcodeBuild(job_id=job.id)
+            db.add(build)
+        build.status = "archiving"
+        build.started_at = utcnow()
         stage = StageTimeline(job_id=job.id, stage=Stage.DELIVERY, started_at=utcnow())
         db.add(stage)
         db.commit()
@@ -173,15 +213,13 @@ def run_xcode_delivery(self: Any, job_id: str) -> str:
             build.upload_command = list(result.upload_command)
             build.log_text = result.log[-LOG_LIMIT:]
             build.message = "; ".join(result.errors)[:4000] or None
-            job.state = JobState.FAILED if result.status == "failed" else JobState.DONE
-            if result.status == "failed":
+            if result.status in ("failed", "upload_failed"):
                 stage.error = build.message
         except Exception as exc:
             log.error("swiftui.delivery.failed", job_id=job_id, error=str(exc))
             build.status = "failed"
             build.message = str(exc)[:4000]
             stage.error = build.message
-            job.state = JobState.FAILED
         build.finished_at = utcnow()
         if build.started_at:
             build.duration_ms = int((build.finished_at - build.started_at).total_seconds() * 1000)

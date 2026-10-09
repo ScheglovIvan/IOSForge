@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import plistlib
 import shutil
+import tempfile
 import time
 import zipfile
 from dataclasses import asdict, dataclass, field
@@ -53,8 +55,13 @@ class DeliveryResult:
 
 
 def build_number(now: float | None = None) -> str:
-    """Monotonic build number from the UTC clock (``YYMMDDHHMM``), no App Store lookup."""
-    return time.strftime("%y%m%d%H%M", time.gmtime(now if now is not None else time.time()))
+    """Monotonic build number from the UTC clock (``YYMMDDHHMM.SS``), no App Store lookup.
+
+    The seconds component keeps two builds of the same minute distinct for App Store
+    Connect, which compares ``CFBundleVersion`` component-wise as integers.
+    """
+    stamp = time.gmtime(now if now is not None else time.time())
+    return f"{time.strftime('%y%m%d%H%M', stamp)}.{stamp.tm_sec}"
 
 
 def export_options(team_id: str, *, method: str = EXPORT_METHOD) -> bytes:
@@ -78,7 +85,7 @@ def auth_key(settings: Settings, job_id: str | None) -> xcode.AuthKey | None:
     creds = asc_credentials.load(settings, job_id)
     if creds is None:
         return None
-    key_path = asc_credentials._p8_path(settings, job_id)
+    key_path = asc_credentials.p8_path(settings, job_id)
     if not key_path.is_file():
         key_path = Path(settings.asc_api_key_p8_path)
     return xcode.AuthKey(key_path=key_path, key_id=creds.key_id, issuer_id=creds.issuer_id)
@@ -151,12 +158,20 @@ def deliver(
     if not exported.ok:
         result.errors = exported.errors
         return result
-    ipa = next((out_dir / "export").glob("*.ipa"))
+    ipa = next((out_dir / "export").glob("*.ipa"), None)
+    if ipa is None:
+        result.errors = ["exportArchive succeeded but produced no .ipa"]
+        return result
     result.ipa = str(ipa)
     result.upload_command = xcode.upload_command(ipa, auth)
     result.status = "ready_for_upload"
     if settings.ios_delivery_upload:
-        upload(ipa, auth, settings=settings)
+        try:
+            upload(ipa, auth, settings=settings)
+        except Exception as exc:
+            result.errors = [str(exc)]
+            result.status = "upload_failed"
+            return result
         result.status = "uploaded"
     return result
 
@@ -165,7 +180,13 @@ def upload(ipa: Path, auth: xcode.AuthKey, *, settings: Settings) -> None:
     """Upload a signed IPA to App Store Connect — only with ``ios_delivery_upload`` on."""
     if not settings.ios_delivery_upload:
         raise UploadBlocked("ios_delivery_upload is off: uploading to App Store Connect is gated")
-    res = xcode._run(xcode.upload_command(ipa, auth), timeout=3600)
+    with tempfile.TemporaryDirectory(prefix="iosforge-asc-key-") as keys:
+        shutil.copyfile(auth.key_path, Path(keys) / f"AuthKey_{auth.key_id}.p8")
+        res = xcode._run(
+            xcode.upload_command(ipa, auth),
+            timeout=3600,
+            env={**os.environ, "API_PRIVATE_KEYS_DIR": keys},
+        )
     if res.returncode != 0:
         raise RuntimeError(f"altool upload failed: {(res.stderr or res.stdout)[-1500:]}")
 

@@ -145,10 +145,10 @@ def job_detail(
     gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
     can_ios_build = bool(gen and gen.codemagic and gen.codemagic.get("application_id"))
     scope_status = (job.source_app_metadata or {}).get("scope_status")
-    from iosforge.worker.swiftui_tasks import latest_xcode_build, sources_key
+    from iosforge.worker.swiftui_tasks import latest_xcode_build
 
     xcode_build = latest_xcode_build(db, job_id)
-    can_xcode_delivery = xcode_build is not None or storage.exists(sources_key(str(job_id)))
+    can_xcode_delivery = xcode_build is not None or _has_sources(storage, job_id)
     return templates.TemplateResponse(
         request,
         "job_detail.html",
@@ -894,22 +894,44 @@ async def jobs_scope_approve(
     return RedirectResponse(f"/jobs/{job_id}#t-scope", status_code=HTTP_303_SEE_OTHER)
 
 
+def _has_sources(storage: ArtifactStorage, job_id: uuid.UUID) -> bool:
+    from iosforge.worker.swiftui_tasks import sources_key
+
+    try:
+        return storage.exists(sources_key(str(job_id)))
+    except Exception as exc:
+        log.warning("jobs.sources_check_failed", job_id=str(job_id), error=str(exc))
+        return False
+
+
 @router.post("/jobs/{job_id}/xcode-delivery")
 def jobs_xcode_delivery(
     request: Request,
     job_id: uuid.UUID,
     csrf_token: str = Form(...),
     user: SessionData = Depends(require_user),
+    db: Session = Depends(get_db),
+    storage: ArtifactStorage = Depends(get_storage),
 ) -> Response:
     if not csrf.verify(user.csrf_token, csrf_token):
         return Response("Invalid request (CSRF).", status_code=400)
-    try:
-        from iosforge.worker.swiftui_tasks import run_xcode_delivery
+    from iosforge.worker.swiftui_tasks import DELIVERABLE_STATES, queue_delivery
 
-        run_xcode_delivery.apply_async(args=[str(job_id)], queue="delivery")
-        log.info("jobs.xcode_delivery_requested", job_id=str(job_id))
+    job = db.get(Job, job_id)
+    if job is None:
+        return Response("Not found", status_code=404)
+    if job.state not in DELIVERABLE_STATES:
+        return Response(f"Delivery needs a finished job (state {job.state}).", status_code=409)
+    if not _has_sources(storage, job_id):
+        return Response("No generated SwiftUI sources for this job.", status_code=409)
+    try:
+        build = queue_delivery(db, job)
     except Exception as exc:
         log.error("jobs.xcode_delivery_enqueue_failed", job_id=str(job_id), error=str(exc))
+        return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
+    if build is None:
+        return Response("A native delivery is already running.", status_code=409)
+    log.info("jobs.xcode_delivery_requested", job_id=str(job_id), build_id=str(build.id))
     return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
 
 

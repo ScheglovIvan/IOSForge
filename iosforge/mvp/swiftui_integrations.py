@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import plistlib
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -124,11 +124,37 @@ def write(app_dir: Path, integrations: Integrations) -> None:
     )
 
 
+def _product(raw: object) -> FixtureProduct | None:
+    if not isinstance(raw, dict):
+        return None
+    values = {f.name: str(raw.get(f.name) or "") for f in fields(FixtureProduct)}
+    return FixtureProduct(**values) if values["product_id"] else None
+
+
 def load(app_dir: Path) -> Integrations:
-    """Integration inputs frozen into ``app_dir`` (defaults when none were written)."""
-    data = _read_json(app_dir / INTEGRATIONS_JSON)
-    products = [FixtureProduct(**p) for p in data.pop("products", []) or []]
-    return Integrations(**data, products=products)
+    """Integration inputs frozen into ``app_dir``; defaults for a missing or damaged file.
+
+    The file lives inside the model-editable app, so unknown keys, wrong types and
+    broken JSON are ignored instead of failing the compile gate. Delivery re-freezes
+    it from provisioning before archiving, so a tampered copy never ships.
+    """
+    try:
+        data = _read_json(app_dir / INTEGRATIONS_JSON)
+    except (OSError, ValueError):
+        data = {}
+    defaults = Integrations()
+    values: dict[str, Any] = {}
+    for name in ("apphud_key", "apphud_placement", "tenjin_key", "att_usage_description"):
+        value = data.get(name)
+        values[name] = value if isinstance(value, str) else getattr(defaults, name)
+    exempt = data.get("export_compliance_exempt")
+    values["export_compliance_exempt"] = exempt if isinstance(exempt, bool) else None
+    ids = data.get("skadnetwork_ids")
+    values["skadnetwork_ids"] = [str(i) for i in ids] if isinstance(ids, list) else []
+    raw_products = data.get("products")
+    products = [_product(p) for p in raw_products] if isinstance(raw_products, list) else []
+    values["products"] = [p for p in products if p is not None]
+    return Integrations(**values)
 
 
 def _swift(value: str) -> str:

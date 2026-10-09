@@ -73,6 +73,11 @@ def _p8_path(settings: Settings, job_id: str | None) -> Path:
     return _job_dir(settings, job_id) / "asc_api_key.p8"
 
 
+def p8_path(settings: Settings, job_id: str | None) -> Path:
+    """Where the job's ``.p8`` API key is stored (the global key path without a job)."""
+    return _p8_path(settings, job_id)
+
+
 def _cert_key_path(settings: Settings, job_id: str | None) -> Path:
     if job_id is None:
         return Path(settings.asc_certificate_key_path)
