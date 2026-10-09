@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from iosforge.mvp.locale import STOREFRONT_LOCALES, LocaleUnresolved, resolve_source_locale
+from iosforge.mvp.source_locale import STOREFRONT_LOCALES, LocaleUnresolved, resolve_source_locale
 
 
 def _spec(locale: str | None = None) -> dict[str, Any]:

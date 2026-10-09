@@ -273,10 +273,11 @@ def apply_scope(paths: RunPaths, scope: ScopeDecision | None = None) -> None:
         if isinstance(nav, list):
             screen["navigates_to"] = [n for n in nav if str(n) in included]
         if "state_of" in screen and str(screen["state_of"]) not in included:
+            orphaned = screen.pop("state_of")
             log.warning(
                 "feasibility.apply_scope.orphaned_state",
                 screen_id=screen.get("id"),
-                state_of=screen.pop("state_of"),
+                state_of=orphaned,
             )
     spec["screens"] = kept
 
