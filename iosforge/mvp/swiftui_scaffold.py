@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from iosforge.mvp.swiftui_permissions import PERMISSION_KINDS, PERMISSIONS_DIR, kind_for
+from iosforge.mvp.swiftui_permissions import PERMISSION_KINDS, PERMISSIONS_DIR, kinds_for
 
 Presentation = Literal["root", "push", "sheet", "fullScreenCover"]
 
@@ -27,6 +27,16 @@ PENDING_MARKER = "PendingScreenView(id:"
 
 _MODAL = re.compile(r"\b(paywall|sheet|modal|popup|pop-up|dialog|alert|picker)\b", re.I)
 _ONBOARDING = re.compile(r"\b(splash|launch|onboarding|welcome|intro|loading)\b", re.I)
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
+_SWIFT_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+@dataclass(frozen=True)
+class AppIdentity:
+    """Name and bundle id the scaffold renders the contract files for."""
+
+    app_name: str
+    bundle_id: str
 
 
 @dataclass(frozen=True)
@@ -42,6 +52,7 @@ class ScreenEntry:
 
     @property
     def view_path(self) -> str:
+        """Model-owned view file of this screen, relative to the app directory."""
         return f"App/Features/{self.screen_id}/{self.type_name}.swift"
 
 
@@ -60,20 +71,33 @@ def _presentation(screen: dict[str, Any], onboarding: bool) -> Presentation:
 
 
 def screen_entries(spec: dict[str, Any]) -> list[ScreenEntry]:
-    """Scaffold view of every screen in ``spec`` (order preserved)."""
+    """Scaffold view of every screen in ``spec`` (order preserved).
+
+    Case names are always ``s<Suffix>`` (never a Swift keyword) and de-duplicated
+    when two ids normalise to the same identifier; duplicate ids are rejected.
+    """
     entries: list[ScreenEntry] = []
+    seen_ids: set[str] = set()
+    used: set[str] = set()
     for screen in spec.get("screens", []):
         if not isinstance(screen, dict) or not screen.get("id"):
             continue
         screen_id = str(screen["id"])
-        name = str(screen.get("name") or screen_id)
+        if screen_id in seen_ids:
+            raise ValueError(f"duplicate screen id {screen_id!r} in app_spec")
+        seen_ids.add(screen_id)
+        name = _CONTROL.sub(" ", str(screen.get("name") or screen_id)).strip()
         onboarding = bool(_ONBOARDING.search(name))
-        suffix = _swift_suffix(screen_id)
+        suffix = base = _swift_suffix(screen_id)
+        counter = 2
+        while suffix in used:
+            suffix, counter = f"{base}_{counter}", counter + 1
+        used.add(suffix)
         entries.append(
             ScreenEntry(
                 screen_id=screen_id,
                 name=name,
-                case_name=f"s{suffix}" if suffix[0].isdigit() else suffix[0].lower() + suffix[1:],
+                case_name=f"s{suffix}",
                 type_name=f"Screen{suffix}View",
                 presentation=_presentation(screen, onboarding),
                 onboarding=onboarding,
@@ -105,13 +129,13 @@ def _purpose_strings(spec: dict[str, Any], app_name: str) -> dict[str, str]:
     for item in spec.get("permissions", []) or []:
         if not isinstance(item, dict):
             continue
-        kind = kind_for(str(item.get("permission", "")))
-        if kind is None:
-            continue
         reason = re.sub(r"\s*\([^)]*\)", "", str(item.get("reason") or "")).strip()
-        text = reason.split(". ")[0].rstrip(".") if reason else ""
-        for key in kind.plist_keys:
-            strings[key] = f"{text}." if text else f"{app_name} uses this to provide its features."
+        text = _CONTROL.sub(" ", reason.split(". ")[0].rstrip(".")) if reason else ""
+        for kind in kinds_for(str(item.get("permission", ""))):
+            for key in kind.plist_keys:
+                strings.setdefault(
+                    key, f"{text}." if text else f"{app_name} uses this to provide its features."
+                )
     return strings
 
 
@@ -138,6 +162,7 @@ def render_project_yml(
         f"  {target}:",
         "    type: application",
         "    platform: iOS",
+        "    scheme: {}",
         "    sources:",
         "      - path: App",
     ]
@@ -174,7 +199,11 @@ def render_project_yml(
 
 
 def _swift_str(value: str) -> str:
-    return json.dumps(value, ensure_ascii=False)
+    """Swift string literal; control characters as ``\\u{..}`` (JSON's ``\\uXXXX`` is invalid)."""
+    body = "".join(
+        _SWIFT_ESCAPES.get(ch) or (f"\\u{{{ord(ch):x}}}" if ord(ch) < 0x20 else ch) for ch in value
+    )
+    return f'"{body}"'
 
 
 def _render_screen_id(entries: list[ScreenEntry], home: ScreenEntry) -> str:
@@ -465,6 +494,56 @@ struct {entry.type_name}: View {{
 """
 
 
+def _bundled_fonts(app_dir: Path) -> list[str]:
+    fonts = app_dir / "Resources" / "Fonts"
+    if not fonts.is_dir():
+        return []
+    return sorted(f.name for f in fonts.iterdir() if f.suffix.lower() in (".ttf", ".otf"))
+
+
+def render_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) -> dict[str, str]:
+    """Contract files (relative path → text) for ``spec``, given resources in ``app_dir``."""
+    entries = screen_entries(spec)
+    if not entries:
+        raise ValueError("app_spec has no screens to scaffold")
+    target = target_name(identity.app_name)
+    media = app_dir / "Resources" / "Media"
+    return {
+        "project.yml": render_project_yml(
+            target=target,
+            app_name=identity.app_name,
+            bundle_id=identity.bundle_id,
+            fonts=_bundled_fonts(app_dir),
+            purpose_strings=_purpose_strings(spec, identity.app_name),
+            has_media=media.is_dir() and any(media.iterdir()),
+        ),
+        "App/App.swift": _render_app(target),
+        "App/Navigation/ScreenID.swift": _render_screen_id(entries, home_entry(entries)),
+        "App/Navigation/Router.swift": _ROUTER,
+        "App/Navigation/RootView.swift": _ROOT_VIEW,
+        "App/Headless/Headless.swift": _HEADLESS,
+        f"{PERMISSIONS_DIR}/Permissions.swift": _render_permissions(),
+        "App/Support/MediaAsset.swift": _MEDIA,
+    }
+
+
+def enforce_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) -> list[str]:
+    """Rewrite any contract file the model changed or deleted; return the restored paths.
+
+    Run before every compile-gate check so the build always verifies the real
+    contract, whatever a screen or fix task did to the scaffold files.
+    """
+    restored: list[str] = []
+    for rel, text in render_contract(app_dir, spec, identity).items():
+        path = app_dir / rel
+        current = path.read_text(encoding="utf-8") if path.is_file() else None
+        if current != text:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+            restored.append(rel)
+    return restored
+
+
 def write_scaffold(
     app_dir: Path,
     spec: dict[str, Any],
@@ -476,55 +555,28 @@ def write_scaffold(
 ) -> list[ScreenEntry]:
     """Render the full Xcode project skeleton into ``app_dir``; return its screens.
 
-    Contract files (``App/App.swift``, ``App/Navigation/``, ``App/Headless/``,
-    ``App/Permissions/Permissions.swift``, ``project.yml``) are always rewritten;
-    model-owned extension points (theme, fixtures, screen views) are only created
-    when missing so re-running the scaffold never discards generated code.
+    Contract files (:func:`render_contract`) are always rewritten; model-owned
+    extension points (theme, fixtures, screen views) are only created when missing
+    so re-running the scaffold never discards generated code.
     """
     entries = screen_entries(spec)
     if not entries:
         raise ValueError("app_spec has no screens to scaffold")
-    home = home_entry(entries)
-    target = target_name(app_name)
-
-    fonts: list[str] = []
     if fonts_dir is not None and fonts_dir.is_dir():
         dst = app_dir / "Resources" / "Fonts"
         dst.mkdir(parents=True, exist_ok=True)
         for font in sorted(fonts_dir.iterdir()):
             if font.suffix.lower() in (".ttf", ".otf"):
                 shutil.copy2(font, dst / font.name)
-                fonts.append(font.name)
-    has_media = media_dir is not None and media_dir.is_dir() and any(media_dir.iterdir())
-    if has_media and media_dir is not None:
+    if media_dir is not None and media_dir.is_dir() and any(media_dir.iterdir()):
         shutil.copytree(media_dir, app_dir / "Resources" / "Media", dirs_exist_ok=True)
 
-    contract_files = {
-        "project.yml": render_project_yml(
-            target=target,
-            app_name=app_name,
-            bundle_id=bundle_id,
-            fonts=fonts,
-            purpose_strings=_purpose_strings(spec, app_name),
-            has_media=has_media,
-        ),
-        "App/App.swift": _render_app(target),
-        "App/Navigation/ScreenID.swift": _render_screen_id(entries, home),
-        "App/Navigation/Router.swift": _ROUTER,
-        "App/Navigation/RootView.swift": _ROOT_VIEW,
-        "App/Headless/Headless.swift": _HEADLESS,
-        f"{PERMISSIONS_DIR}/Permissions.swift": _render_permissions(),
-        "App/Support/MediaAsset.swift": _MEDIA,
-    }
+    enforce_contract(app_dir, spec, AppIdentity(app_name, bundle_id))
     extension_points = {
         "App/Theme/Theme.swift": _THEME_PLACEHOLDER,
         "App/Fixtures/Fixtures.swift": _FIXTURES_PLACEHOLDER,
         **{entry.view_path: _render_pending(entry) for entry in entries},
     }
-    for rel, text in contract_files.items():
-        path = app_dir / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
     for rel, text in extension_points.items():
         path = app_dir / rel
         if not path.exists():

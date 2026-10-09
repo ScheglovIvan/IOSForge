@@ -10,6 +10,9 @@ import pytest
 from iosforge.mvp.swiftui_permissions import PERMISSION_KINDS
 from iosforge.mvp.swiftui_scaffold import (
     PENDING_MARKER,
+    AppIdentity,
+    _swift_str,
+    enforce_contract,
     home_entry,
     pending_screens,
     screen_entries,
@@ -136,3 +139,50 @@ def test_no_onboarding_screens_renders_false(tmp_path: Path) -> None:
 def test_spec_without_screens_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="no screens"):
         write_scaffold(tmp_path, {"screens": []}, app_name="A", bundle_id="b.c")
+
+
+def test_case_names_are_safe_and_unique() -> None:
+    spec = {
+        "screens": [{"id": "a-b"}, {"id": "a_b"}, {"id": "default"}, {"id": "0011", "name": "x\ny"}]
+    }
+    entries = screen_entries(spec)
+    assert [e.case_name for e in entries] == ["sA_b", "sA_b_2", "sDefault", "s0011"]
+    assert len({e.type_name for e in entries}) == 4
+    assert entries[3].name == "x y"
+
+
+def test_duplicate_screen_ids_are_rejected() -> None:
+    with pytest.raises(ValueError, match="duplicate screen id"):
+        screen_entries({"screens": [{"id": "1"}, {"id": "1"}]})
+
+
+def test_swift_string_escaping() -> None:
+    assert _swift_str('a"b\\c\nd\x01é') == '"a\\"b\\\\c\\nd\\u{1}é"'
+
+
+def test_enforce_contract_restores_tampered_files(tmp_path: Path) -> None:
+    app = tmp_path / "xcode_app"
+    write_scaffold(app, _spec(), app_name="A", bundle_id="com.example.a")
+    identity = AppIdentity("A", "com.example.a")
+    assert enforce_contract(app, _spec(), identity) == []
+
+    gate = app / "App/Permissions/Permissions.swift"
+    gate.write_text(gate.read_text().replace("guard !Headless.isActive else { return false }", ""))
+    (app / "App/Headless/Headless.swift").unlink()
+
+    restored = enforce_contract(app, _spec(), identity)
+
+    assert restored == ["App/Headless/Headless.swift", "App/Permissions/Permissions.swift"]
+    assert "guard !Headless.isActive" in gate.read_text()
+
+
+def test_project_declares_a_scheme(tmp_path: Path) -> None:
+    write_scaffold(tmp_path, _spec(), app_name="A", bundle_id="b.c")
+    assert "    scheme: {}" in (tmp_path / "project.yml").read_text()
+
+
+def test_multi_kind_permission_gets_every_purpose_string(tmp_path: Path) -> None:
+    spec = _spec(permissions=[{"permission": "Camera and Photo Library", "reason": "Scan docs."}])
+    write_scaffold(tmp_path, spec, app_name="A", bundle_id="b.c")
+    project = (tmp_path / "project.yml").read_text()
+    assert "NSCameraUsageDescription" in project and "NSPhotoLibraryUsageDescription" in project

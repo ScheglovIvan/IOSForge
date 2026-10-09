@@ -8,7 +8,8 @@ import pytest
 
 from iosforge.mvp.swiftui_permissions import (
     PERMISSION_KINDS,
-    kind_for,
+    blank_comments_and_strings,
+    kinds_for,
     permission_violations,
 )
 
@@ -58,15 +59,19 @@ def test_registry_covers_every_required_kind() -> None:
         ("Location (GPS)", "location"),
     ],
 )
-def test_kind_for_maps_spec_labels(label: str, case: str) -> None:
-    kind = kind_for(label)
-    assert kind is not None
-    assert kind.case == case
+def test_kinds_for_maps_spec_labels(label: str, case: str) -> None:
+    assert [kind.case for kind in kinds_for(label)] == [case]
 
 
-@pytest.mark.parametrize("label", ["Battery level", "Dynamic island", "Haptics"])
-def test_kind_for_ignores_unrelated_labels(label: str) -> None:
-    assert kind_for(label) is None
+@pytest.mark.parametrize(
+    "label", ["Battery level", "Dynamic island", "Haptics", "Screen recording", "Home screen"]
+)
+def test_kinds_for_ignores_unrelated_labels(label: str) -> None:
+    assert kinds_for(label) == []
+
+
+def test_kinds_for_returns_every_mentioned_kind() -> None:
+    assert [k.case for k in kinds_for("Camera and Photo Library")] == ["camera", "photos"]
 
 
 @pytest.mark.parametrize(
@@ -142,3 +147,50 @@ def test_commented_out_calls_are_ignored(tmp_path: Path) -> None:
         "// CBCentralManager(delegate: nil, queue: nil)\n/* CMPedometer()\n */\nlet x = 1\n",
     )
     assert permission_violations(tmp_path) == []
+
+
+def test_generic_request_authorization_on_a_variable_is_caught(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "App/Features/0001/Screen0001View.swift",
+        "let center = UNUserNotificationCenter.current()\n"
+        + "\n" * 5
+        + "center.requestAuthorization(options: [.alert]) { _, _ in }\n",
+    )
+    violations = permission_violations(tmp_path)
+    assert len(violations) == 1 and ":7: error:" in violations[0]
+
+
+def test_url_string_does_not_hide_following_code(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "App/Features/0001/Screen0001View.swift",
+        'let url = URL(string: "https://example.com/a"); '
+        "ATTrackingManager.requestTrackingAuthorization { _ in }\n",
+    )
+    assert any(" tracking permission API" in v for v in permission_violations(tmp_path))
+
+
+def test_api_names_inside_strings_are_not_flagged(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "App/Features/0001/Screen0001View.swift",
+        'Text("Tap to requestAuthorization() later")\nlet s = """\nCMPedometer()\n"""\n',
+    )
+    assert permission_violations(tmp_path) == []
+
+
+def test_any_direct_prompt_call_is_flagged(tmp_path: Path) -> None:
+    _write(
+        tmp_path, "App/Features/0001/Screen0001View.swift", "_ = await CameraPrompter.prompt()\n"
+    )
+    assert "bypasses the headless gate" in permission_violations(tmp_path)[0]
+
+
+def test_blanking_keeps_offsets_and_lines() -> None:
+    source = 'a // x\n/* y\n /* nested */ z */ "s\\"q" b'
+    blanked = blank_comments_and_strings(source)
+    assert len(blanked) == len(source)
+    assert blanked.count("\n") == source.count("\n")
+    assert "x" not in blanked and "nested" not in blanked and "q" not in blanked
+    assert blanked.rstrip().endswith("b")

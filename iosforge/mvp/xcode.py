@@ -41,16 +41,21 @@ class BuildOutcome:
 
 
 def toolchain_available() -> bool:
-    """True when XcodeGen and xcodebuild are on PATH (i.e. running on a Mac worker)."""
-    return shutil.which(XCODEGEN_BIN) is not None and shutil.which(XCODEBUILD_BIN) is not None
+    """True when XcodeGen, xcodebuild and xcrun are on PATH (i.e. running on a Mac worker)."""
+    return all(shutil.which(tool) is not None for tool in (XCODEGEN_BIN, XCODEBUILD_BIN, XCRUN_BIN))
 
 
 def _run(
     cmd: list[str], *, cwd: Path | None = None, timeout: int = 600
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
-    )
+    try:
+        return subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise XcodeError(f"{cmd[0]} timed out after {timeout}s") from exc
+    except FileNotFoundError as exc:
+        raise XcodeError(f"{cmd[0]} not found on PATH") from exc
 
 
 def generate_project(app_dir: Path) -> None:
@@ -88,23 +93,26 @@ def build(
     project = next(app_dir.glob("*.xcodeproj"), None)
     if project is None:
         raise XcodeError(f"no .xcodeproj in {app_dir} (run generate_project first)")
-    res = _run(
-        [
-            XCODEBUILD_BIN,
-            "build",
-            "-project",
-            project.name,
-            "-scheme",
-            scheme,
-            "-destination",
-            SIMULATOR_DESTINATION,
-            "-derivedDataPath",
-            str(derived_data),
-            "CODE_SIGNING_ALLOWED=NO",
-        ],
-        cwd=app_dir,
-        timeout=timeout,
-    )
+    try:
+        res = _run(
+            [
+                XCODEBUILD_BIN,
+                "build",
+                "-project",
+                project.name,
+                "-scheme",
+                scheme,
+                "-destination",
+                SIMULATOR_DESTINATION,
+                "-derivedDataPath",
+                str(derived_data),
+                "CODE_SIGNING_ALLOWED=NO",
+            ],
+            cwd=app_dir,
+            timeout=timeout,
+        )
+    except XcodeError as exc:
+        return BuildOutcome(ok=False, errors=[str(exc)], log="")
     output = f"{res.stdout}\n{res.stderr}"
     errors = parse_errors(output, app_dir)
     if res.returncode != 0 and not errors:
@@ -131,6 +139,7 @@ def boot(udid: str) -> None:
 
 
 def install(udid: str, app: Path) -> None:
+    """Install the simulator ``.app`` bundle on ``udid``."""
     simctl("install", udid, str(app))
 
 
@@ -140,6 +149,7 @@ def launch_screen(udid: str, bundle_id: str, screen_id: str) -> None:
 
 
 def screenshot(udid: str, out: Path) -> Path:
+    """Capture the current simulator frame of ``udid`` as a PNG at ``out``."""
     out.parent.mkdir(parents=True, exist_ok=True)
     simctl("io", udid, "screenshot", str(out))
     return out

@@ -12,7 +12,7 @@ import pytest
 from iosforge.mvp import swiftui_gen, xcode
 from iosforge.mvp.paths import RunPaths
 from iosforge.mvp.swiftui_prompts import compile_fix_prompt, screen_prompt, theme_prompt
-from iosforge.mvp.swiftui_scaffold import screen_entries
+from iosforge.mvp.swiftui_scaffold import AppIdentity, screen_entries
 from tests.test_feasibility import _spec_three_screens
 
 SPEC: dict[str, Any] = {
@@ -78,40 +78,69 @@ def test_generate_reports_screens_left_as_placeholders(
 def test_compile_gate_loops_fix_task_until_clean(
     paths: RunPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    rounds = iter([(["App/X.swift:1:1: error: boom"], "log1"), ([], "** BUILD SUCCEEDED **")])
+    rounds = iter(
+        [
+            swiftui_gen.GateCheck(["App/X.swift:1:1: error: boom"], "log1", ["App/App.swift"]),
+            swiftui_gen.GateCheck([], "** BUILD SUCCEEDED **"),
+        ]
+    )
     monkeypatch.setattr(swiftui_gen, "compile_errors", lambda *a: next(rounds))
     prompts: list[str] = []
     monkeypatch.setattr(
         swiftui_gen.claude_gen, "run_task", lambda ws, prompt, **k: prompts.append(prompt) or 0
     )
 
-    errors, log = swiftui_gen.ensure_compiles(paths, "Demo", attempts=2)
+    gate = swiftui_gen.ensure_compiles(paths, AppIdentity("Demo", "b.c"), attempts=2)
 
-    assert errors == [] and "SUCCEEDED" in log
+    assert gate.errors == [] and "SUCCEEDED" in gate.log
+    assert gate.restored == ["App/App.swift"]
     assert len(prompts) == 1 and "App/X.swift:1:1: error: boom" in prompts[0]
 
 
 def test_compile_gate_gives_up_after_attempts(
     paths: RunPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(swiftui_gen, "compile_errors", lambda *a: (["e: still broken"], ""))
+    monkeypatch.setattr(
+        swiftui_gen, "compile_errors", lambda *a: swiftui_gen.GateCheck(["e: still broken"])
+    )
     prompts: list[str] = []
     monkeypatch.setattr(
         swiftui_gen.claude_gen, "run_task", lambda ws, prompt, **k: prompts.append(prompt) or 0
     )
-    errors, _ = swiftui_gen.ensure_compiles(paths, "Demo", attempts=2)
-    assert errors == ["e: still broken"] and len(prompts) == 2
+    gate = swiftui_gen.ensure_compiles(paths, AppIdentity("Demo", "b.c"), attempts=2)
+    assert gate.errors == ["e: still broken"] and len(prompts) == 2
 
 
 def test_compile_errors_include_permission_lint_without_toolchain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(xcode, "toolchain_available", lambda: False)
-    view = tmp_path / "App/Features/0013/Screen0013View.swift"
-    view.parent.mkdir(parents=True)
-    view.write_text("let m = CMPedometer()\n")
-    errors, log = swiftui_gen.compile_errors(tmp_path, "Demo", tmp_path / "dd")
-    assert log == "" and len(errors) == 1 and "motion permission API" in errors[0]
+    swiftui_gen.write_scaffold(tmp_path, SPEC, app_name="Demo", bundle_id="b.c")
+    (tmp_path / "App/Features/0013/Screen0013View.swift").write_text("let m = CMPedometer()\n")
+    check = swiftui_gen.compile_errors(tmp_path, SPEC, AppIdentity("Demo", "b.c"), tmp_path / "dd")
+    assert check.log == "" and len(check.errors) == 1 and "motion permission API" in check.errors[0]
+
+
+def test_model_tampering_with_contract_is_restored_and_reported(
+    paths: RunPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    fake = _fake_task(calls)
+
+    def tampering(workspace: Path, prompt: str, **kw: Any) -> int:
+        router = workspace / "xcode_app/App/Navigation/Router.swift"
+        router.write_text("final class Router {}\n")
+        return int(fake(workspace, prompt, **kw))
+
+    monkeypatch.setattr(swiftui_gen.claude_gen, "run_task", tampering)
+    monkeypatch.setattr(xcode, "toolchain_available", lambda: False)
+
+    result = swiftui_gen.generate(paths, app_name="Speaker Test", bundle_id="com.example.s")
+
+    assert result.contract_restored == ["App/Navigation/Router.swift"]
+    assert (
+        "func open(_ raw: String)" in (paths.xcode_app / "App/Navigation/Router.swift").read_text()
+    )
 
 
 def test_scope_to_prunes_spec_to_requested_screens(paths: RunPaths) -> None:
@@ -149,12 +178,63 @@ def test_theme_and_fix_prompts() -> None:
     assert "App/X.swift:1:1: error: boom" in fix and "PermissionPrompter" in fix
 
 
+RICH_SPEC: dict[str, Any] = {
+    "app_name": "Rich Demo",
+    "screens": [
+        {"id": "0000", "name": "Splash / Launch"},
+        {"id": "0001", "name": "Paywall - Pro"},
+        {"id": "0002", "name": "Full Player", "presentation": "fullScreenCover"},
+        {"id": "0011", "name": "Home", "route": "/"},
+        {"id": "0013", "name": "Sound-Level Meter"},
+        {"id": "default", "name": 'Keyword "id"\nwith newline'},
+    ],
+    "permissions": [{"permission": "Microphone", "reason": "Measures sound."}],
+}
+
+_PROMPTER = """import AVFoundation
+
+enum MicrophonePermission: PermissionPrompter {
+    static let kind: PermissionKind = .microphone
+    static func prompt() async -> Bool { await AVAudioApplication.requestRecordPermission() }
+}
+"""
+
+_METER_VIEW = """import SwiftUI
+
+struct Screen0013View: View {
+    @Environment(Router.self) private var router
+
+    var body: some View {
+        Button("Measure") {
+            Task { await Permissions.request(MicrophonePermission.self) }
+            router.show(.s0001)
+        }
+        .font(.custom("Demo-Regular", size: 17))
+    }
+}
+"""
+
+
 @pytest.mark.mac
 @pytest.mark.skipif(not xcode.toolchain_available(), reason="needs XcodeGen + xcodebuild")
-def test_scaffold_builds_with_xcodebuild(paths: RunPaths) -> None:
-    swiftui_gen.prepare_workspace(paths, app_name="Speaker Test", bundle_id="com.example.s")
-    errors, log = swiftui_gen.compile_errors(
-        paths.claude_ws / "xcode_app", "SpeakerTest", paths.run_dir / "DerivedData"
-    )
-    assert errors == [], errors
-    assert "BUILD SUCCEEDED" in log
+def test_rich_scaffold_builds_with_xcodebuild(tmp_path: Path) -> None:
+    fonts = tmp_path / "fonts"
+    fonts.mkdir()
+    (fonts / "Demo-Regular.ttf").write_bytes(b"\x00\x01\x00\x00")
+    media = tmp_path / "media"
+    media.mkdir()
+    (media / "hero.png").write_bytes(b"\x89PNG")
+    app = tmp_path / "xcode_app"
+    identity = AppIdentity("Rich Demo", "com.example.rich")
+    swiftui_gen.write_scaffold(
+        app, RICH_SPEC, app_name=identity.app_name, bundle_id=identity.bundle_id,
+        fonts_dir=fonts, media_dir=media,
+    )  # fmt: skip
+    (app / "App/Permissions/MicrophonePermission.swift").write_text(_PROMPTER)
+    (app / "App/Features/0013/Screen0013View.swift").write_text(_METER_VIEW)
+
+    check = swiftui_gen.compile_errors(app, RICH_SPEC, identity, tmp_path / "DerivedData")
+
+    assert check.errors == [], check.errors
+    assert check.restored == []
+    assert "BUILD SUCCEEDED" in check.log

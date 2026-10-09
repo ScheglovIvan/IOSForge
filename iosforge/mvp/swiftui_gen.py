@@ -29,7 +29,9 @@ from iosforge.mvp.scope_models import FeasibilityReport, ScopeCounts, ScopeDecis
 from iosforge.mvp.swiftui_permissions import permission_violations
 from iosforge.mvp.swiftui_prompts import APP_DIR, compile_fix_prompt, screen_prompt, theme_prompt
 from iosforge.mvp.swiftui_scaffold import (
+    AppIdentity,
     ScreenEntry,
+    enforce_contract,
     pending_screens,
     target_name,
     write_scaffold,
@@ -48,8 +50,19 @@ class SwiftUIResult:
     app_dir: Path
     scheme: str
     entries: list[ScreenEntry]
+    derived_data: Path
     errors: list[str] = field(default_factory=list)
     build_log: Path | None = None
+    contract_restored: list[str] = field(default_factory=list)
+
+
+@dataclass
+class GateCheck:
+    """One compile-gate pass: errors, xcodebuild log, contract files restored first."""
+
+    errors: list[str]
+    log: str = ""
+    restored: list[str] = field(default_factory=list)
 
 
 def _workspace_app(paths: RunPaths) -> Path:
@@ -86,44 +99,61 @@ def prepare_workspace(paths: RunPaths, *, app_name: str, bundle_id: str) -> list
     )
 
 
-def compile_errors(app_dir: Path, scheme: str, derived_data: Path) -> tuple[list[str], str]:
-    """Permission-lint violations plus xcodebuild errors (build skipped off-Mac)."""
+def compile_errors(
+    app_dir: Path, spec: dict[str, Any], identity: AppIdentity, derived_data: Path
+) -> GateCheck:
+    """Restore the scaffold contract, then permission lint + xcodebuild (build skipped off-Mac).
+
+    Contract files are re-rendered before every check so the gate always verifies
+    the real navigation / headless / permission contract, whatever a model task did
+    to them; restored paths are reported so tampering stays visible.
+    """
+    restored = enforce_contract(app_dir, spec, identity)
+    if restored:
+        log.warning("swiftui_gen.contract_restored", files=restored)
     errors = permission_violations(app_dir)
     if not xcode.toolchain_available():
         log.warning("swiftui_gen.toolchain_missing", app_dir=str(app_dir))
-        return errors, ""
+        return GateCheck(errors, restored=restored)
     try:
         xcode.generate_project(app_dir)
     except xcode.XcodeError as exc:
-        return [*errors, str(exc)], ""
-    outcome = xcode.build(app_dir, scheme, derived_data=derived_data)
-    return [*outcome.errors, *errors], outcome.log
+        return GateCheck([*errors, str(exc)], restored=restored)
+    outcome = xcode.build(app_dir, target_name(identity.app_name), derived_data=derived_data)
+    return GateCheck([*outcome.errors, *errors], outcome.log, restored)
 
 
 def ensure_compiles(
     paths: RunPaths,
-    scheme: str,
+    identity: AppIdentity,
     *,
     attempts: int = 2,
     timeout: int = 1800,
-) -> tuple[list[str], str]:
-    """Compile gate with a bounded fix loop; returns (remaining errors, last build log)."""
+) -> GateCheck:
+    """Compile gate with a bounded fix loop; returns the last check (restored = all passes)."""
     bound = log.bind(stage="compile_gate", run_dir=str(paths.run_dir), target="swiftui")
     app_dir = _workspace_app(paths)
-    errors, build_log = compile_errors(app_dir, scheme, _derived_data(paths))
+    spec = json.loads(paths.app_spec_json.read_text())
+    check = compile_errors(app_dir, spec, identity, _derived_data(paths))
+    restored = list(check.restored)
     tries = 0
-    while errors and tries < attempts:
+    while check.errors and tries < attempts:
         tries += 1
-        bound.warning("compile_gate.errors", attempt=tries, count=len(errors), sample=errors[:5])
+        bound.warning(
+            "compile_gate.errors", attempt=tries, count=len(check.errors), sample=check.errors[:5]
+        )
         claude_gen.run_task(
             paths.claude_ws,
-            compile_fix_prompt(errors[:80]),
+            compile_fix_prompt(check.errors[:80]),
             timeout=timeout,
             tlog=bound,
         )
-        errors, build_log = compile_errors(app_dir, scheme, _derived_data(paths))
-    bound.info("compile_gate.done", ok=not errors, remaining=len(errors), attempts=tries)
-    return errors, build_log
+        check = compile_errors(app_dir, spec, identity, _derived_data(paths))
+        restored += [rel for rel in check.restored if rel not in restored]
+    bound.info(
+        "compile_gate.done", ok=not check.errors, remaining=len(check.errors), attempts=tries
+    )
+    return GateCheck(check.errors, check.log, restored)
 
 
 def _targets(
@@ -171,19 +201,38 @@ def generate(
             tlog=bound.bind(task=f"screen-{entry.screen_id}"),
         )
 
-    errors, build_log = ensure_compiles(paths, scheme, attempts=fix_attempts, timeout=task_timeout)
+    gate = ensure_compiles(
+        paths, AppIdentity(app_name, bundle_id), attempts=fix_attempts, timeout=task_timeout
+    )
     app_dir = _workspace_app(paths)
-    errors += [f"screen {sid} not generated" for sid in pending_screens(app_dir, entries)]
+    errors = [
+        *gate.errors,
+        *(f"screen {sid} not generated" for sid in pending_screens(app_dir, entries)),
+    ]
 
     if paths.xcode_app.exists():
         shutil.rmtree(paths.xcode_app)
     shutil.copytree(app_dir, paths.xcode_app, ignore=shutil.ignore_patterns("*.xcodeproj"))
     log_path: Path | None = None
-    if build_log:
+    if gate.log:
         log_path = paths.run_dir / "xcodebuild.log"
-        log_path.write_text(build_log, encoding="utf-8")
-    bound.info("swiftui_gen.done", ok=not errors, errors=len(errors), screens=len(entries))
-    return SwiftUIResult(paths.xcode_app, scheme, entries, errors, log_path)
+        log_path.write_text(gate.log, encoding="utf-8")
+    bound.info(
+        "swiftui_gen.done",
+        ok=not errors,
+        errors=len(errors),
+        screens=len(entries),
+        contract_restored=gate.restored,
+    )
+    return SwiftUIResult(
+        app_dir=paths.xcode_app,
+        scheme=scheme,
+        entries=entries,
+        derived_data=_derived_data(paths),
+        errors=errors,
+        build_log=log_path,
+        contract_restored=gate.restored,
+    )
 
 
 def _scope_to(paths: RunPaths, screen_ids: list[str]) -> None:
@@ -226,7 +275,7 @@ def verify_on_simulator(
     """Install the built app and screenshot every screen plus an unknown id."""
     xcode.boot(udid)
     xcode.pin_status_bar(udid)
-    xcode.install(udid, xcode.built_app(result.app_dir.parent / "DerivedData", result.scheme))
+    xcode.install(udid, xcode.built_app(result.derived_data, result.scheme))
     shots: dict[str, Path] = {}
     for screen_id in [*(e.screen_id for e in result.entries), UNKNOWN_SCREEN_ID]:
         xcode.launch_screen(udid, bundle_id, screen_id)
@@ -246,6 +295,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--udid", help="simulator to verify screen-id screenshots on")
     args = parser.parse_args(argv)
 
+    if not xcode.toolchain_available():
+        print("xcodegen / xcodebuild / xcrun not found: the slice can only run on a Mac worker")
+        return 2
     paths = RunPaths.create(args.out)
     shutil.copy2(args.app_spec, paths.app_spec_json)
     frida_ingest.ingest_archive(args.archive, paths)
@@ -254,7 +306,12 @@ def main(argv: list[str] | None = None) -> int:
     app_name = args.app_name or str(spec.get("app_name") or "Generated App")
 
     result = generate(paths, app_name=app_name, bundle_id=args.bundle_id)
-    print(json.dumps({"run_dir": str(paths.run_dir), "errors": result.errors}, indent=2))
+    summary = {
+        "run_dir": str(paths.run_dir),
+        "errors": result.errors,
+        "contract_restored": result.contract_restored,
+    }
+    print(json.dumps(summary, indent=2))
     if result.errors:
         return 1
     if args.udid:

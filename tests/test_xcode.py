@@ -91,8 +91,33 @@ def test_simctl_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         xcode.install("UDID", Path("/tmp/App.app"))
 
 
-def test_toolchain_available_needs_both_tools(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(xcode.shutil, "which", lambda name: None if name == "xcodegen" else "/x")
-    assert not xcode.toolchain_available()
+def test_toolchain_available_needs_every_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    for missing in ("xcodegen", "xcodebuild", "xcrun"):
+        monkeypatch.setattr(
+            xcode.shutil, "which", lambda name, m=missing: None if name == m else "/x"
+        )
+        assert not xcode.toolchain_available()
     monkeypatch.setattr(xcode.shutil, "which", lambda name: f"/usr/bin/{name}")
     assert xcode.toolchain_available()
+
+
+def test_build_timeout_becomes_a_gate_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "Demo.xcodeproj").mkdir()
+
+    def slow(cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+
+    monkeypatch.setattr(xcode.subprocess, "run", slow)
+    outcome = xcode.build(tmp_path, "Demo", derived_data=tmp_path / "dd", timeout=5)
+    assert not outcome.ok and outcome.errors == ["xcodebuild timed out after 5s"]
+
+
+def test_missing_binary_raises_xcode_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing(cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError(cmd[0])
+
+    monkeypatch.setattr(xcode.subprocess, "run", missing)
+    with pytest.raises(xcode.XcodeError, match="xcrun not found"):
+        xcode.boot("UDID")

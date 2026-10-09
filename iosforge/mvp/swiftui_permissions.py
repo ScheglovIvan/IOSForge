@@ -37,7 +37,7 @@ PERMISSION_KINDS: tuple[PermissionKind, ...] = (
         "notifications",
         (),
         (
-            r"UNUserNotificationCenter[\s\S]{0,80}?requestAuthorization",
+            r"UNUserNotificationCenter\s*\.\s*current\s*\(\s*\)\s*\.\s*requestAuthorization",
             r"registerForRemoteNotifications",
         ),
         ("notification", "push notification"),
@@ -56,28 +56,41 @@ PERMISSION_KINDS: tuple[PermissionKind, ...] = (
             r"requestAlwaysAuthorization",
             r"requestTemporaryFullAccuracyAuthorization",
             r"CLLocationUpdate\s*\.\s*liveUpdates",
+            r"CLServiceSession\b",
         ),
         ("gps",),
     ),
     PermissionKind(
         "camera",
         ("NSCameraUsageDescription",),
-        (r"AVCaptureDevice\s*\.\s*requestAccess\s*\(\s*for:\s*\.video",),
+        (
+            r"requestAccess\s*\(\s*for:\s*(?:AVMediaType)?\s*\.video",
+            r"AVCaptureSession\s*\(",
+            r"UIImagePickerController\b",
+            r"\bARSession\s*\(",
+            r"\bARView\s*\(",
+            r"DataScannerViewController\b",
+        ),
     ),
     PermissionKind(
         "microphone",
         ("NSMicrophoneUsageDescription",),
         (
-            r"AVCaptureDevice\s*\.\s*requestAccess\s*\(\s*for:\s*\.audio",
+            r"requestAccess\s*\(\s*for:\s*(?:AVMediaType)?\s*\.audio",
             r"requestRecordPermission",
-            r"AVAudioApplication\s*\.\s*requestRecordPermission",
+            r"AVAudioRecorder\s*\(",
+            r"\.inputNode\b",
         ),
-        ("mic", "audio input", "recording"),
+        ("mic", "audio input", "voice recording"),
     ),
     PermissionKind(
         "photos",
         ("NSPhotoLibraryUsageDescription", "NSPhotoLibraryAddUsageDescription"),
-        (r"PHPhotoLibrary\s*\.\s*requestAuthorization", r"UIImageWriteToSavedPhotosAlbum"),
+        (
+            r"PHPhotoLibrary\s*\.\s*requestAuthorization",
+            r"UIImageWriteToSavedPhotosAlbum",
+            r"PHPhotoLibrary\s*\.\s*shared\s*\(\s*\)\s*\.\s*performChanges",
+        ),
         ("photo", "photo library", "gallery"),
     ),
     PermissionKind(
@@ -107,7 +120,7 @@ PERMISSION_KINDS: tuple[PermissionKind, ...] = (
         "health",
         ("NSHealthShareUsageDescription", "NSHealthUpdateUsageDescription"),
         (
-            r"HKHealthStore[\s\S]{0,120}?requestAuthorization",
+            r"HKHealthStore\s*\(\s*\)\s*\.\s*requestAuthorization",
             r"requestAuthorization\s*\(\s*toShare",
         ),
         ("healthkit",),
@@ -154,11 +167,11 @@ PERMISSION_KINDS: tuple[PermissionKind, ...] = (
     PermissionKind(
         "focus_status",
         ("NSFocusStatusUsageDescription",),
-        (r"INFocusStatusCenter[\s\S]{0,60}?requestAuthorization",),
+        (r"INFocusStatusCenter\s*\.\s*default\s*\.\s*requestAuthorization",),
         ("focus",),
     ),
     PermissionKind(
-        "home",
+        "home_kit",
         ("NSHomeKitUsageDescription",),
         (r"HMHomeManager\s*\(",),
         ("homekit",),
@@ -181,30 +194,127 @@ PERMISSION_KINDS: tuple[PermissionKind, ...] = (
         (r"AuthorizationCenter\s*\.\s*shared\s*\.\s*requestAuthorization",),
         ("screen time", "familycontrols"),
     ),
+    PermissionKind(
+        "nfc",
+        ("NFCReaderUsageDescription",),
+        (r"NFC\w*ReaderSession\s*\(",),
+    ),
+    PermissionKind(
+        "pasteboard",
+        (),
+        (r"UIPasteboard\s*\.\s*general\s*\.\s*(?:string|strings|image|images|url|urls|items)\b",),
+        ("clipboard", "paste"),
+    ),
+    PermissionKind(
+        "review",
+        (),
+        (r"\brequestReview\b",),
+        ("app review", "rating prompt"),
+    ),
 )
 
-_DIRECT_PROMPT_CALL = re.compile(r"\b[A-Z]\w*Permission\s*\.\s*prompt\s*\(")
-_LINE_COMMENT = re.compile(r"//[^\n]*")
-_BLOCK_COMMENT = re.compile(r"/\*[\s\S]*?\*/")
+_GENERIC_PROMPTS = (
+    r"\.requestAuthorization\s*\(",
+    r"\.requestAccess\s*\(",
+    r"\brequestPermission\s*\(",
+)
+_DIRECT_PROMPT_CALL = re.compile(r"\.\s*prompt\s*\(\s*\)")
 
 
-def kind_for(name: str) -> PermissionKind | None:
-    """Map a free-form ``app_spec.permissions[].permission`` label to a kind."""
+def kinds_for(name: str) -> list[PermissionKind]:
+    """Every kind a free-form ``app_spec.permissions[].permission`` label mentions."""
     label = name.strip().lower()
+    found: list[PermissionKind] = []
     for kind in PERMISSION_KINDS:
         tokens = (kind.case.replace("_", " "), kind.case, *kind.aliases)
         if any(re.search(rf"\b{re.escape(token)}s?\b", label) for token in tokens):
-            return kind
-    return None
+            found.append(kind)
+    return found
 
 
-def _strip_comments(source: str) -> str:
-    without_blocks = _BLOCK_COMMENT.sub(lambda m: "\n" * m.group(0).count("\n"), source)
-    return _LINE_COMMENT.sub("", without_blocks)
+def blank_comments_and_strings(source: str) -> str:
+    """Replace comment and string-literal contents with spaces, keeping offsets and lines.
+
+    A small Swift lexer: handles ``//`` and nested ``/* */`` comments and ``"..."`` /
+    multi-line ``\"\"\"...\"\"\"`` strings with escapes, so a ``//`` inside a URL string
+    no longer hides the code after it and prose inside strings is never matched.
+    """
+    out = list(source)
+    i, n = 0, len(source)
+
+    def blank(start: int, end: int) -> None:
+        for j in range(start, min(end, n)):
+            if out[j] != "\n":
+                out[j] = " "
+
+    while i < n:
+        if source.startswith("//", i):
+            end = source.find("\n", i)
+            end = n if end == -1 else end
+            blank(i, end)
+            i = end
+        elif source.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if source.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif source.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            blank(i, j)
+            i = j
+        elif source.startswith('"""', i):
+            end = source.find('"""', i + 3)
+            end = n if end == -1 else end + 3
+            blank(i + 3, end - 3)
+            i = end
+        elif source[i] == '"':
+            j = i + 1
+            while j < n and source[j] not in '"\n':
+                j += 2 if source[j] == "\\" else 1
+            blank(i + 1, j)
+            i = j + 1
+        else:
+            i += 1
+    return "".join(out)
 
 
 def _line_of(source: str, offset: int) -> int:
     return source.count("\n", 0, offset) + 1
+
+
+def _file_violations(rel: Path, source: str) -> list[str]:
+    found: dict[int, str] = {}
+    spans: list[tuple[int, int]] = []
+    for kind in PERMISSION_KINDS:
+        for pattern in kind.patterns:
+            for match in re.finditer(pattern, source):
+                spans.append(match.span())
+                api = re.sub(r"\s+", "", match.group(0))[:60]
+                found.setdefault(
+                    match.start(),
+                    f"{rel}:{_line_of(source, match.start())}: error: {kind.case} permission "
+                    f"API `{api}` outside {PERMISSIONS_DIR}/ — move it into a PermissionPrompter "
+                    "and call Permissions.request(...)",
+                )
+    for pattern in _GENERIC_PROMPTS:
+        for match in re.finditer(pattern, source):
+            if any(start <= match.start() < end for start, end in spans):
+                continue
+            found.setdefault(
+                match.start(),
+                f"{rel}:{_line_of(source, match.start())}: error: permission API "
+                f"`{match.group(0).strip()}` outside {PERMISSIONS_DIR}/ — move it into a "
+                "PermissionPrompter and call Permissions.request(...)",
+            )
+    for match in _DIRECT_PROMPT_CALL.finditer(source):
+        found.setdefault(
+            match.start(),
+            f"{rel}:{_line_of(source, match.start())}: error: direct `.prompt()` call "
+            "bypasses the headless gate — call Permissions.request(...) instead",
+        )
+    return [found[offset] for offset in sorted(found)]
 
 
 def permission_violations(app_dir: Path) -> list[str]:
@@ -212,23 +322,8 @@ def permission_violations(app_dir: Path) -> list[str]:
     violations: list[str] = []
     allowed = (app_dir / PERMISSIONS_DIR).resolve()
     for swift in sorted((app_dir / "App").rglob("*.swift")):
-        rel = swift.relative_to(app_dir)
-        source = _strip_comments(swift.read_text(encoding="utf-8", errors="replace"))
-        inside_gate = swift.resolve().is_relative_to(allowed)
-        if not inside_gate:
-            for kind in PERMISSION_KINDS:
-                for pattern in kind.patterns:
-                    for match in re.finditer(pattern, source):
-                        violations.append(
-                            f"{rel}:{_line_of(source, match.start())}: error: {kind.case} "
-                            f"permission API `{match.group(0).split()[0]}` outside "
-                            f"{PERMISSIONS_DIR}/ — move it into a PermissionPrompter and call "
-                            "Permissions.request(...)"
-                        )
-            for match in _DIRECT_PROMPT_CALL.finditer(source):
-                violations.append(
-                    f"{rel}:{_line_of(source, match.start())}: error: direct "
-                    f"`{match.group(0)}` bypasses the headless gate — call "
-                    "Permissions.request(...) instead"
-                )
+        if swift.resolve().is_relative_to(allowed):
+            continue
+        source = blank_comments_and_strings(swift.read_text(encoding="utf-8", errors="replace"))
+        violations += _file_violations(swift.relative_to(app_dir), source)
     return violations
