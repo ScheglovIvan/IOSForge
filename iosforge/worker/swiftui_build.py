@@ -125,6 +125,7 @@ def hold_reason(report: dict[str, Any], *, structural_gate: bool) -> str | None:
             "dead_links",
             "missing_edges",
             "functional_failures",
+            "functional_infra",
         )
     )
     return (

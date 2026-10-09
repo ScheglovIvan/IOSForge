@@ -72,16 +72,40 @@ def clear_journal(udid: str, bundle_id: str) -> None:
         (container / "Documents" / JOURNAL_NAME).unlink(missing_ok=True)
 
 
+def describe_flow(check: FunctionalCheck) -> str:
+    """What the driver does on the screen, in words (for the corrective prompt)."""
+    words = {
+        "type": "types {value!r} into the first text field",
+        "tap": "taps the first button whose label matches /{value}/ (case-insensitive)",
+        "wait_text": "waits up to {timeout:g}s for a text containing {value!r}",
+        "pause": "waits {timeout:g}s",
+    }
+    steps = [
+        words[s.kind].format(value=s.value, timeout=s.timeout)
+        for s in check.steps
+        if s.kind in words
+    ]
+    effects = ", ".join(check.expect_events) or "nothing"
+    return f"opens screen {check.screen_id}, {'; '.join(steps)}; the module must record: {effects}"
+
+
 def verdict(
     check: FunctionalCheck, outcome: xcode.UITestOutcome, events: list[dict[str, str]]
 ) -> dict[str, Any]:
-    """One check's result: UI flow passed and every expected effect recorded (pure)."""
+    """One check's result: UI flow passed and every expected effect recorded (pure).
+
+    A failure of the test infrastructure itself (xcodebuild timed out, the runner did not
+    start, the test never ran) is an ``infra_error``, not evidence that the capability is
+    broken.
+    """
     seen = [e["event"] for e in events if e.get("check") == check.name]
     missing = [event for event in check.expect_events if event not in seen]
     ui_passed = check.test_name in outcome.passed
-    reason = outcome.failed.get(check.test_name) or outcome.failed.get("xcodebuild", "")
-    if not ui_passed and not reason:
-        reason = "the UI test did not run"
+    test_failure = outcome.failed.get(check.test_name, "")
+    infra = not ui_passed and not test_failure
+    reason = test_failure
+    if infra:
+        reason = outcome.failed.get("xcodebuild") or "the UI test did not run"
     if ui_passed and missing:
         reason = f"the module never recorded: {', '.join(missing)}"
     return {
@@ -89,21 +113,33 @@ def verdict(
         "screen_id": check.screen_id,
         "passed": ui_passed and not missing,
         "ui_passed": ui_passed,
+        "infra_error": infra,
         "events": seen,
         "missing_events": missing,
-        "message": "" if ui_passed and not missing else reason,
+        "flow": describe_flow(check),
+        "message": "" if ui_passed and not missing else reason[-600:],
     }
 
 
-def _mock_environment(stack: ExitStack, checks: list[FunctionalCheck]) -> dict[str, str]:
+def _merge(environment: dict[str, str], values: dict[str, str], source: str) -> None:
+    for key, value in values.items():
+        if not key.startswith("IOSFORGE_"):
+            raise ValueError(f"{source}: mock setting {key!r} must start with IOSFORGE_")
+        if key in environment and environment[key] != value:
+            raise ValueError(f"{source}: mock setting {key!r} collides with another check")
+        environment[key] = value
+
+
+def mock_environment(stack: ExitStack, checks: list[FunctionalCheck]) -> dict[str, str]:
+    """Start every check's mock and merge the ``IOSFORGE_*`` settings they yield."""
     environment: dict[str, str] = {}
     for check in checks:
         if check.mock:
             factory = MOCKS.get(check.mock)
             if factory is None:
                 raise KeyError(f"functional check {check.name!r} needs unknown mock {check.mock!r}")
-            environment.update(stack.enter_context(factory(check)))
-        environment.update(check.env)
+            _merge(environment, stack.enter_context(factory(check)), check.name)
+        _merge(environment, check.env, check.name)
     return environment
 
 
@@ -128,7 +164,7 @@ def run(
     identity = identity_from_project(paths.xcode_app)
     xcode.generate_project(paths.xcode_app)
     with ExitStack() as stack:
-        environment = _mock_environment(stack, checks)
+        environment = mock_environment(stack, checks)
         clear_journal(udid, identity.bundle_id)
         outcome = xcode.run_ui_tests(
             paths.xcode_app,
@@ -141,20 +177,70 @@ def run(
         )
     events = read_journal(udid, identity.bundle_id)
     results = [verdict(check, outcome, events) for check in checks]
-    report = {"ok": all(r["passed"] for r in results), "checks": results}
+    report = {
+        "ok": all(r["passed"] for r in results),
+        "infra_error": any(r["infra_error"] for r in results),
+        "checks": results,
+    }
     (paths.run_dir / "functional_tests.log").write_text(outcome.log[-200_000:], encoding="utf-8")
     _write(paths, report)
     log.info("functional.done", ok=report["ok"], checks=[(r["name"], r["passed"]) for r in results])
     return report
 
 
+def run_safely(
+    paths: RunPaths,
+    *,
+    udid: str,
+    spec: dict[str, Any] | None = None,
+    timeout: int = 1800,
+) -> dict[str, Any]:
+    """:func:`run`, retried once on an infrastructure error; never raises.
+
+    A run that cannot even start (unknown mock, no toolchain, project generation) comes
+    back as a failed report with ``infra_error`` so the caller holds the job instead of
+    crashing or blaming the screens.
+    """
+    report: dict[str, Any] = {}
+    for _ in range(2):
+        try:
+            report = run(paths, udid=udid, spec=spec, timeout=timeout)
+        except Exception as exc:
+            log.error("functional.crashed", error=str(exc))
+            report = {"ok": False, "infra_error": True, "checks": [], "error": str(exc)[:600]}
+        if not report.get("infra_error"):
+            return report
+    return report
+
+
 def failing_screens(report: dict[str, Any]) -> list[dict[str, str]]:
-    """``{id, capability, message}`` for every failed check (corrective task input)."""
+    """``{id, capability, message, flow}`` for every check the capability itself failed.
+
+    Infrastructure errors are excluded: they hold the gate (:func:`infra_errors`) but must
+    not send a correct screen to a corrective rewrite.
+    """
     return [
-        {"id": str(r["screen_id"]), "capability": str(r["name"]), "message": str(r["message"])}
+        {
+            "id": str(r["screen_id"]),
+            "capability": str(r["name"]),
+            "message": str(r["message"]),
+            "flow": str(r.get("flow", "")),
+        }
         for r in report.get("checks", [])
-        if not r.get("passed")
+        if not r.get("passed") and not r.get("infra_error")
     ]
+
+
+def infra_errors(report: dict[str, Any]) -> list[dict[str, str]]:
+    """Infrastructure failures of a functional run (they hold the gate, no corrective task)."""
+    errors = [
+        {"capability": str(r["name"]), "message": str(r["message"])}
+        for r in report.get("checks", [])
+        if r.get("infra_error")
+    ]
+    if report.get("error") and not errors:
+        errors.append({"capability": "", "message": str(report["error"])})
+    return errors
 
 
 def _write(paths: RunPaths, report: dict[str, Any]) -> None:

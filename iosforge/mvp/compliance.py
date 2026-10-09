@@ -507,6 +507,7 @@ def diffs_to_tasks(report: dict[str, Any], iteration: int) -> dict[str, Any]:
                     "screens": [sid],
                     "capability": str(finding.get("capability")),
                     "message": str(finding.get("message")),
+                    "flow": str(finding.get("flow", "")),
                     "deps": [],
                 }
             )
@@ -693,7 +694,14 @@ def _refine(
 
 
 def _structural_open_count(structural: dict[str, Any]) -> int:
-    keys = ("missing_screens", "blank_screens", "dead_links", "missing_edges")
+    keys = (
+        "missing_screens",
+        "blank_screens",
+        "dead_links",
+        "missing_edges",
+        "functional_failures",
+        "functional_infra",
+    )
     return sum(len(structural.get(key, [])) for key in keys)
 
 
@@ -813,7 +821,7 @@ def verify_ios(
     )
     spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
     if functional.app_checks(paths, spec):
-        report["functional"] = functional.run(paths, udid=env.udid, spec=spec)
+        report["functional"] = functional.run_safely(paths, udid=env.udid, spec=spec)
     return report
 
 
@@ -847,7 +855,9 @@ def refine_ios_until_complete(
         render_generated_ios(paths, env, app=app)
         if functional.app_checks(paths, spec):
             functional_report.clear()
-            functional_report.update(functional.run(paths, udid=env.udid, spec=spec))
+            functional_report.update(
+                functional.run_safely(paths, udid=env.udid, spec=spec, timeout=timeout)
+            )
 
     def _audit() -> dict[str, Any]:
         structural = nav_audit_ios(paths)
@@ -868,6 +878,7 @@ def refine_ios_until_complete(
         if functional_report:
             structural["functional"] = dict(functional_report)
             structural["functional_failures"] = functional.failing_screens(functional_report)
+            structural["functional_infra"] = functional.infra_errors(functional_report)
             structural["ok"] = structural["ok"] and bool(functional_report.get("ok"))
         return structural
 

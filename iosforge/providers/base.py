@@ -104,9 +104,9 @@ SIMULATOR_ENV_CONTRACT: str = (
 #: * screens call the module's Swift API (its screen rule is injected into every
 #:   screen prompt) and never import the SDK or the system framework it wraps;
 #: * headless screen-id mode never starts a module (screens show fixtures);
-#: * a module may ship a ``mock`` and a ``functional_check``: functional
-#:   verification proves the integration against that MOCK, not against real
-#:   hardware or a real backend.
+#: * a module may declare a ``functional_check`` naming a mock from
+#:   :data:`iosforge.mvp.functional.MOCKS`: functional verification proves the
+#:   integration against that MOCK, not against real hardware or a real backend.
 #:
 #: Tier 1 capabilities stay in screen code (simple system API), tier 3 is a custom
 #: core written by a human, tier 4 is not built (flagged to the operator).

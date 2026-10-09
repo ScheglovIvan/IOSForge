@@ -20,7 +20,6 @@ verification runs the app LIVE instead:
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 
@@ -103,15 +102,25 @@ enum Functional {{
 """
 
 
-def _swift(text: str) -> str:
-    return json.dumps(text, ensure_ascii=False)
+_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def swift_literal(text: str) -> str:
+    """``text`` as a Swift string literal (only escapes Swift accepts)."""
+    body = "".join(_ESCAPES.get(ch, f"\\u{{{ord(ch):x}}}" if ord(ch) < 0x20 else ch) for ch in text)
+    return f'"{body}"'
+
+
+_swift = swift_literal
 
 
 def _step(step: Step) -> str:
     if step.kind == "type":
         return f"        typeIntoFirstField(app, {_swift(step.value)})"
     if step.kind == "tap":
-        return f"        try tapAction(app, matching: {_swift(step.value)})"
+        return (
+            f"        try tapAction(app, matching: {_swift(step.value)}, timeout: {step.timeout})"
+        )
     if step.kind == "wait_text":
         return f"        try waitForText(app, {_swift(step.value)}, timeout: {step.timeout})"
     if step.kind == "pause":
@@ -127,14 +136,20 @@ def _test(check: FunctionalCheck, launch_keys: list[str]) -> str:
         app.launchArguments = ["{LAUNCH_FLAG}", "-iosforge.onboarding_done", "YES"{skips}]
         app.launchEnvironment = forwardedEnvironment(check: {_swift(check.name)})
         app.launch()
+        _ = app.wait(for: .runningForeground, timeout: 15)
         app.open(URL(string: "iosforge://screen/{check.screen_id}")!)
-        sleep(2)
+        _ = app.wait(for: .runningForeground, timeout: 15)
+        sleep(1)
 {steps}
     }}"""
 
 
 def render_ui_tests(checks: list[FunctionalCheck], launch_screen_ids: list[str]) -> str:
     """``UITests/FunctionalTests.swift``: one XCUITest per functional check."""
+    names = [check.test_name for check in checks]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(f"functional checks collide on test names: {duplicates}")
     tests = "\n\n".join(_test(check, launch_screen_ids) for check in checks)
     return f"""import XCTest
 
@@ -154,15 +169,22 @@ final class FunctionalTests: XCTestCase {{
     }}
 
     private func typeIntoFirstField(_ app: XCUIApplication, _ text: String) {{
-        let field = app.textFields.firstMatch.exists ? app.textFields.firstMatch : app.textViews.firstMatch
-        guard field.waitForExistence(timeout: 5) else {{ return }}
-        field.tap()
-        field.typeText(text)
+        let deadline = Date().addingTimeInterval(8)
+        while Date() < deadline {{
+            for field in [app.textFields.firstMatch, app.textViews.firstMatch, app.searchFields.firstMatch]
+            where field.exists && field.isHittable {{
+                field.tap()
+                field.typeText(text)
+                return
+            }}
+            sleep(1)
+        }}
+        XCTFail("no text field on screen to type '\\(text)' into")
     }}
 
-    private func tapAction(_ app: XCUIApplication, matching pattern: String) throws {{
+    private func tapAction(_ app: XCUIApplication, matching pattern: String, timeout: TimeInterval) throws {{
         let regex = try NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
-        let deadline = Date().addingTimeInterval(8)
+        let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {{
             for button in app.buttons.allElementsBoundByIndex where button.exists && button.isHittable {{
                 let label = button.label

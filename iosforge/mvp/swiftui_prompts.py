@@ -281,9 +281,10 @@ def _corrective_task_text(task: dict[str, object], entry: ScreenEntry) -> str:
     if kind == "fix_functional":
         return (
             f"The capability `{task.get('capability')}` does NOT WORK on this screen — its "
-            f"functional check failed: {task.get('message')}. Wire the screen to the capability "
-            "module API from the rules (a real call from the user action, the result shown on "
-            "screen); never fake it with timers or fixtures outside headless mode. Keep the layout."
+            f"functional check failed: {task.get('message')}. The check {task.get('flow')}. "
+            "Wire the screen to the capability module API from the rules (a real call from the "
+            "user action, the result shown on screen) so that flow succeeds; never fake it with "
+            "timers or fixtures outside headless mode. Keep the layout."
         )
     if kind == "add_edge":
         via = task.get("via_element") or "the matching control"

@@ -208,7 +208,7 @@ def test_refine_folds_the_functional_report_into_the_audit(
         "ok": False,
         "checks": [{"name": "echo", "screen_id": "0001", "passed": False, "message": "x"}],
     }
-    monkeypatch.setattr(functional, "run", lambda p, udid, spec: failing)
+    monkeypatch.setattr(functional, "run", lambda p, udid, spec, timeout: failing)
 
     def fake_refine(p: RunPaths, prepare: Any, **kw: Any) -> dict[str, Any]:
         prepare()
@@ -249,3 +249,170 @@ def test_shell_capability_fails_on_the_simulator(tmp_path: Path, echo_module: No
     report = _run_on_simulator(tmp_path, SHELL_SCREEN)
     check = report["checks"][0]
     assert not report["ok"] and check["ui_passed"] and check["missing_events"] == ["echo"]
+
+
+def _check(name: str = "echo", **kw: Any) -> swf.FunctionalCheck:
+    base: dict[str, Any] = {
+        "name": name,
+        "screen_id": "0001",
+        "steps": (swf.Step("tap", "send"),),
+        "expect_events": ("echo",),
+    }
+    base.update(kw)
+    return swf.FunctionalCheck(**base)
+
+
+def test_infra_failure_is_not_blamed_on_the_capability() -> None:
+    outcome = xcode.UITestOutcome(
+        ok=False, passed=[], failed={"xcodebuild": "timed out after 1800s"}, log=""
+    )
+    result = functional.verdict(_check(), outcome, [])
+    assert result["infra_error"] and not result["passed"] and "timed out" in result["message"]
+    report = {"ok": False, "infra_error": True, "checks": [result]}
+    assert functional.failing_screens(report) == []
+    assert functional.infra_errors(report)[0]["capability"] == "echo"
+    real = functional.verdict(
+        _check(), xcode.UITestOutcome(False, [], {"test_echo": "no button"}, ""), []
+    )
+    assert not real["infra_error"] and functional.failing_screens({"checks": [real]})
+
+
+def test_open_count_includes_functional_findings() -> None:
+    structural = {
+        "functional_failures": [{"id": "0001"}],
+        "functional_infra": [{"message": "x"}],
+        "missing_screens": [],
+    }
+    assert compliance._structural_open_count(structural) == 2
+
+
+def test_run_safely_retries_infra_and_never_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = RunPaths.create(tmp_path / "runs")
+    calls: list[int] = []
+
+    def flaky(p: RunPaths, **kw: Any) -> dict[str, Any]:
+        calls.append(1)
+        if len(calls) == 1:
+            return {"ok": False, "infra_error": True, "checks": []}
+        return {"ok": True, "infra_error": False, "checks": []}
+
+    monkeypatch.setattr(functional, "run", flaky)
+    assert functional.run_safely(paths, udid="U")["ok"] and len(calls) == 2
+
+    def boom(p: RunPaths, **kw: Any) -> dict[str, Any]:
+        raise KeyError("unknown mock")
+
+    monkeypatch.setattr(functional, "run", boom)
+    report = functional.run_safely(paths, udid="U")
+    assert report["infra_error"] and "unknown mock" in report["error"]
+    assert functional.infra_errors(report)[0]["message"].startswith("'unknown mock'")
+
+
+def test_mock_environment_rejects_foreign_and_colliding_keys() -> None:
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        merged = functional.mock_environment(
+            stack, [_check("a", env={"IOSFORGE_X": "1"}), _check("b", env={"IOSFORGE_X": "1"})]
+        )
+        assert merged == {"IOSFORGE_X": "1"}
+        with pytest.raises(ValueError, match="collides"):
+            functional.mock_environment(
+                stack, [_check("a", env={"IOSFORGE_X": "1"}), _check("b", env={"IOSFORGE_X": "2"})]
+            )
+        with pytest.raises(ValueError, match="must start with IOSFORGE_"):
+            functional.mock_environment(stack, [_check(env={"API_KEY": "s"})])
+        with pytest.raises(KeyError, match="unknown mock"):
+            functional.mock_environment(stack, [_check(mock="nowhere")])
+
+
+def test_journal_is_read_and_cleared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    container = tmp_path / "container"
+    (container / "Documents").mkdir(parents=True)
+    journal = container / "Documents" / swf.JOURNAL_NAME
+    journal.write_text('{"event": "echo", "check": "echo"}\nnot json\n[1]\n')
+    monkeypatch.setattr(xcode, "app_data_container", lambda udid, bundle: container)
+    assert functional.read_journal("U", "b") == [{"event": "echo", "check": "echo"}]
+    functional.clear_journal("U", "b")
+    assert not journal.exists() and functional.read_journal("U", "b") == []
+    monkeypatch.setattr(xcode, "app_data_container", lambda udid, bundle: None)
+    functional.clear_journal("U", "b")
+    assert functional.read_journal("U", "b") == []
+
+
+def test_run_ui_tests_passes_runner_env_and_only_testing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "App.xcodeproj").mkdir()
+    seen: dict[str, Any] = {}
+
+    def fake_run(cmd: list[str], **kw: Any) -> Any:
+        seen["cmd"], seen["env"] = cmd, kw["env"]
+        out = "Test Case '-[FunctionalUITests.FunctionalTests test_echo]' passed (1.0 seconds).\n"
+        return type("R", (), {"returncode": 0, "stdout": out, "stderr": ""})()
+
+    monkeypatch.setattr(xcode, "_run", fake_run)
+    outcome = xcode.run_ui_tests(
+        tmp_path, "App", udid="U", derived_data=tmp_path / "dd",
+        environment={"IOSFORGE_API": "http://127.0.0.1:9"},
+        only=["FunctionalUITests/FunctionalTests/test_echo"],
+    )  # fmt: skip
+    assert outcome.ok and outcome.passed == ["test_echo"]
+    assert seen["env"]["TEST_RUNNER_IOSFORGE_API"] == "http://127.0.0.1:9"
+    assert "-only-testing:FunctionalUITests/FunctionalTests/test_echo" in seen["cmd"]
+    assert "id=U" in seen["cmd"]
+
+
+def test_run_without_checks_is_skipped(tmp_path: Path) -> None:
+    paths = _app(tmp_path, _spec_three_screens())
+    report = functional.run(paths, udid="U", spec=_spec_three_screens())
+    assert report == {"ok": True, "checks": [], "skipped": "no functional checks"}
+
+
+def test_verify_ios_attaches_the_functional_report(
+    tmp_path: Path, echo_module: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _app(tmp_path, _echo_spec())
+    monkeypatch.setattr(compliance, "build_ios", lambda p: Path("/tmp/App.app"))
+    monkeypatch.setattr(compliance, "render_generated_ios", lambda p, env, app: None)
+    monkeypatch.setattr(compliance, "evaluate", lambda p, i, **kw: {"compliance_score": 0.9})
+    monkeypatch.setattr(functional, "run_safely", lambda p, udid, spec: {"ok": True, "checks": []})
+    report = compliance.verify_ios(
+        paths, compliance.simulator.SimEnvironment(udid="U", locale="en-US"),
+        weights=compliance.ComplianceWeights(0.4, 0.3, 0.1, 0.2), threshold=0.8, soft_floor=0.6,
+    )  # fmt: skip
+    assert report["functional"] == {"ok": True, "checks": []}
+
+
+def test_driver_rejects_colliding_test_names_and_escapes_literals() -> None:
+    with pytest.raises(ValueError, match="collide"):
+        swf.render_ui_tests([_check("a-b"), _check("a_b")], [])
+    assert swf.swift_literal('say "hi"\n\x07') == '"say \\"hi\\"\\n\\u{7}"'
+    tests = swf.render_ui_tests([_check()], [])
+    assert "no text field on screen to type '\\(text)' into" in tests
+    assert 'try tapAction(app, matching: "send", timeout: 10.0)' in tests
+
+
+@pytest.mark.mac
+@pytest.mark.skipif(_first_iphone() is None, reason="needs Xcode, XcodeGen and an iPhone simulator")
+def test_missing_text_fails_the_flow_not_the_infra(
+    tmp_path: Path, echo_module: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def wrong_expectation(ctx: caps.CapabilityContext) -> swf.FunctionalCheck:
+        check = _echo_check(ctx)
+        steps = (*check.steps[:2], swf.Step("wait_text", "NEVER_SHOWN", timeout=4))
+        return swf.FunctionalCheck(check.name, check.screen_id, steps, check.expect_events)
+
+    descriptor = caps.REGISTRY["echo_test"]
+    monkeypatch.setitem(
+        caps.REGISTRY,
+        "echo_test",
+        caps.CapabilityDescriptor(
+            key=descriptor.key, directory=descriptor.directory, render=descriptor.render,
+            screen_api_rule=descriptor.screen_api_rule, functional_check=wrong_expectation,
+        ),
+    )  # fmt: skip
+    check = _run_on_simulator(tmp_path, REAL_SCREEN)["checks"][0]
+    assert not check["passed"] and not check["infra_error"] and "NEVER_SHOWN" in check["message"]
