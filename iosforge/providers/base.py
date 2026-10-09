@@ -36,22 +36,60 @@ from iosforge.storage import ArtifactRef
 #: Navigation contract every generated app MUST honour (SPEC §5.5, SwiftUI pivot).
 #:
 #: To let the Vision Judge render a single screen headlessly on the iOS
-#: Simulator, the generated app must accept a ``screen-id`` and deep-link
-#: straight to that screen, bypassing normal navigation. This replaces the old
-#: Flutter web route ``/#/screen/:id``. A :class:`CodegenTarget` implementation
-#: must emit an app that supports BOTH entry points:
+#: Simulator, the generated app must accept a ``screen-id`` and open straight on
+#: that screen, bypassing normal navigation. This replaces the old Flutter web
+#: route ``/#/screen/:id``. A :class:`CodegenTarget` implementation must emit an
+#: app whose ONLY mandatory headless entry point is the launch argument:
 #:
-#: * launch argument — ``simctl launch <udid> <bundle> -screen-id <id>`` (read
-#:   from ``ProcessInfo.processInfo.arguments`` / ``UserDefaults``);
-#: * custom URL scheme — ``iosforge://screen/<id>`` (opened via
-#:   ``simctl openurl <udid> <url>``).
+#: * ``simctl launch --terminate-running-process <udid> <bundle> -screen-id <id>``
+#:   — read from the UserDefaults argument domain
+#:   (``UserDefaults.standard.string(forKey: "screen-id")``).
 #:
-#: Given either, the app opens directly on the matching screen with no operator
-#: interaction so ``simctl io <udid> screenshot`` captures exactly that screen.
+#: The custom URL scheme ``iosforge://screen/<id>`` is OPTIONAL (manual QA only):
+#: ``simctl openurl`` raises the system "Open in …?" dialog on cold and warm start
+#: (iOS 17.2 and 26.5), so the Vision Judge, ``nav_audit`` and the worker never use it.
+#:
+#: In screen-id mode the app MUST:
+#:
+#: * skip onboarding / first-run gates;
+#: * suppress ALL system permission prompts (notifications, ATT, location,
+#:   camera, …) — they overlay the target screen;
+#: * render data-dependent screens from bundled fixtures;
+#: * present modal targets (``sheet`` / ``fullScreenCover``) as the target, with a
+#:   correct navigation stack beneath them;
+#: * render an explicit, detectable error screen for an unknown id — never a
+#:   silent fallback to home.
+#:
+#: The app opens on the matching screen with no operator interaction so
+#: ``simctl io <udid> screenshot`` captures exactly that screen. Reference
+#: implementation: Phase 0 spike (DECISIONS 2026-10-09 "Контракт screen-id").
 SCREEN_NAV_CONTRACT: str = (
-    "generated app accepts a screen-id via launch argument "
-    "(-screen-id <id>) or custom URL scheme (iosforge://screen/<id>) and "
-    "deep-links headlessly to that screen for Simulator screenshotting"
+    "generated app MUST open headlessly on a screen given the launch argument "
+    "-screen-id <id> (the only mandatory entry point; iosforge://screen/<id> is "
+    "optional, manual QA only), skipping onboarding, suppressing permission "
+    "prompts, rendering from fixtures and showing an explicit error screen for "
+    "an unknown id"
+)
+
+#: Simulator environment contract the worker MUST enforce before screenshotting
+#: generated screens for the Vision Judge (complements :data:`SCREEN_NAV_CONTRACT`).
+#:
+#: * pin the environment once per job: ``simctl status_bar <udid> override``
+#:   (time / battery / network), appearance (light / dark) and the simulator
+#:   locale / region / language set to the language of THIS job's original app —
+#:   derived per job, never hard-coded (an unpinned simulator keeps its own default
+#:   locale and the judge would compare screens across different locales);
+#: * relaunch per screen with ``simctl launch --terminate-running-process``;
+#: * wait for a stable frame instead of a fixed sleep: capture until two
+#:   consecutive screenshots differ by < 0.5 % of pixels (the spike settled at
+#:   ~0.7 s after launch);
+#: * compare frames with a pixel / perceptual diff with tolerance, never a byte
+#:   hash (status bar / home indicator anti-aliasing breaks md5 equality).
+SIMULATOR_ENV_CONTRACT: str = (
+    "worker pins status bar, appearance and the simulator locale/region/language "
+    "to the job's original-app language, relaunches with "
+    "--terminate-running-process per screen and waits until two consecutive "
+    "screenshots differ by < 0.5 % of pixels (tolerant pixel diff, no byte hash)"
 )
 
 # --------------------------------------------------------------------------- #
@@ -369,6 +407,7 @@ __all__ = [
     "PromptSetVersion",
     "Provider",
     "SCREEN_NAV_CONTRACT",
+    "SIMULATOR_ENV_CONTRACT",
     "ScreenShot",
     "ScreenSource",
     "WalkthroughResult",
