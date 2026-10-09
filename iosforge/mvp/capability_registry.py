@@ -51,6 +51,12 @@ MODULES: dict[str, ModuleInfo] = {
             "shows device capacity, free space and the app cache, and clears that cache",
         ),
         ModuleInfo(
+            "content_feed",
+            ("content_feed",),
+            "a content library (articles, sounds, lessons, presets) from the operator's feed or a "
+            "bundled seed, premium items gated by the subscription",
+        ),
+        ModuleInfo(
             "attribution_tenjin",
             ("other",),
             "install attribution through Tenjin after the App Tracking Transparency prompt",

@@ -261,6 +261,7 @@ def jobs_build_settings(
     tenjin_api_key: str = Form(""),
     appstore_apple_id: str = Form(""),
     remote_api_base_url: str = Form(""),
+    content_feed_url: str = Form(""),
     user: SessionData = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> Response:
@@ -296,6 +297,9 @@ def jobs_build_settings(
     remote_api_base_url = (remote_api_base_url or "").strip().rstrip("/")
     if remote_api_base_url and not re.fullmatch(r"https://[^\s<>?#@]{4,200}", remote_api_base_url):
         return Response("Invalid remote API endpoint (https, no query).", status_code=400)
+    content_feed_url = (content_feed_url or "").strip()
+    if content_feed_url and not re.fullmatch(r"https://[^\s<>#@]{4,300}", content_feed_url):
+        return Response("Invalid content feed URL (https).", status_code=400)
 
     meta = dict(job.source_app_metadata or {})
     meta["build_profile"] = profile
@@ -306,6 +310,7 @@ def jobs_build_settings(
     meta["tenjin_api_key"] = tenjin_api_key
     meta["appstore_apple_id"] = appstore_apple_id
     meta["remote_api_base_url"] = remote_api_base_url
+    meta["content_feed_url"] = content_feed_url
     job.source_app_metadata = meta  # reassign so SQLAlchemy persists the JSONB change
     db.commit()
 
