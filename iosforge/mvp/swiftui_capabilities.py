@@ -261,7 +261,8 @@ def load_modules() -> None:
     with _LOAD_LOCK:
         if _LOADED:
             return
-        from iosforge.mvp import swiftui_remote_api
+        from iosforge.mvp import swiftui_cleaners, swiftui_remote_api
 
         swiftui_remote_api.register()
+        swiftui_cleaners.register()
         _LOADED.append(True)

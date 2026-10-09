@@ -36,6 +36,21 @@ MODULES: dict[str, ModuleInfo] = {
             "(URLSession, endpoint from the capability config, no SDK)",
         ),
         ModuleInfo(
+            "photos_cleaner",
+            ("photos_cleaner",),
+            "finds duplicate photos in the library and deletes the extra copies (PhotoKit)",
+        ),
+        ModuleInfo(
+            "contacts_cleaner",
+            ("contacts_cleaner",),
+            "finds duplicate contacts and merges them by deleting the copies (Contacts)",
+        ),
+        ModuleInfo(
+            "storage_scan",
+            ("storage_scan",),
+            "shows device capacity, free space and the app cache, and clears that cache",
+        ),
+        ModuleInfo(
             "attribution_tenjin",
             ("other",),
             "install attribution through Tenjin after the App Tracking Transparency prompt",

@@ -294,7 +294,7 @@ def jobs_build_settings(
     if appstore_apple_id and not re.fullmatch(r"[0-9]{5,15}", appstore_apple_id):
         return Response("Invalid App Store Apple ID (numbers only).", status_code=400)
     remote_api_base_url = (remote_api_base_url or "").strip().rstrip("/")
-    if remote_api_base_url and not re.fullmatch(r"https://[^\s<>?#]{4,200}", remote_api_base_url):
+    if remote_api_base_url and not re.fullmatch(r"https://[^\s<>?#@]{4,200}", remote_api_base_url):
         return Response("Invalid remote API endpoint (https, no query).", status_code=400)
 
     meta = dict(job.source_app_metadata or {})

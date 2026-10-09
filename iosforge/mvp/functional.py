@@ -129,8 +129,11 @@ def _merge(environment: dict[str, str], values: dict[str, str], source: str) -> 
         environment[key] = value
 
 
-def mock_environment(stack: ExitStack, checks: list[FunctionalCheck]) -> dict[str, str]:
+def mock_environment(
+    stack: ExitStack, checks: list[FunctionalCheck], context: swf.MockContext | None = None
+) -> dict[str, str]:
     """Start every check's mock and merge the ``IOSFORGE_*`` settings they yield."""
+    where = context or swf.MockContext(udid="", bundle_id="")
     environment: dict[str, str] = {}
     for check in checks:
         if check.mock:
@@ -139,7 +142,7 @@ def mock_environment(stack: ExitStack, checks: list[FunctionalCheck]) -> dict[st
                 raise FunctionalConfigError(
                     f"functional check {check.name!r} needs unknown mock {check.mock!r}"
                 )
-            _merge(environment, stack.enter_context(factory(check)), check.name)
+            _merge(environment, stack.enter_context(factory(check, where)), check.name)
         _merge(environment, check.env, check.name)
     return environment
 
@@ -165,7 +168,9 @@ def run(
     identity = identity_from_project(paths.xcode_app)
     xcode.generate_project(paths.xcode_app)
     with ExitStack() as stack:
-        environment = mock_environment(stack, checks)
+        environment = mock_environment(
+            stack, checks, swf.MockContext(udid=udid, bundle_id=identity.bundle_id)
+        )
         clear_journal(udid, identity.bundle_id)
         outcome = xcode.run_ui_tests(
             paths.xcode_app,

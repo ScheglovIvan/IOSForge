@@ -240,6 +240,7 @@ def test_operator_endpoint_must_be_https_without_query(tmp_path: Path) -> None:
         ("https://my.backend.io/", "https://my.backend.io"),
         ("http://my.backend.io", remote.UNCONFIGURED_URL),
         ("https://my.backend.io?x=1", remote.UNCONFIGURED_URL),
+        ("https://user:pass@my.backend.io", remote.UNCONFIGURED_URL),
     ):
         app = tmp_path / f"app{abs(hash(url))}"
         caps.integ.write(app, caps.integ.Integrations(remote_api_url=url))

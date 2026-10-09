@@ -29,7 +29,13 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from iosforge.mvp import swiftui_capabilities as caps
-from iosforge.mvp.swiftui_functional import FunctionalCheck, Step, register_mock, swift_literal
+from iosforge.mvp.swiftui_functional import (
+    FunctionalCheck,
+    MockContext,
+    Step,
+    register_mock,
+    swift_literal,
+)
 from iosforge.mvp.swiftui_templates import DO_NOT_EDIT
 
 KEY = "remote_api"
@@ -63,7 +69,7 @@ def _first_field(shape: object, preferred: tuple[str, ...], fallback: str) -> st
 
 def _base_url(value: object) -> str:
     text = str(value or "").strip()
-    if not re.fullmatch(r"https://[^\s<>?#]+", text):
+    if not re.fullmatch(r"https://[^\s<>?#@]+", text):
         return UNCONFIGURED_URL
     return text.rstrip("/")
 
@@ -282,7 +288,7 @@ def stub_server(
 
 
 @contextmanager
-def _mock(check: FunctionalCheck) -> Iterator[dict[str, str]]:
+def _mock(check: FunctionalCheck, context: MockContext) -> Iterator[dict[str, str]]:
     output_field = check.env.get("IOSFORGE_REMOTE_API_OUTPUT", DEFAULT_OUTPUT_FIELD)
     with stub_server(output_field) as (url, _requests):
         yield {"IOSFORGE_REMOTE_API_URL": url}

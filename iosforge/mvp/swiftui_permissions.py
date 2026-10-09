@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 PERMISSIONS_DIR = "App/Permissions"
+#: Scaffold directories of capability modules: trusted contract code the lint skips.
+MODULE_DIRS = ("App/Capabilities", "App/Monetization")
 
 
 @dataclass(frozen=True)
@@ -376,15 +378,16 @@ def _file_violations(
 def permission_violations(app_dir: Path, *, declared: set[str] | None = None) -> list[str]:
     """Prompting APIs used outside ``App/Permissions/`` (empty list = clean).
 
-    Explicit request APIs are only allowed in ``App/Permissions/``; capture APIs that
+    Explicit request APIs are only allowed in ``App/Permissions/`` and in the scaffold's
+    capability modules (:data:`MODULE_DIRS`, contract code); capture APIs that
     prompt implicitly are also allowed in ``*Service.swift`` files that check
     ``Headless.isActive``. ``declared`` (prompter type names) additionally flags
     ``Permissions.request(X.self)`` for a kind the app_spec does not declare.
     """
     violations: list[str] = []
-    allowed = (app_dir / PERMISSIONS_DIR).resolve()
+    trusted = [(app_dir / d).resolve() for d in (PERMISSIONS_DIR, *MODULE_DIRS)]
     for swift in sorted((app_dir / "App").rglob("*.swift")):
-        if swift.resolve().is_relative_to(allowed):
+        if any(swift.resolve().is_relative_to(folder) for folder in trusted):
             continue
         source = blank_comments_and_strings(swift.read_text(encoding="utf-8", errors="replace"))
         violations += _file_violations(

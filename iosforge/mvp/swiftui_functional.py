@@ -41,8 +41,12 @@ class Step:
 
     ``kind``: ``type`` (type ``value`` into the first text field / text view),
     ``tap`` (tap the hittable button whose whole label matches the ``value`` regex,
-    else the shortest label containing a match; case-insensitive), ``wait_text`` (a static text containing ``value`` appears within
-    ``timeout`` seconds) or ``pause`` (sleep ``timeout`` seconds).
+    else the shortest label containing a match; case-insensitive), ``wait_text`` (a static
+    text containing ``value`` appears within ``timeout`` seconds), ``system`` (tap the
+    ``value`` button of a system alert, e.g. the photo deletion confirmation), ``allow``
+    (if a system permission alert shows within ``timeout`` seconds, tap the first of the
+    ``|``-separated ``value`` labels; no alert is fine) or ``pause`` (sleep ``timeout``
+    seconds).
     """
 
     kind: str
@@ -67,7 +71,15 @@ class FunctionalCheck:
         return "test_" + re.sub(r"[^A-Za-z0-9_]", "_", self.name)
 
 
-MockFactory = Callable[[FunctionalCheck], AbstractContextManager[dict[str, str]]]
+@dataclass(frozen=True)
+class MockContext:
+    """Where the checks run: the simulator and the app under test."""
+
+    udid: str
+    bundle_id: str
+
+
+MockFactory = Callable[[FunctionalCheck, MockContext], AbstractContextManager[dict[str, str]]]
 
 #: Mock name → context manager yielding the ``IOSFORGE_*`` settings the app needs.
 MOCKS: dict[str, MockFactory] = {}
@@ -139,6 +151,10 @@ def _step(step: Step) -> str:
         )
     if step.kind == "wait_text":
         return f"        try waitForText(app, {_swift(step.value)}, timeout: {step.timeout})"
+    if step.kind == "system":
+        return f"        tapSystemAlert({_swift(step.value)}, timeout: {step.timeout})"
+    if step.kind == "allow":
+        return f"        allowIfAsked({_swift(step.value)}, timeout: {step.timeout})"
     if step.kind == "pause":
         return f"        sleep({max(1, int(step.timeout))})"
     raise ValueError(f"unknown functional step {step.kind!r}")
@@ -229,6 +245,31 @@ final class FunctionalTests: XCTestCase {{
             sleep(1)
         }}
         XCTFail("no button matching /\\(pattern)/ on screen")
+    }}
+
+    private func tapSystemAlert(_ label: String, timeout: TimeInterval) {{
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let button = springboard.buttons[label].firstMatch
+        guard button.waitForExistence(timeout: timeout) else {{
+            XCTFail("no system alert button '\\(label)'")
+            return
+        }}
+        button.tap()
+    }}
+
+    private func allowIfAsked(_ labels: String, timeout: TimeInterval) {{
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {{
+            for label in labels.split(separator: "|").map(String.init) {{
+                let button = springboard.buttons[label].firstMatch
+                if button.exists {{
+                    button.tap()
+                    return
+                }}
+            }}
+            sleep(1)
+        }}
     }}
 
     private func waitForText(_ app: XCUIApplication, _ text: String, timeout: TimeInterval) throws {{
