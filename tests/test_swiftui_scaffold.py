@@ -266,3 +266,16 @@ def test_tab_root_with_an_onboarding_like_name_is_not_onboarding() -> None:
     spec["screens"][3]["name"] = "Welcome Meter"
     entries = {e.screen_id: e for e in build_plan(spec).entries}
     assert entries["0013"].presentation == "tabRoot" and not entries["0013"].onboarding
+
+
+def test_screen_states_inherit_their_base() -> None:
+    spec = _tabbed()
+    spec["screens"] += [
+        {"id": "0009", "name": "Water Eject - Running", "state_of": "0008"},
+        {"id": "0011p", "name": "Home - Pro", "state_of": "0011"},
+        {"id": "0001b", "name": "Paywall - Annual", "state_of": "0001"},
+    ]
+    entries = {e.screen_id: e for e in build_plan(spec).entries}
+    assert entries["0009"].presentation == "push" and entries["0009"].tab_root == "0011"
+    assert entries["0011p"].presentation == "push" and entries["0011p"].tab_root == "0011"
+    assert entries["0001b"].presentation == "fullScreenCover" and entries["0001b"].tab_root is None

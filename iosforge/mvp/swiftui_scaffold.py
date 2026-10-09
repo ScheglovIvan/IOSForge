@@ -148,7 +148,9 @@ def build_plan(spec: dict[str, Any]) -> NavPlan:
 
     Tab apps get their tabs from :func:`derive_tabs`; other apps get one implicit
     tab rooted at the home screen with the tab bar hidden. Every pushed screen must
-    be reachable from a tab root (:func:`tab_owners`).
+    be reachable from a tab root (:func:`tab_owners`), except screen states
+    (``state_of``): they inherit their base screen's tab and presentation (a state of
+    a tab root is pushed onto that tab's stack).
     """
     tabs = derive_tabs(spec)
     entries = _base_entries(spec, {t.screen_id for t in tabs})
@@ -158,8 +160,31 @@ def build_plan(spec: dict[str, Any]) -> NavPlan:
     if not tabs:
         tabs = [Tab(_home_id(spec, entries), "Home")]
     roots = {t.screen_id for t in tabs}
-    stack = [e.screen_id for e in entries if e.presentation == "push" and e.screen_id not in roots]
+    by_id = {e.screen_id: e for e in entries}
+    states = {
+        str(s["id"]): str(s["state_of"])
+        for s in spec.get("screens", [])
+        if isinstance(s, dict) and s.get("state_of") and str(s["state_of"]) in by_id
+    }
+    stack = [
+        e.screen_id
+        for e in entries
+        if e.presentation == "push" and e.screen_id not in roots and e.screen_id not in states
+    ]
     owners = tab_owners(spec, tabs, stack_screens=stack)
+    for state, base in states.items():
+        base_entry = by_id[base]
+        if base in roots:
+            owners[state] = base
+        elif base in owners:
+            owners[state] = owners[base]
+        if base_entry.presentation in ("sheet", "fullScreenCover", "onboarding"):
+            by_id[state] = dataclasses.replace(
+                by_id[state],
+                presentation=base_entry.presentation,
+                onboarding=base_entry.onboarding,
+            )
+    entries = [by_id[e.screen_id] for e in entries]
     with_bar = {
         str(s.get("id")) for s in spec.get("screens", []) if isinstance(s, dict) and has_tab_bar(s)
     }
