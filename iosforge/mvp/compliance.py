@@ -133,11 +133,15 @@ def _render_ids(paths: RunPaths) -> list[str]:
     blank detector checks it.
     """
     ids = _original_screen_ids(paths)
-    if paths.app_spec_json.is_file():
-        spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
-        seen = set(ids)
-        ids += [e.screen_id for e in build_plan(spec).entries if e.screen_id not in seen]
-    return ids
+    if not paths.app_spec_json.is_file():
+        return ids
+    try:
+        plan = build_plan(json.loads(paths.app_spec_json.read_text(encoding="utf-8")))
+    except ValueError as exc:
+        log.warning("compliance.render_ids.no_plan", error=str(exc))
+        return ids
+    seen = set(ids)
+    return ids + [e.screen_id for e in plan.entries if e.screen_id not in seen]
 
 
 def match_screens(
@@ -364,6 +368,7 @@ def render_generated_ios(
 
 def _prepare_judge_workspace(paths: RunPaths) -> None:
     paths.claude_ws.mkdir(parents=True, exist_ok=True)
+    judged = set(_original_screen_ids(paths))
     for name, src in (
         ("screens", paths.screens_dir),
         ("generated_screens", paths.generated_screens_dir),
@@ -371,7 +376,13 @@ def _prepare_judge_workspace(paths: RunPaths) -> None:
         dest = paths.claude_ws / name
         if dest.exists():
             shutil.rmtree(dest)
-        shutil.copytree(src, dest)
+        if name == "screens":
+            shutil.copytree(src, dest)
+            continue
+        dest.mkdir(parents=True)
+        for png in src.glob("*.png"):
+            if png.stem in judged:
+                shutil.copy2(png, dest / png.name)
 
 
 def evaluate(

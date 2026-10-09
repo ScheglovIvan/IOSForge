@@ -242,3 +242,22 @@ def test_planned_screens_without_a_capture_are_rendered_but_not_judged(
         json.loads(paths.screens_json.read_text())["screens"], result["screens"]
     )
     assert [oid for oid, _ in pairs] == captured
+
+
+def test_judge_workspace_holds_only_judged_renders(paths: RunPaths) -> None:
+    paths.screens_json.write_text(json.dumps({"screens": [{"id": "0000"}, {"id": "0011"}]}))
+    paths.screens_dir.mkdir(parents=True, exist_ok=True)
+    paths.generated_screens_dir.mkdir(parents=True, exist_ok=True)
+    for sid in ("0000", "0011"):
+        (paths.screens_dir / f"{sid}.png").write_bytes(b"o")
+    for sid in ("0000", "0011", "0008"):
+        (paths.generated_screens_dir / f"{sid}.png").write_bytes(b"g")
+    compliance._prepare_judge_workspace(paths)
+    judged = sorted(p.name for p in (paths.claude_ws / "generated_screens").glob("*.png"))
+    assert judged == ["0000.png", "0011.png"]
+
+
+def test_render_ids_fall_back_to_originals_without_a_plan(paths: RunPaths) -> None:
+    paths.screens_json.write_text(json.dumps({"screens": [{"id": "0000"}]}))
+    paths.app_spec_json.write_text(json.dumps({"screens": []}))
+    assert compliance._render_ids(paths) == ["0000"]
