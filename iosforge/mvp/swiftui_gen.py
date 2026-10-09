@@ -16,7 +16,9 @@ import argparse
 import json
 import re
 import shutil
+import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -29,10 +31,11 @@ from iosforge.mvp.analyze import stage_archive_context, topo_layers
 from iosforge.mvp.feasibility import apply_scope
 from iosforge.mvp.paths import RunPaths
 from iosforge.mvp.scope_models import FeasibilityReport, ScopeCounts, ScopeDecision, ScreenScope
-from iosforge.mvp.swiftui_permissions import permission_violations
+from iosforge.mvp.swiftui_permissions import blank_comments_and_strings, permission_violations
 from iosforge.mvp.swiftui_prompters import PROMPTERS
 from iosforge.mvp.swiftui_prompts import (
     APP_DIR,
+    COMPONENTS_MD,
     compile_fix_prompt,
     components_prompt,
     screen_prompt,
@@ -59,6 +62,11 @@ TASK_THEME = "theme"
 TASK_COMPONENTS = "components"
 SHARED = "shared"
 
+_SANDBOX_LOCK = threading.Lock()
+_OWN_NAVIGATION = re.compile(
+    r"\b(?:NavigationStack|NavigationView|TabView)\b|\.(?:sheet|fullScreenCover)\s*\(|"
+    r"NavigationLink\s*\(\s*destination"
+)
 _FEATURE_PATH = re.compile(r"App/Features/([^/:]+)/")
 _FIXTURES_PATH = re.compile(r"App/Fixtures/(Fixtures[^/:]*\.swift)")
 
@@ -151,6 +159,21 @@ def prepare_workspace(paths: RunPaths, *, app_name: str, bundle_id: str) -> NavP
     return build_plan(spec)
 
 
+def _navigation_errors(app_dir: Path) -> list[str]:
+    errors: list[str] = []
+    for folder in ("App/Features", "App/Components"):
+        for swift in sorted((app_dir / folder).rglob("*.swift")):
+            source = blank_comments_and_strings(swift.read_text(encoding="utf-8", errors="replace"))
+            for match in _OWN_NAVIGATION.finditer(source):
+                line = source.count("\n", 0, match.start()) + 1
+                errors.append(
+                    f"{swift.relative_to(app_dir).as_posix()}:{line}: error: own navigation "
+                    f"`{match.group(0).strip()}` — navigate only through the scaffold Router "
+                    "(router.show / router.dismiss)"
+                )
+    return errors
+
+
 def _tab_bar_errors(app_dir: Path) -> list[str]:
     path = app_dir / "App" / "Components" / "AppTabBar.swift"
     if path.is_file() and re.search(r"\bRouter\b", path.read_text(encoding="utf-8")):
@@ -176,6 +199,7 @@ def compile_errors(
         for path in report.unexpected
     ]
     errors += _tab_bar_errors(app_dir)
+    errors += _navigation_errors(app_dir)
     errors += permission_violations(app_dir, declared=set(prompter_names(spec)))
     if not xcode.toolchain_available():
         log.warning("swiftui_gen.toolchain_missing", app_dir=str(app_dir))
@@ -284,50 +308,73 @@ def _app_files(app_dir: Path) -> dict[str, bytes]:
     }
 
 
-def _owned(entry: ScreenEntry, rel: str) -> bool:
-    return rel.startswith(f"App/Features/{entry.screen_id}/") or rel == entry.fixtures_path
+def _screen_owner(entry: ScreenEntry) -> Callable[[str], bool]:
+    def owned(rel: str) -> bool:
+        return rel.startswith(f"App/Features/{entry.screen_id}/") or rel == entry.fixtures_path
+
+    return owned
 
 
-def _run_screen(paths: RunPaths, entry: ScreenEntry, prompt: str, *, timeout: int) -> TaskRun:
-    """Run one screen task in a sandbox copy; harvest only the screen's owned paths.
+def _dir_owner(prefix: str) -> Callable[[str], bool]:
+    def owned(rel: str) -> bool:
+        return rel.startswith(prefix)
 
-    ``ignored`` lists what the model changed outside its owned paths, measured
-    against the sandbox's own starting snapshot (other screens harvested in
-    parallel meanwhile must not show up as this screen's writes).
+    return owned
+
+
+def _run_sandboxed(
+    paths: RunPaths,
+    task: str,
+    prompt: str,
+    owned: Callable[[str], bool],
+    *,
+    timeout: int,
+    root_files: tuple[str, ...] = (),
+) -> TaskRun:
+    """Run one model task in a sandbox copy of the workspace; harvest only owned paths.
+
+    Copying into and harvesting out of sandboxes is serialised so a sandbox never
+    sees a half-written file of a task finishing in parallel. Owned files the model
+    created or changed are copied back, owned files it deleted are deleted;
+    ``ignored`` lists its changes outside the owned paths, measured against the
+    sandbox's own starting snapshot. ``root_files`` are workspace-root files the
+    task owns (e.g. ``COMPONENTS.md``).
     """
-    sandbox = paths.run_dir / "sandboxes" / entry.screen_id
-    if sandbox.exists():
-        shutil.rmtree(sandbox)
-    shutil.copytree(
-        paths.claude_ws,
-        sandbox,
-        ignore=shutil.ignore_patterns("*.xcodeproj", claude_gen.TASK_LOG),
-    )
+    sandbox = paths.run_dir / "sandboxes" / task
+    with _SANDBOX_LOCK:
+        if sandbox.exists():
+            shutil.rmtree(sandbox)
+        shutil.copytree(
+            paths.claude_ws,
+            sandbox,
+            ignore=shutil.ignore_patterns("*.xcodeproj", claude_gen.TASK_LOG),
+        )
     before = _app_files(sandbox / APP_DIR)
     started = time.monotonic()
-    code = claude_gen.run_task(
-        sandbox, prompt, timeout=timeout, tlog=log.bind(task=f"screen-{entry.screen_id}")
-    )
+    code = claude_gen.run_task(sandbox, prompt, timeout=timeout, tlog=log.bind(task=task))
     elapsed = time.monotonic() - started
     ws_app = _workspace_app(paths)
     after = _app_files(sandbox / APP_DIR)
     ignored: list[str] = []
-    for rel, data in after.items():
-        if _owned(entry, rel):
-            target = ws_app / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-        elif before.get(rel) != data:
-            ignored.append(rel)
-    ignored += [rel for rel in before if rel not in after and not _owned(entry, rel)]
-    shutil.rmtree(sandbox)
-    return TaskRun(f"screen-{entry.screen_id}", round(elapsed, 1), code, sorted(ignored))
-
-
-def _run_shared(paths: RunPaths, task: str, prompt: str, *, timeout: int) -> TaskRun:
-    started = time.monotonic()
-    code = claude_gen.run_task(paths.claude_ws, prompt, timeout=timeout, tlog=log.bind(task=task))
-    return TaskRun(task, round(time.monotonic() - started, 1), code)
+    with _SANDBOX_LOCK:
+        for rel, data in after.items():
+            if owned(rel):
+                target = ws_app / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            elif before.get(rel) != data:
+                ignored.append(rel)
+        for rel in before:
+            if rel not in after:
+                if owned(rel):
+                    (ws_app / rel).unlink(missing_ok=True)
+                else:
+                    ignored.append(rel)
+        for name in root_files:
+            if (sandbox / name).is_file():
+                shutil.copy2(sandbox / name, paths.claude_ws / name)
+        shutil.rmtree(sandbox)
+    return TaskRun(task, round(elapsed, 1), code, sorted(ignored))
 
 
 def generate(
@@ -355,17 +402,30 @@ def generate(
             prompt = theme_prompt(
                 app_name=app_name, prompters=prompters, diverge_content=diverge_content
             )
-            runs.append(_run_shared(paths, TASK_THEME, prompt, timeout=task_timeout))
+            runs.append(
+                _run_sandboxed(
+                    paths, TASK_THEME, prompt, _dir_owner("App/Theme/"), timeout=task_timeout
+                )
+            )
         elif ids == [TASK_COMPONENTS]:
             prompt = components_prompt(plan, prompters=prompters, diverge_content=diverge_content)
-            runs.append(_run_shared(paths, TASK_COMPONENTS, prompt, timeout=task_timeout))
+            runs.append(
+                _run_sandboxed(
+                    paths,
+                    TASK_COMPONENTS,
+                    prompt,
+                    _dir_owner("App/Components/"),
+                    timeout=task_timeout,
+                    root_files=(COMPONENTS_MD,),
+                )
+            )
         else:
             with ThreadPoolExecutor(max_workers=max(1, max_parallel)) as pool:
                 futures = [
                     pool.submit(
-                        _run_screen,
+                        _run_sandboxed,
                         paths,
-                        by_task[tid],
+                        tid,
                         screen_prompt(
                             by_task[tid],
                             plan,
@@ -374,6 +434,7 @@ def generate(
                             observed=_observed(paths, by_task[tid]),
                             diverge_content=diverge_content,
                         ),
+                        _screen_owner(by_task[tid]),
                         timeout=task_timeout,
                     )
                     for tid in ids

@@ -245,3 +245,19 @@ def test_one_error_per_call_site(tmp_path: Path) -> None:
         "await AVCaptureDevice.requestAccess(for: AVMediaType.video)\n",
     )
     assert len(permission_violations(tmp_path)) == 1
+
+
+def test_pasteboard_write_is_not_a_prompt(tmp_path: Path) -> None:
+    _write(
+        tmp_path, "App/Features/0001/Screen0001View.swift", 'UIPasteboard.general.string = "code"\n'
+    )
+    assert permission_violations(tmp_path) == []
+
+
+def test_weak_headless_mention_is_not_a_guard(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "App/Features/0013/LevelMeterService.swift",
+        "let _ = Headless.isActive\nlet input = engine.inputNode\n",
+    )
+    assert len(permission_violations(tmp_path)) == 1

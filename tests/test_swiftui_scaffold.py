@@ -166,6 +166,7 @@ def test_write_scaffold_renders_contract_files(tmp_path: Path) -> None:
     assert "PRODUCT_BUNDLE_IDENTIFIER: com.example.s" in project
     assert "path: Config/Info.plist" in project and "    scheme: {}" in project
     assert '- "Poppins-Bold.ttf"' in project and "type: folder" in project
+    assert 'includes: ["*.ttf", "*.otf"]' in project
     assert 'NSMicrophoneUsageDescription: "Measures sound level."' in project
     assert pending_screens(app, entries) == ["0000", "0001", "0011", "0013", "0008"]
 
@@ -209,6 +210,8 @@ def test_enforce_contract_is_strict(tmp_path: Path) -> None:
     (app / "App/Services").mkdir()
     (app / "App/Features/9999").mkdir()
     (app / "Package.swift").write_text("// swift-tools-version:5.9\n")
+    (app / "Resources/Fonts").mkdir(parents=True)
+    (app / "Resources/Fonts/Sneaky.swift").write_text("let sneaky = 1\n")
 
     report = enforce_contract(app, _spec(), identity)
 
@@ -218,7 +221,12 @@ def test_enforce_contract_is_strict(tmp_path: Path) -> None:
         "App/Navigation/MyRouter.swift",
         "App/Permissions/CameraPrompter.swift",
     ]
-    assert report.unexpected == ["App/Services", "Package.swift", "App/Features/9999"]
+    assert report.unexpected == [
+        "App/Services",
+        "Package.swift",
+        "Resources/Fonts/Sneaky.swift",
+        "App/Features/9999",
+    ]
     assert "guard !Headless.isActive" in gate.read_text()
     assert not (app / "App/Navigation/MyRouter.swift").exists()
 
@@ -249,3 +257,10 @@ def test_presentation_heuristic(name: str, presentation: str) -> None:
         ]
     )
     assert build_plan(spec).entries[1].presentation == presentation
+
+
+def test_tab_root_with_an_onboarding_like_name_is_not_onboarding() -> None:
+    spec = _tabbed()
+    spec["screens"][3]["name"] = "Welcome Meter"
+    entries = {e.screen_id: e for e in build_plan(spec).entries}
+    assert entries["0013"].presentation == "tabRoot" and not entries["0013"].onboarding

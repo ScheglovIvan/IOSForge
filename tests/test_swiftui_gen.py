@@ -87,8 +87,7 @@ def test_generate_runs_dag_and_harvests_only_owned_paths(
     tasks = [t for t, _ in calls]
     assert tasks[:2] == ["theme", "components"]
     assert sorted(tasks[2:]) == ["screen-0011", "screen-0013"]
-    assert all(ws == paths.claude_ws for t, ws in calls if not t.startswith("screen-"))
-    assert all("sandboxes" in str(ws) for t, ws in calls if t.startswith("screen-"))
+    assert all("sandboxes" in str(ws) for _, ws in calls)
     app = paths.xcode_app
     assert 'Text("0013")' in (app / "App/Features/0013/Screen0013View.swift").read_text()
     assert (app / "App/Fixtures/Fixtures0011.swift").exists()
@@ -372,3 +371,46 @@ class _SerialPool:
     def submit(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
         value = fn(*args, **kwargs)
         return type("Done", (), {"result": lambda self: value})()
+
+
+def test_shared_tasks_only_keep_their_folder(
+    paths: RunPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, Path]] = []
+    fake = _fake_task(calls)
+
+    def wide(workspace: Path, prompt: str, **kw: Any) -> int:
+        task = _task_of(prompt)
+        app = workspace / "xcode_app"
+        if task == "theme":
+            (app / "App/Features/0011/Screen0011View.swift").write_text("broken\n")
+        if task == "components":
+            (workspace / "COMPONENTS.md").write_text("# Card\n")
+            (app / "App/Components/AppTabBar.swift").unlink()
+        return int(fake(workspace, prompt, **kw))
+
+    monkeypatch.setattr(swiftui_gen.claude_gen, "run_task", wide)
+    monkeypatch.setattr(xcode, "toolchain_available", lambda: False)
+
+    result = swiftui_gen.generate(paths, app_name="Speaker Test", bundle_id="com.example.s")
+
+    runs = {t.task: t for t in result.tasks}
+    assert runs["theme"].ignored == ["App/Features/0011/Screen0011View.swift"]
+    assert (paths.claude_ws / "COMPONENTS.md").read_text() == "# Card\n"
+    assert not (paths.xcode_app / "App/Components/AppTabBar.swift").exists()
+    assert (paths.xcode_app / "App/Components/Card.swift").exists()
+
+
+def test_own_navigation_in_screens_is_a_gate_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(xcode, "toolchain_available", lambda: False)
+    swiftui_gen.write_scaffold(tmp_path, SPEC, app_name="Demo", bundle_id="b.c")
+    (tmp_path / "App/Features/0013/Screen0013View.swift").write_text(
+        'struct S: View { var body: some View { NavigationStack { Text("NavigationStack") } '
+        ".sheet(isPresented: .constant(true)) { EmptyView() } } }\n"
+    )
+    errors = swiftui_gen.compile_errors(
+        tmp_path, SPEC, AppIdentity("Demo", "b.c"), tmp_path / "dd"
+    ).errors
+    assert len(errors) == 2 and all("own navigation" in e for e in errors)

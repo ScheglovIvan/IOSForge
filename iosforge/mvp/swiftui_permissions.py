@@ -207,7 +207,10 @@ PERMISSION_KINDS: tuple[PermissionKind, ...] = (
     PermissionKind(
         "pasteboard",
         (),
-        (r"UIPasteboard\s*\.\s*general\s*\.\s*(?:string|strings|image|images|url|urls|items)\b",),
+        (
+            r"UIPasteboard\s*\.\s*general\s*\.\s*(?:string|strings|image|images|url|urls|items)\b"
+            r"(?!\s*=[^=])",
+        ),
         ("clipboard", "paste"),
     ),
     PermissionKind(
@@ -225,7 +228,9 @@ _GENERIC_PROMPTS = (
 )
 _DIRECT_PROMPT_CALL = re.compile(r"\.\s*prompt\s*\(\s*\)")
 _GATE_CALL = re.compile(r"Permissions\s*\.\s*request\s*\(\s*(\w+)\s*\.\s*self")
-_HEADLESS_GUARD = re.compile(r"Headless\s*\.\s*isActive")
+_HEADLESS_GUARD = re.compile(
+    r"guard\s+!\s*Headless\s*\.\s*isActive\s+else|if\s+Headless\s*\.\s*isActive\s*\{"
+)
 SERVICE_SUFFIX = "Service.swift"
 
 

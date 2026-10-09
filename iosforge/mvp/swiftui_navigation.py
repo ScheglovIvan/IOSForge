@@ -47,10 +47,16 @@ def _explicit_tabs(spec: dict[str, Any], ids: set[str]) -> list[Tab] | None:
     raw = (spec.get("navigation") or {}).get("tabs")
     if raw is None:
         return None
+    if not isinstance(raw, list) or not all(
+        isinstance(t, dict) and t.get("screen_id") and t.get("title") for t in raw
+    ):
+        raise NavigationSpecError("navigation.tabs must be a list of {screen_id, title}")
     tabs = [Tab(str(t["screen_id"]), str(t["title"])) for t in raw]
     unknown = [t.screen_id for t in tabs if t.screen_id not in ids]
     if unknown:
         raise NavigationSpecError(f"navigation.tabs references unknown screens: {unknown}")
+    if len({t.screen_id for t in tabs}) != len(tabs):
+        raise NavigationSpecError("navigation.tabs lists a screen more than once")
     return tabs
 
 
@@ -171,21 +177,21 @@ def tab_owners(
 
     ``stack_screens`` are the screens that must live inside a tab stack (not
     onboarding, not modal, not a tab root). Breadth-first from each tab root in
-    tab order; traversal does not pass through modal/onboarding screens. Raises
+    tab order; traversal never passes through other tab roots, modal or onboarding
+    screens, so a screen only reachable via another tab belongs to that tab. Raises
     :class:`NavigationSpecError` listing screens reachable from no tab.
     """
     pending = set(stack_screens)
     roots = [t.screen_id for t in tabs]
     owners: dict[str, str] = {root: root for root in roots}
     graph = _successors(spec)
-    passable = pending | set(roots)
     for root in roots:
         seen = {root}
         queue = deque([root])
         while queue:
             current = queue.popleft()
             for nxt in graph.get(current, []):
-                if nxt in seen or nxt not in passable:
+                if nxt in seen or nxt not in pending:
                     continue
                 seen.add(nxt)
                 owners.setdefault(nxt, root)

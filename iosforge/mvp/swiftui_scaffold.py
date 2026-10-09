@@ -88,7 +88,7 @@ def _swift_suffix(screen_id: str) -> str:
     return cleaned[0].upper() + cleaned[1:]
 
 
-def _base_entries(spec: dict[str, Any]) -> list[ScreenEntry]:
+def _base_entries(spec: dict[str, Any], tab_roots: set[str]) -> list[ScreenEntry]:
     entries: list[ScreenEntry] = []
     seen_ids: set[str] = set()
     used: set[str] = set()
@@ -100,7 +100,7 @@ def _base_entries(spec: dict[str, Any]) -> list[ScreenEntry]:
             raise ValueError(f"duplicate screen id {screen_id!r} in app_spec")
         seen_ids.add(screen_id)
         name = tpl.clean_text(str(screen.get("name") or screen_id))
-        onboarding = bool(_ONBOARDING.search(name))
+        onboarding = bool(_ONBOARDING.search(name)) and screen_id not in tab_roots
         suffix = base = _swift_suffix(screen_id)
         counter = 2
         while suffix in used:
@@ -150,10 +150,10 @@ def build_plan(spec: dict[str, Any]) -> NavPlan:
     tab rooted at the home screen with the tab bar hidden. Every pushed screen must
     be reachable from a tab root (:func:`tab_owners`).
     """
-    entries = _base_entries(spec)
+    tabs = derive_tabs(spec)
+    entries = _base_entries(spec, {t.screen_id for t in tabs})
     if not entries:
         raise ValueError("app_spec has no screens to scaffold")
-    tabs = derive_tabs(spec)
     shows_bar = bool(tabs)
     if not tabs:
         tabs = [Tab(_home_id(spec, entries), "Home")]
@@ -249,7 +249,7 @@ def render_project_yml(
         "      - path: App",
     ]
     if fonts:
-        lines.append("      - path: Resources/Fonts")
+        lines += ["      - path: Resources/Fonts", '        includes: ["*.ttf", "*.otf"]']
     if has_media:
         lines += ["      - path: Resources/Media", "        type: folder"]
     lines += [
@@ -355,6 +355,9 @@ def enforce_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity)
     for path in sorted(app_dir.iterdir()):
         if path.name not in APP_ROOT_ENTRIES and path.suffix != ".xcodeproj":
             report.unexpected.append(_rel(path, app_dir))
+    resources = app_dir / "Resources"
+    for path in sorted(resources.rglob("*.swift")) if resources.is_dir() else []:
+        report.unexpected.append(_rel(path, app_dir))
     screen_ids = {e.screen_id for e in build_plan(spec).entries}
     features = app_dir / "App" / "Features"
     for path in sorted(features.iterdir()) if features.is_dir() else []:

@@ -159,3 +159,28 @@ def test_empty_explicit_tabs_on_stack_app_mean_no_tabs() -> None:
     spec = _tab_spec(tabs=[])
     spec["navigation"]["type"] = "stack"
     assert derive_tabs(spec) == []
+
+
+def test_screen_reachable_only_through_another_tab_belongs_to_it() -> None:
+    spec = _tab_spec()
+    spec["navigation"]["map"] = [
+        {"from": "0011", "to": "0012", "via": "Mode tab"},
+        {"from": "0012", "to": "0008", "via": "select a mode"},
+    ]
+    assert tab_owners(spec, derive_tabs(spec), stack_screens=["0008"]) == {"0008": "0012"}
+
+
+@pytest.mark.parametrize(
+    ("tabs", "match"),
+    [
+        ([{"screen_id": "0011"}], "list of"),
+        ("0011", "list of"),
+        (
+            [{"screen_id": "0011", "title": "A"}, {"screen_id": "0011", "title": "B"}],
+            "more than once",
+        ),
+    ],
+)
+def test_malformed_explicit_tabs_fail_loud(tabs: Any, match: str) -> None:
+    with pytest.raises(NavigationSpecError, match=match):
+        derive_tabs(_tab_spec(tabs=tabs))
