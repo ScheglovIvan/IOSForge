@@ -32,9 +32,11 @@ from typing import Any
 
 from iosforge.common.config import Settings
 from iosforge.common.logging import get_logger
-from iosforge.mvp import claude_gen, simulator, xcode
+from iosforge.mvp import claude_gen, simulator, swiftui_gen, xcode
 from iosforge.mvp.paths import RunPaths
 from iosforge.mvp.swiftui_ads import is_ad_component
+from iosforge.mvp.swiftui_permissions import blank_comments_and_strings
+from iosforge.mvp.swiftui_scaffold import build_plan
 
 log = get_logger("mvp.compliance")
 
@@ -97,7 +99,9 @@ Write a single file `judge.json` with EXACTLY this schema:
   no reused brand marks/logo) and COPY (wording paraphrased, not verbatim); 0.0 =
   looks like a copy.
 - `diffs` = concrete, actionable LAYOUT differences (missing/misplaced blocks,
-  wrong order/hierarchy) a developer can fix — NOT colour/font differences.
+  wrong order/hierarchy) a developer can fix — NOT colour/font differences. Only
+  list things that NEED a change: no notes about acceptable or expected
+  differences (e.g. space freed by a removed ad), no praise, no "no fix needed".
 - `flows_score` = holistic judgement of whether navigation/flows are reproduced.
 
 Ids to judge:
@@ -797,6 +801,9 @@ def apply_corrective(
     """
     bound = log.bind(stage="compliance.apply_corrective", run_dir=str(paths.run_dir))
     tasks = corrective_tasks.get("tasks", [])
+    if paths.xcode_app.exists() and not paths.flutter_app.exists():
+        swiftui_gen.correct(paths, list(tasks), timeout=timeout)
+        return paths.xcode_app
     if not tasks:
         bound.info("compliance.apply_corrective.noop")
         return paths.flutter_app
@@ -1242,6 +1249,144 @@ def refine_web_until_complete(
     def _audit() -> dict[str, Any]:
         structural = nav_audit(paths)
         structural["blank_screens"] = blank_screens(paths, max_bytes=blank_max_bytes)
+        structural["ok"] = bool(structural["ok"]) and not structural["blank_screens"]
+        return structural
+
+    return _refine(
+        paths,
+        _prepare,
+        threshold=threshold,
+        soft_floor=soft_floor,
+        max_iterations=max_iterations,
+        weights=weights,
+        timeout=timeout,
+        per_screen=True,
+        freeze_passed=True,
+        audit=_audit,
+        structural_gate=structural_gate,
+    )
+
+
+def _feature_sources(paths: RunPaths, screen_id: str) -> str:
+    folder = paths.xcode_app / "App" / "Features" / screen_id
+    return "\n".join(
+        blank_comments_and_strings(f.read_text(encoding="utf-8", errors="replace"))
+        for f in sorted(folder.rglob("*.swift"))
+    )
+
+
+def nav_audit_ios(paths: RunPaths) -> dict[str, Any]:
+    """Static navigation audit of the generated SwiftUI app (same report shape as nav_audit).
+
+    Every ``navigation.map`` / ``navigates_to`` edge between built screens must be wired in
+    the source screen: ``router.show(.<to>)``, or the tab bar (both ends tab roots / screens
+    showing the bar), or ``router.dismiss()`` back to a screen that leads here, or
+    ``router.finishOnboarding()`` from onboarding to home. Dead links cannot exist (they do
+    not compile); ``missing_screens`` are planned screens without a generated render.
+    """
+    spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
+    plan = build_plan(spec)
+    by_id = {e.screen_id: e for e in plan.entries}
+    edges: dict[tuple[str, str], str | None] = {}
+    for edge in (spec.get("navigation") or {}).get("map", []) or []:
+        if isinstance(edge, dict):
+            edges.setdefault((str(edge.get("from")), str(edge.get("to"))), edge.get("via"))
+    for screen in spec.get("screens", []):
+        if isinstance(screen, dict):
+            for target in screen.get("navigates_to", []) or []:
+                edges.setdefault((str(screen.get("id")), str(target)), None)
+    home = plan.tabs[0].root.screen_id
+    missing_edges: list[dict[str, Any]] = []
+    sources: dict[str, str] = {}
+    for (frm, to), via in edges.items():
+        if frm not in by_id or to not in by_id or frm == to:
+            continue
+        src, dst = by_id[frm], by_id[to]
+        code = sources.setdefault(frm, _feature_sources(paths, frm))
+        shown = re.search(rf"\.show\(\s*\.{re.escape(dst.case_name)}\s*\)", code)
+        via_tab = (
+            plan.shows_tab_bar
+            and dst.presentation == "tabRoot"
+            and (src.presentation == "tabRoot" or src.shows_tab_bar)
+        )
+        back = "router.dismiss()" in code and (to, frm) in edges
+        closes_to_home = to == home and (
+            (src.presentation in ("sheet", "fullScreenCover") and "router.dismiss()" in code)
+            or (src.presentation == "onboarding" and "finishOnboarding()" in code)
+        )
+        if not (shown or via_tab or back or closes_to_home):
+            missing_edges.append({"from": frm, "to": to, "via_element": via})
+    generated = (
+        {
+            str(g["id"])
+            for g in json.loads(paths.generated_screens_json.read_text()).get("screens", [])
+        }
+        if paths.generated_screens_json.exists()
+        else set()
+    )
+    missing_screens = [
+        {"id": e.screen_id, "expected_route": f"-screen-id {e.screen_id}"}
+        for e in plan.entries
+        if e.screen_id not in generated
+    ]
+    return {
+        "missing_screens": missing_screens,
+        "dead_links": [],
+        "missing_edges": missing_edges,
+        "ok": not missing_edges and not missing_screens,
+    }
+
+
+def verify_ios(
+    paths: RunPaths,
+    env: simulator.SimEnvironment,
+    *,
+    weights: ComplianceWeights,
+    threshold: float,
+    soft_floor: float,
+) -> dict[str, Any]:
+    """One-pass iOS check: build, render every screen on the Simulator, vision-judge."""
+    app = build_ios(paths)
+    render_generated_ios(paths, env, app=app)
+    return evaluate(
+        paths, 0, weights=weights, threshold=threshold, soft_floor=soft_floor, history=[]
+    )
+
+
+def refine_ios_until_complete(
+    paths: RunPaths,
+    env: simulator.SimEnvironment,
+    *,
+    threshold: float,
+    soft_floor: float,
+    max_iterations: int,
+    weights: ComplianceWeights,
+    blank_max_bytes: int,
+    timeout: int = 1800,
+    structural_gate: bool = True,
+) -> dict[str, Any]:
+    """iOS twin of :func:`refine_web_until_complete`: Simulator render + Swift nav audit.
+
+    Each iteration builds the SwiftUI app, renders every screen on the iOS Simulator and
+    vision-judges it; the structural audit is :func:`nav_audit_ios` plus blank screens
+    (PNG size, and frames ``render_generated_ios`` flagged as never drawn). Corrections run
+    through :func:`apply_corrective`, which routes SwiftUI apps to the sandboxed screen
+    tasks of :func:`iosforge.mvp.swiftui_gen.correct`. Scoring, weights and the loop itself
+    are the unchanged :func:`_refine`.
+    """
+
+    def _prepare() -> None:
+        app = build_ios(paths, timeout=timeout)
+        render_generated_ios(paths, env, app=app)
+
+    def _audit() -> dict[str, Any]:
+        structural = nav_audit_ios(paths)
+        flagged = {b["id"]: b for b in blank_screens(paths, max_bytes=blank_max_bytes)}
+        rendered = json.loads(paths.generated_screens_json.read_text()).get("screens", [])
+        for screen in rendered:
+            if screen.get("blank") and str(screen["id"]) not in flagged:
+                flagged[str(screen["id"])] = {"id": str(screen["id"]), "reason": "never_drawn"}
+        structural["blank_screens"] = list(flagged.values())
         structural["ok"] = bool(structural["ok"]) and not structural["blank_screens"]
         return structural
 

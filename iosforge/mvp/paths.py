@@ -60,8 +60,12 @@ class RunPaths:
 
     @classmethod
     def create(cls, base: Path) -> RunPaths:
-        ts = time.strftime("%Y%m%d-%H%M%S")
-        run_dir = base / ts
+        """A fresh, timestamped run directory under ``base``."""
+        return cls.at(base / time.strftime("%Y%m%d-%H%M%S"))
+
+    @classmethod
+    def at(cls, run_dir: Path) -> RunPaths:
+        """The layout of an existing (or explicitly named) run directory."""
         rp = cls(
             run_dir=run_dir,
             screens_dir=run_dir / "screens",

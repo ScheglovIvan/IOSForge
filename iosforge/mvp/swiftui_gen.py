@@ -39,6 +39,7 @@ from iosforge.mvp.swiftui_prompts import (
     COMPONENTS_MD,
     compile_fix_prompt,
     components_prompt,
+    corrective_prompt,
     screen_prompt,
     theme_prompt,
 )
@@ -482,6 +483,119 @@ def generate(
     )
     bound.info("swiftui_gen.done", ok=not errors, errors=len(errors), screens=len(plan.entries))
     return result
+
+
+_DISPLAY_NAME = re.compile(r"CFBundleDisplayName:\s*(\".*\")")
+_BUNDLE_ID = re.compile(r"PRODUCT_BUNDLE_IDENTIFIER:\s*(\S+)")
+
+
+def identity_from_project(app_dir: Path) -> AppIdentity:
+    """App name and bundle id the scaffold rendered into ``app_dir/project.yml``."""
+    text = (app_dir / "project.yml").read_text(encoding="utf-8")
+    name, bundle = _DISPLAY_NAME.search(text), _BUNDLE_ID.search(text)
+    if name is None or bundle is None:
+        raise RuntimeError(f"{app_dir}/project.yml lacks CFBundleDisplayName / bundle id")
+    return AppIdentity(str(json.loads(name.group(1))), bundle.group(1))
+
+
+def restore_workspace(paths: RunPaths) -> None:
+    """Make ``claude_ws`` mirror the current ``xcode_app`` plus inputs and latest renders."""
+    ws = paths.claude_ws
+    ws.mkdir(parents=True, exist_ok=True)
+    if not (ws / "app_spec.json").exists():
+        spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
+        model_spec, _ = strip_ad_components(spec)
+        (ws / "app_spec.json").write_text(
+            json.dumps(model_spec, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    for name, src in (
+        ("screens", paths.screens_dir),
+        ("generated_screens", paths.generated_screens_dir),
+    ):
+        if src.exists():
+            if (ws / name).exists():
+                shutil.rmtree(ws / name)
+            shutil.copytree(src, ws / name)
+    if not (ws / "source").exists():
+        stage_archive_context(paths, ws, include_bytes=True)
+    if REFERENCE_DIR.is_dir() and not (ws / "reference").exists():
+        shutil.copytree(
+            REFERENCE_DIR,
+            ws / "reference",
+            ignore=shutil.ignore_patterns("build", "*.xcodeproj", "Info.plist", "*.png"),
+        )
+    if _workspace_app(paths).exists():
+        shutil.rmtree(_workspace_app(paths))
+    shutil.copytree(
+        paths.xcode_app, _workspace_app(paths), ignore=shutil.ignore_patterns("*.xcodeproj")
+    )
+
+
+def _task_screen(task: dict[str, Any]) -> str | None:
+    screens = task.get("screens")
+    if isinstance(screens, list) and screens:
+        return str(screens[0])
+    if task.get("from"):
+        return str(task["from"])
+    return None
+
+
+def correct(
+    paths: RunPaths,
+    tasks: list[dict[str, Any]],
+    *,
+    max_parallel: int = 4,
+    timeout: int = 1800,
+    fix_attempts: int = 3,
+) -> list[TaskRun]:
+    """Apply Vision-Judge corrective tasks to ``paths.xcode_app`` (one sandbox per screen).
+
+    Tasks are grouped by screen; each group runs as a screen-owned sandbox task (only that
+    screen's files are kept), then the compile gate restores the contract and fixes build
+    errors, and the result replaces ``paths.xcode_app``. Raises when the app no longer builds.
+    """
+    bound = log.bind(stage="compliance.correct", target="swiftui", run_dir=str(paths.run_dir))
+    spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
+    plan = build_plan(spec)
+    by_id = {e.screen_id: e for e in plan.entries}
+    prompters = prompter_names(spec)
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for task in tasks:
+        sid = _task_screen(task)
+        if sid not in by_id:
+            bound.warning("compliance.correct.unknown_screen", task=task.get("id"), screen=sid)
+            continue
+        if task.get("type") == "add_edge" and str(task.get("to")) in by_id:
+            task = {**task, "to_case": by_id[str(task["to"])].case_name}
+        groups.setdefault(str(sid), []).append(task)
+    if not groups:
+        return []
+    identity = identity_from_project(paths.xcode_app)
+    restore_workspace(paths)
+    with ThreadPoolExecutor(max_workers=max(1, max_parallel)) as pool:
+        futures = [
+            pool.submit(
+                _run_sandboxed,
+                paths,
+                f"fix-{sid}",
+                corrective_prompt(group, by_id[sid], prompters=prompters),
+                _screen_owner(by_id[sid]),
+                timeout=timeout,
+            )
+            for sid, group in groups.items()
+        ]
+        runs = [f.result() for f in futures]
+    gate, _ = ensure_compiles(
+        paths, identity, plan, prompters=prompters, attempts=fix_attempts, timeout=timeout
+    )
+    if gate.errors:
+        raise RuntimeError(f"corrective round left a non-compiling app: {gate.errors[:10]}")
+    shutil.rmtree(paths.xcode_app)
+    shutil.copytree(
+        _workspace_app(paths), paths.xcode_app, ignore=shutil.ignore_patterns("*.xcodeproj")
+    )
+    bound.info("compliance.correct.done", screens=sorted(groups), tasks=len(tasks))
+    return runs
 
 
 def report(result: SwiftUIResult) -> dict[str, Any]:

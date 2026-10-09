@@ -106,7 +106,9 @@ def components_prompt(plan: NavPlan, *, prompters: list[str], diverge_content: b
   safe area). Keep the signature
   `struct AppTabBar: View {{ let tabs: [AppTab]; @Binding var selection: AppTab }}`;
   it only renders `tabs` and assigns `selection` — no Router, no navigation, no screen content.
-  Pick an SF Symbol per tab with a `switch` over the `AppTab` cases. Tabs:
+  Pick an SF Symbol per tab with a `switch` over the `AppTab` cases. `tab.title` is the
+  original's label and only identifies the tab: show your own paraphrased label per case
+  (content divergence), never `tab.title` verbatim. Tabs:
 {tabs}"""
     else:
         tab_bar = (
@@ -228,4 +230,48 @@ colours, fonts or navigation, and never edit scaffold files ({PERMISSIONS_DIR}/ 
 
 errors:
 {listed}
+"""
+
+
+def _corrective_task_text(task: dict[str, object], entry: ScreenEntry) -> str:
+    kind = str(task.get("type", "fix"))
+    if kind == "diverge":
+        return (
+            "The screen still LOOKS TOO MUCH like the original. Restyle only its appearance "
+            "with the app theme and components (palette, gradients, fonts, card/button shapes, "
+            "icons, paraphrased copy); keep the same blocks in the same positions."
+        )
+    if kind in ("add_screen", "fix_blank"):
+        return (
+            "The screen renders blank or failed to render. Implement it fully so it draws its "
+            f"content on the first frame in headless mode (`-screen-id {entry.screen_id}`)."
+        )
+    if kind == "add_edge":
+        via = task.get("via_element") or "the matching control"
+        target = f"`router.show(.{task.get('to_case')})` (screen {task.get('to')})"
+        return f"Wire navigation: {via} on this screen must call {target}. Keep the layout."
+    raw = task.get("diffs")
+    diffs = [str(d) for d in raw] if isinstance(raw, list) else []
+    lines = "\n".join(f"- {d}" for d in diffs) or "- close the layout gap"
+    return (
+        "Correct the LAYOUT (block placement / order / hierarchy) so it matches the original; "
+        f"keep the divergent design. Differences to fix:\n{lines}"
+    )
+
+
+def corrective_prompt(
+    tasks: list[dict[str, object]], entry: ScreenEntry, *, prompters: list[str]
+) -> str:
+    """Vision-Judge corrective task for one screen (all of its fix tasks combined)."""
+    body = "\n\n".join(_corrective_task_text(task, entry) for task in tasks)
+    return f"""{base_rules(prompters)}
+TASK: correct screen `{entry.screen_id}` — "{entry.name}" after the Vision Judge review.
+Compare (LOOK at both): `screens/{entry.screen_id}.png` — the ORIGINAL target, and
+`generated_screens/{entry.screen_id}.png` — the CURRENT render of this app.
+
+{body}
+
+Write ONLY `{APP_DIR}/{entry.view_path}`, other files under
+`{APP_DIR}/App/Features/{entry.screen_id}/` and `{APP_DIR}/{entry.fixtures_path}`; anything else
+is discarded. Keep the screen compiling and rendering fully on the first frame.
 """
