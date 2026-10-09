@@ -81,8 +81,14 @@ def render_screen_id(
     entries: list[ScreenEntry],
     tabs: list[TabEntry],
     launch: list[dict[str, str]] | None = None,
+    *,
+    screen_markers: bool = False,
 ) -> str:
-    """``ScreenID`` enum: cases, presentation, owning tab, view factory, launch screens."""
+    """``ScreenID`` enum: cases, presentation, owning tab, view factory, launch screens.
+
+    With ``screen_markers`` every view carries the accessibility id
+    ``iosforge.screen.<id>`` so functional checks can wait for their screen.
+    """
     by_id = {e.screen_id: e for e in entries}
     launch_rows = [
         f"        ScaffoldLaunchScreen(screen: .{by_id[item['screen_id']].case_name}, "
@@ -113,7 +119,12 @@ def render_screen_id(
             f"        case .{e.case_name}: {('.' + tab.case_name) if tab else 'nil'}"
         )
     owners = "\n".join(owner_lines)
-    views = "\n".join(f"        case .{e.case_name}: {e.type_name}()" for e in entries)
+    marker = '.accessibilityIdentifier("iosforge.screen.{}")'
+    views = "\n".join(
+        f"        case .{e.case_name}: {e.type_name}()"
+        + (marker.format(e.screen_id) if screen_markers else "")
+        for e in entries
+    )
     bar_cases = [f".{e.case_name}" for e in entries if e.shows_tab_bar]
     bar_check = f"[{', '.join(bar_cases)}].contains(self)" if bar_cases else "false"
     onboarding = [e for e in entries if e.onboarding]

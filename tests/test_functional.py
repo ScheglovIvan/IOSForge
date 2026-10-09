@@ -112,6 +112,7 @@ def test_scaffold_without_checks_has_no_functional_layer(tmp_path: Path) -> None
     assert swf.UI_TEST_TARGET not in project and "    scheme: {}" in project
     assert not (paths.xcode_app / swf.UI_TESTS_FILE).exists()
     assert not (paths.xcode_app / swf.FUNCTIONAL_SWIFT).exists()
+    assert "iosforge.screen." not in (paths.xcode_app / "App/Navigation/ScreenID.swift").read_text()
 
 
 def test_scaffold_with_a_check_renders_the_functional_layer(
@@ -124,6 +125,9 @@ def test_scaffold_with_a_check_renders_the_functional_layer(
     tests = (paths.xcode_app / swf.UI_TESTS_FILE).read_text()
     assert "func test_echo() throws" in tests
     assert 'app.open(URL(string: "iosforge://screen/0001")!)' in tests
+    assert '["iosforge.screen.0001"].firstMatch' in tests
+    screen_id = (paths.xcode_app / "App/Navigation/ScreenID.swift").read_text()
+    assert 'Screen0001View().accessibilityIdentifier("iosforge.screen.0001")' in screen_id
     assert 'try waitForText(app, "ECHO:HELLO", timeout: 10.0)' in tests
     assert "enum Functional" in (paths.xcode_app / swf.FUNCTIONAL_SWIFT).read_text()
     assert [c.name for c in functional.app_checks(paths, _echo_spec())] == ["echo"]
@@ -301,12 +305,16 @@ def test_run_safely_retries_infra_and_never_raises(
     monkeypatch.setattr(functional, "run", flaky)
     assert functional.run_safely(paths, udid="U")["ok"] and len(calls) == 2
 
-    def boom(p: RunPaths, **kw: Any) -> dict[str, Any]:
+    calls.clear()
+
+    def boom_counting(p: RunPaths, **kw: Any) -> dict[str, Any]:
+        calls.append(1)
         raise KeyError("unknown mock")
 
-    monkeypatch.setattr(functional, "run", boom)
+    monkeypatch.setattr(functional, "run", boom_counting)
     report = functional.run_safely(paths, udid="U")
-    assert report["infra_error"] and "unknown mock" in report["error"]
+    assert report["infra_error"] and "unknown mock" in report["error"] and len(calls) == 1
+    assert json.loads((paths.run_dir / functional.REPORT_NAME).read_text())["infra_error"]
     assert functional.infra_errors(report)[0]["message"].startswith("'unknown mock'")
 
 
@@ -416,3 +424,9 @@ def test_missing_text_fails_the_flow_not_the_infra(
     )  # fmt: skip
     check = _run_on_simulator(tmp_path, REAL_SCREEN)["checks"][0]
     assert not check["passed"] and not check["infra_error"] and "NEVER_SHOWN" in check["message"]
+
+
+def test_tap_prefers_the_exact_label_over_longer_matches() -> None:
+    tests = swf.render_ui_tests([_check()], [])
+    assert 'NSRegularExpression(pattern: "^(?:" + pattern + ")$"' in tests
+    assert "loosely.min(by: { $0.label.count < $1.label.count })" in tests

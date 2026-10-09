@@ -384,7 +384,9 @@ def render_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) 
         ),
         **caps.render_files(selected),
         "App/App.swift": tpl.render_app(target, caps.startup_calls(selected), launch=bool(launch)),
-        "App/Navigation/ScreenID.swift": tpl.render_screen_id(plan.entries, plan.tabs, launch),
+        "App/Navigation/ScreenID.swift": tpl.render_screen_id(
+            plan.entries, plan.tabs, launch, screen_markers=bool(checks)
+        ),
         "App/Navigation/AppTab.swift": tpl.render_app_tab(plan.tabs, shows_bar=plan.shows_tab_bar),
         "App/Navigation/Router.swift": tpl.render_router(launch=bool(launch)),
         "App/Navigation/RootView.swift": tpl.ROOT_VIEW,

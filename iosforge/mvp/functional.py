@@ -16,13 +16,13 @@ backend (DECISIONS 2026-10-10 «Level 2»).
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
-from contextlib import AbstractContextManager, ExitStack
+from contextlib import ExitStack
 from typing import Any
 
 from iosforge.common.logging import get_logger
 from iosforge.mvp import simulator, xcode
 from iosforge.mvp import swiftui_capabilities as caps
+from iosforge.mvp import swiftui_functional as swf
 from iosforge.mvp import swiftui_integrations as integ
 from iosforge.mvp.paths import RunPaths
 from iosforge.mvp.swiftui_functional import JOURNAL_NAME, UI_TEST_TARGET, FunctionalCheck
@@ -31,16 +31,8 @@ log = get_logger("mvp.functional")
 
 REPORT_NAME = "functional_report.json"
 
-MockFactory = Callable[[FunctionalCheck], AbstractContextManager[dict[str, str]]]
-
-#: Mock name → context manager yielding the ``IOSFORGE_*`` settings the app needs.
-MOCKS: dict[str, MockFactory] = {}
-
-
-def register_mock(name: str, factory: MockFactory) -> MockFactory:
-    """Make a mock available to the functional checks that name it."""
-    MOCKS[name] = factory
-    return factory
+MOCKS = swf.MOCKS
+register_mock = swf.register_mock
 
 
 def app_checks(paths: RunPaths, spec: dict[str, Any]) -> list[FunctionalCheck]:
@@ -76,7 +68,8 @@ def describe_flow(check: FunctionalCheck) -> str:
     """What the driver does on the screen, in words (for the corrective prompt)."""
     words = {
         "type": "types {value!r} into the first text field",
-        "tap": "taps the first button whose label matches /{value}/ (case-insensitive)",
+        "tap": "taps the button whose label is exactly /{value}/ (else the shortest label "
+        "containing it, case-insensitive)",
         "wait_text": "waits up to {timeout:g}s for a text containing {value!r}",
         "pause": "waits {timeout:g}s",
     }
@@ -205,9 +198,15 @@ def run_safely(
     for _ in range(2):
         try:
             report = run(paths, udid=udid, spec=spec, timeout=timeout)
+        except (KeyError, ValueError) as exc:
+            log.error("functional.config_error", error=str(exc))
+            report = {"ok": False, "infra_error": True, "checks": [], "error": str(exc)[:600]}
+            _write(paths, report)
+            return report
         except Exception as exc:
             log.error("functional.crashed", error=str(exc))
             report = {"ok": False, "infra_error": True, "checks": [], "error": str(exc)[:600]}
+            _write(paths, report)
         if not report.get("infra_error"):
             return report
     return report

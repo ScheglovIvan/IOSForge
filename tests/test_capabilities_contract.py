@@ -317,6 +317,7 @@ def test_attribution_rule_only_with_tenjin() -> None:
 
 
 def test_every_routable_module_has_a_descriptor() -> None:
+    caps.load_modules()
     assert set(capability_registry.MODULES) <= set(caps.REGISTRY)
 
 

@@ -877,6 +877,10 @@ async def jobs_scope_approve(
     scope.approved_at = approved_at
     scope.recount()
     ref = feasibility.save_scope(storage, str(job_id), scope)
+    try:
+        feasibility.save_routed_spec(storage, str(job_id), scope)
+    except Exception as exc:
+        log.error("jobs.scope_routing_not_saved", job_id=str(job_id), error=str(exc))
 
     meta["scope_status"] = "approved"
     meta["scope_version_id"] = ref.version_id

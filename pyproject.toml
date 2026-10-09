@@ -59,6 +59,7 @@ select = ["E", "F", "I", "UP", "B"]
 "iosforge/mvp/backend_gen.py" = ["E501"]
 "iosforge/mvp/admin_gen.py" = ["E501"]
 "iosforge/mvp/swiftui_functional.py" = ["E501"]
+"iosforge/mvp/swiftui_remote_api.py" = ["E501"]
 
 # FastAPI's dependency-injection idiom puts Depends()/Form()/File() in defaults;
 # these are the documented pattern, not the B008 mutable-default footgun.

@@ -30,6 +30,12 @@ MODULES: dict[str, ModuleInfo] = {
             "auto-renewable subscriptions and paywall products through Apphud (StoreKit)",
         ),
         ModuleInfo(
+            "remote_api",
+            ("remote_api",),
+            "a light HTTP / AI API the app sends the user's input to and renders the answer "
+            "(URLSession, endpoint from the capability config, no SDK)",
+        ),
+        ModuleInfo(
             "attribution_tenjin",
             ("other",),
             "install attribution through Tenjin after the App Tracking Transparency prompt",

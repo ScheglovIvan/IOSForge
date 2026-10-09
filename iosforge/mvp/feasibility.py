@@ -392,19 +392,52 @@ def route_capabilities(
         if declared and not screens:
             log.info("feasibility.apply_scope.capability_dropped", name=capability.get("name"))
             continue
-        routed = {**capability, "screens": screens}
-        finding = routing.get(str(capability.get("name")))
-        if finding is None:
-            log.warning("feasibility.apply_scope.capability_unrouted", name=capability.get("name"))
-        if finding is not None and finding.tier is not None:
-            routed["tier"] = finding.tier
-            routed["module"] = finding.module
-        if routed.get("module") not in capability_registry.MODULES:
-            routed["module"] = None
-        if routed.get("tier") == 2 and routed["module"] is None:
-            routed["tier"] = 3
-        kept.append(routed)
+        kept.append(_stamp({**capability, "screens": screens}, routing))
     return kept
+
+
+def _stamp(capability: dict[str, Any], routing: dict[str, FeasibilityFinding]) -> dict[str, Any]:
+    routed = dict(capability)
+    finding = routing.get(str(capability.get("name")))
+    if finding is not None and finding.tier is not None:
+        routed["tier"] = finding.tier
+        routed["module"] = finding.module
+    elif "tier" not in routed:
+        log.warning("feasibility.capability_unrouted", name=capability.get("name"))
+    if routed.get("module") not in capability_registry.MODULES:
+        routed["module"] = None
+    if routed.get("tier") == 2 and routed["module"] is None:
+        routed["tier"] = 3
+    return routed
+
+
+def stamp_routing(spec: dict[str, Any], scope: ScopeDecision) -> dict[str, Any]:
+    """The full spec with the approved tier / module stamped on every capability.
+
+    Run at scope approval so every later step (build, scope extension, rework, delivery)
+    reads the operator's routing from the stored spec, whatever screens it then scopes to.
+    """
+    routing = {f.capability: f for f in scope.feasibility.findings}
+    capabilities = spec.get("capabilities")
+    if not isinstance(capabilities, list):
+        return spec
+    stamped = [_stamp(c, routing) for c in capabilities if isinstance(c, dict)]
+    return {**spec, "capabilities": stamped}
+
+
+def save_routed_spec(storage: ArtifactStorage, job_id: str, scope: ScopeDecision) -> bool:
+    """Stamp the approved routing into the job's stored app_spec (False when it has none)."""
+    key = build_key(job_id=job_id, kind="app_spec", name="app_spec.json")
+    spec = json.loads(storage.get(key))
+    if not isinstance(spec, dict) or not spec.get("capabilities"):
+        return False
+    routed = spec_contract.validate_spec(stamp_routing(spec, scope))
+    storage.put(
+        key,
+        json.dumps(routed, indent=2, ensure_ascii=False).encode(),
+        content_type="application/json",
+    )
+    return True
 
 
 def scope_key(job_id: str) -> str:

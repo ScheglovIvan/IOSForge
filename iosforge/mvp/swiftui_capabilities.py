@@ -141,6 +141,7 @@ class Selected:
 
 def routed_modules(spec: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     """``(module key, capability entry)`` for every tier-2 capability of ``spec``."""
+    load_modules()
     routed: list[tuple[str, dict[str, Any]]] = []
     for capability in spec.get("capabilities") or []:
         if not isinstance(capability, dict) or capability.get("tier") != 2:
@@ -153,6 +154,7 @@ def routed_modules(spec: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
 
 def select(spec: dict[str, Any], integrations: integ.Integrations) -> list[Selected]:
     """The app's modules: the core ones, then each routed module once, in spec order."""
+    load_modules()
     chosen = [Selected(d, CapabilityContext(spec, integrations)) for d in CORE]
     seen = {d.key for d in CORE}
     for key, capability in routed_modules(spec):
@@ -245,3 +247,16 @@ def capability_screen(ctx: CapabilityContext) -> str:
 def directories() -> tuple[str, ...]:
     """Every scaffold directory a module may own (all contract directories)."""
     return tuple(dict.fromkeys([MONETIZATION_DIR, CAPABILITIES_DIR]))
+
+
+_LOADED: list[bool] = []
+
+
+def load_modules() -> None:
+    """Register the built-in capability modules once (lazily, to avoid import cycles)."""
+    if _LOADED:
+        return
+    _LOADED.append(True)
+    from iosforge.mvp import swiftui_remote_api
+
+    swiftui_remote_api.register()

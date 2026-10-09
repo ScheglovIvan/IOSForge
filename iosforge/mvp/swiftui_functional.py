@@ -21,6 +21,8 @@ verification runs the app LIVE instead:
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 
 from iosforge.mvp.swiftui_templates import DO_NOT_EDIT
@@ -38,8 +40,8 @@ class Step:
     """One declarative UI step of a functional check.
 
     ``kind``: ``type`` (type ``value`` into the first text field / text view),
-    ``tap`` (tap the first hittable button whose label matches the ``value`` regex,
-    case-insensitive), ``wait_text`` (a static text containing ``value`` appears within
+    ``tap`` (tap the hittable button whose whole label matches the ``value`` regex,
+    else the shortest label containing a match; case-insensitive), ``wait_text`` (a static text containing ``value`` appears within
     ``timeout`` seconds) or ``pause`` (sleep ``timeout`` seconds).
     """
 
@@ -62,6 +64,18 @@ class FunctionalCheck:
     @property
     def test_name(self) -> str:
         return "test_" + re.sub(r"[^A-Za-z0-9_]", "_", self.name)
+
+
+MockFactory = Callable[[FunctionalCheck], AbstractContextManager[dict[str, str]]]
+
+#: Mock name → context manager yielding the ``IOSFORGE_*`` settings the app needs.
+MOCKS: dict[str, MockFactory] = {}
+
+
+def register_mock(name: str, factory: MockFactory) -> MockFactory:
+    """Make a mock available to the functional checks that name it."""
+    MOCKS[name] = factory
+    return factory
 
 
 FUNCTIONAL = f"""import Foundation
@@ -139,6 +153,8 @@ def _test(check: FunctionalCheck, launch_keys: list[str]) -> str:
         _ = app.wait(for: .runningForeground, timeout: 15)
         app.open(URL(string: "iosforge://screen/{check.screen_id}")!)
         _ = app.wait(for: .runningForeground, timeout: 15)
+        let screen = app.descendants(matching: .any)["iosforge.screen.{check.screen_id}"].firstMatch
+        XCTAssertTrue(screen.waitForExistence(timeout: 15), "screen {check.screen_id} never opened")
         sleep(1)
 {steps}
     }}"""
@@ -183,16 +199,22 @@ final class FunctionalTests: XCTestCase {{
     }}
 
     private func tapAction(_ app: XCUIApplication, matching pattern: String, timeout: TimeInterval) throws {{
-        let regex = try NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+        let exact = try NSRegularExpression(pattern: "^(?:" + pattern + ")$", options: [.caseInsensitive])
+        let loose = try NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {{
-            for button in app.buttons.allElementsBoundByIndex where button.exists && button.isHittable {{
-                let label = button.label
-                let range = NSRange(label.startIndex..., in: label)
-                if regex.firstMatch(in: label, range: range) != nil {{
-                    button.tap()
-                    return
-                }}
+            let buttons = app.buttons.allElementsBoundByIndex.filter {{ $0.exists && $0.isHittable }}
+            func matches(_ regex: NSRegularExpression, _ label: String) -> Bool {{
+                regex.firstMatch(in: label, range: NSRange(label.startIndex..., in: label)) != nil
+            }}
+            if let button = buttons.first(where: {{ matches(exact, $0.label.trimmingCharacters(in: .whitespaces)) }}) {{
+                button.tap()
+                return
+            }}
+            let loosely = buttons.filter {{ matches(loose, $0.label) }}
+            if let button = loosely.min(by: {{ $0.label.count < $1.label.count }}) {{
+                button.tap()
+                return
             }}
             sleep(1)
         }}
