@@ -12,7 +12,10 @@ Senior/enterprise hardening of Stage B (see ``docs/app-spec-v2.md`` and the
   check already done for ``tasks.json``;
 * screen-coverage check against the crawl, so every crawled screen is accounted
   for;
-* provenance + ``spec_version`` for reproducibility and audit.
+* provenance + ``spec_version`` for reproducibility and audit;
+* the optional ``source_locale`` — BCP-47 tag of the language/region the
+  ORIGINAL screenshots were captured in (shape-checked against
+  :data:`SOURCE_LOCALE_PATTERN`), which the Vision Judge pins the simulator to.
 
 Requirements use EARS types (``ubiquitous`` / ``event_driven`` / ``state_driven``
 / ``optional_feature`` / ``unwanted_behavior``) and carry stable ids so the spec
@@ -27,6 +30,10 @@ from typing import Any, cast
 from jsonschema import Draft202012Validator
 
 SPEC_VERSION = "3.0"
+
+#: Simplified BCP-47 shape: language, optional script, optional region
+#: (``en``, ``en-US``, ``zh-Hans-CN``, ``es-419``).
+SOURCE_LOCALE_PATTERN = r"^[a-z]{2,3}(-[A-Za-z]{4})?(-[A-Z]{2}|-[0-9]{3})?$"
 
 _APP_TYPES = [
     "game",
@@ -97,6 +104,7 @@ APP_SPEC_SCHEMA: dict[str, Any] = {
             },
         },
         "app_name": _STR,
+        "source_locale": {"type": "string", "pattern": SOURCE_LOCALE_PATTERN},
         "package": _STR,
         "app_type": {"type": "string", "enum": _APP_TYPES},
         "one_liner": _STR,

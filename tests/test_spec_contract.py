@@ -212,3 +212,24 @@ def test_rejects_navigation_tab_missing_title() -> None:
     bad = _with_tabs([{"screen_id": "0000"}])
     with pytest.raises(SpecValidationError, match="schema violation"):
         validate_spec(bad)
+
+
+@pytest.mark.parametrize("tag", ["en-US", "ru-RU", "de", "zh-Hans-CN", "es-419", "fil"])
+def test_source_locale_accepts_bcp47(tag: str) -> None:
+    spec = _valid_spec()
+    spec["source_locale"] = tag
+    assert validate_spec(spec)["source_locale"] == tag
+
+
+def test_spec_without_source_locale_still_validates() -> None:
+    spec = _valid_spec()
+    assert "source_locale" not in spec
+    validate_spec(spec)
+
+
+@pytest.mark.parametrize("tag", ["en_US", "EN-us", "english", "", "en-USA", "e"])
+def test_rejects_malformed_source_locale(tag: str) -> None:
+    bad = _valid_spec()
+    bad["source_locale"] = tag
+    with pytest.raises(SpecValidationError, match="schema violation at 'source_locale'"):
+        validate_spec(bad)

@@ -122,6 +122,11 @@ def test_analyze_prompt_describes_navigation_tabs() -> None:
         assert token in ANALYZE_PROMPT
 
 
+def test_analyze_prompt_describes_source_locale() -> None:
+    for token in ('"source_locale"', "BCP-47", "ORIGINAL screenshots"):
+        assert token in ANALYZE_PROMPT
+
+
 def test_analyze_workspace_stages_monetization_channels(tmp_path: Path) -> None:
     rp = RunPaths.create(tmp_path)
     _seed_archive(rp)

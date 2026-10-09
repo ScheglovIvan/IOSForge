@@ -167,6 +167,10 @@ REQUIRED; use [] / {} / "" when a section does not apply, never omit a key):
 {
   "spec_version": "3.0",                // emit exactly this; omit "provenance" (tool injects it)
   "app_name": str,
+  "source_locale": str,                 // BCP-47 tag of the language the ORIGINAL screenshots
+                                        // are in, judged from their UI text (en-US, ru-RU, de);
+                                        // add a region only when the text/formats show it;
+                                        // omit the key if the screenshots carry no readable text
   "package": str,
   "app_type": str,                      // game | photo-editor | social | utility |
                                         // content-subscription | e-commerce | productivity |
