@@ -288,3 +288,18 @@ Write ONLY `{APP_DIR}/{entry.view_path}`, other files under
 `{APP_DIR}/App/Features/{entry.screen_id}/` and `{APP_DIR}/{entry.fixtures_path}`; anything else
 is discarded. Keep the screen compiling and rendering fully on the first frame.
 """
+
+
+def rework_prompt(instructions: str, *, prompters: list[str]) -> str:
+    """Operator rework round over the generated app (post-MVP feature/fix iteration)."""
+    return f"""{base_rules(prompters)}
+TASK: operator rework round on the existing app in `{APP_DIR}/`. Apply these instructions:
+
+{instructions.strip()}
+
+Edit ONLY model-owned code: `{APP_DIR}/App/Theme/`, `{APP_DIR}/App/Components/`
+(+ `{COMPONENTS_MD}`), `{APP_DIR}/App/Features/<screen id>/` and `{APP_DIR}/App/Fixtures/`;
+anything else is discarded.
+Keep every screen rendering on its first frame in headless mode and keep the app compiling. To
+add a NEW screen the operator must extend the scope instead — do not invent screens here.
+"""

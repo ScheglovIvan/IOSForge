@@ -42,6 +42,7 @@ from iosforge.mvp.swiftui_prompts import (
     compile_fix_prompt,
     components_prompt,
     corrective_prompt,
+    rework_prompt,
     screen_prompt,
     theme_prompt,
 )
@@ -611,13 +612,125 @@ def correct(
     )
     if gate.errors:
         raise RuntimeError(f"corrective round left a non-compiling app: {gate.errors[:10]}")
+    _swap_in(paths)
+    bound.info("compliance.correct.done", screens=sorted(groups), tasks=len(tasks))
+    return runs
+
+
+_MODEL_PREFIXES = ("App/Theme/", "App/Components/", "App/Features/", "App/Fixtures/")
+
+
+def _model_owner(rel: str) -> bool:
+    return rel.startswith(_MODEL_PREFIXES)
+
+
+def _swap_in(paths: RunPaths) -> None:
     staged = paths.run_dir / "xcode_app.next"
     if staged.exists():
         shutil.rmtree(staged)
     shutil.copytree(_workspace_app(paths), staged, ignore=shutil.ignore_patterns("*.xcodeproj"))
     shutil.rmtree(paths.xcode_app)
     staged.rename(paths.xcode_app)
-    bound.info("compliance.correct.done", screens=sorted(groups), tasks=len(tasks))
+
+
+def rework(
+    paths: RunPaths,
+    instructions: str,
+    *,
+    timeout: int = 5400,
+    fix_attempts: int = 3,
+) -> list[TaskRun]:
+    """One operator rework round over ``paths.xcode_app`` (model-owned code only).
+
+    Runs a sandboxed task that may touch theme, components, screens and fixtures; the
+    compile gate then restores the contract and fixes build errors. Raises when the app
+    no longer builds, leaving ``paths.xcode_app`` unchanged.
+    """
+    spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
+    plan = build_plan(spec)
+    identity = identity_from_project(paths.xcode_app)
+    prompters = prompter_names(spec, paths.xcode_app)
+    restore_workspace(paths)
+    run = _run_sandboxed(
+        paths,
+        "rework",
+        rework_prompt(instructions, prompters=prompters),
+        _model_owner,
+        timeout=timeout,
+        root_files=(COMPONENTS_MD,),
+    )
+    gate, _ = ensure_compiles(
+        paths, identity, plan, prompters=prompters, attempts=fix_attempts, timeout=timeout
+    )
+    if gate.errors:
+        raise RuntimeError(f"rework round left a non-compiling app: {gate.errors[:10]}")
+    _swap_in(paths)
+    return [run]
+
+
+def extend(
+    paths: RunPaths,
+    screen_ids: list[str],
+    full_spec: dict[str, Any],
+    *,
+    timeout: int = 1800,
+    fix_attempts: int = 3,
+    max_parallel: int = 4,
+) -> list[TaskRun]:
+    """Grow the app's scope with ``screen_ids`` from ``full_spec`` (post-MVP extension).
+
+    Re-scopes the spec to current + requested screens, re-renders the contract (new
+    ``ScreenID`` cases, tabs, prompters) around the existing model code, generates only
+    the new screens in sandboxes and runs the compile gate. Unknown ids are ignored.
+    """
+    current = {
+        str(s.get("id")) for s in json.loads(paths.app_spec_json.read_text()).get("screens", [])
+    }
+    known = {str(s.get("id")) for s in full_spec.get("screens", []) if isinstance(s, dict)}
+    added = [sid for sid in screen_ids if sid in known and sid not in current]
+    if not added:
+        return []
+    paths.app_spec_json.write_text(json.dumps(full_spec, ensure_ascii=False), encoding="utf-8")
+    scope_to(paths, sorted(current | set(added)))
+    spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
+    identity = identity_from_project(paths.xcode_app)
+    write_scaffold(paths.xcode_app, spec, app_name=identity.app_name, bundle_id=identity.bundle_id)
+    model_spec, _ = strip_ad_components(spec)
+    paths.claude_ws.mkdir(parents=True, exist_ok=True)
+    (paths.claude_ws / "app_spec.json").write_text(
+        json.dumps(model_spec, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    restore_workspace(paths)
+    plan = build_plan(spec)
+    by_id = {e.screen_id: e for e in plan.entries}
+    prompters = prompter_names(spec, paths.xcode_app)
+    with ThreadPoolExecutor(max_workers=max(1, max_parallel)) as pool:
+        futures = [
+            pool.submit(
+                _run_sandboxed,
+                paths,
+                f"screen-{sid}",
+                screen_prompt(
+                    by_id[sid],
+                    plan,
+                    targets=_targets(by_id[sid], spec, plan),
+                    prompters=prompters,
+                    observed=_observed(paths, by_id[sid]),
+                ),
+                _screen_owner(by_id[sid]),
+                timeout=timeout,
+            )
+            for sid in added
+            if sid in by_id
+        ]
+        runs = [f.result() for f in futures]
+    gate, _ = ensure_compiles(
+        paths, identity, plan, prompters=prompters, attempts=fix_attempts, timeout=timeout
+    )
+    pending = pending_screens(_workspace_app(paths), plan.entries)
+    if gate.errors or pending:
+        raise RuntimeError(f"scope extension incomplete: {[*gate.errors[:10], *pending]}")
+    _swap_in(paths)
     return runs
 
 
@@ -646,8 +759,12 @@ def scope_to(paths: RunPaths, screen_ids: list[str]) -> None:
     """Prune ``app_spec.json`` (scope mechanism) and the judge's originals to ``screen_ids``.
 
     ``screens.json`` lists the originals the Vision Judge scores; an excluded screen left
-    there would count as "not rendered". The full crawl is kept as ``screens_full.json``.
+    there would count as "not rendered". The full crawl is kept as ``screens_full.json``
+    and the unpruned spec as ``app_spec_full.json`` (scope extensions start from it).
     """
+    full_spec = paths.run_dir / "app_spec_full.json"
+    if not full_spec.exists() and paths.app_spec_json.is_file():
+        shutil.copy2(paths.app_spec_json, full_spec)
     if paths.screens_json.is_file():
         crawl = json.loads(paths.screens_json.read_text(encoding="utf-8"))
         full = paths.run_dir / "screens_full.json"

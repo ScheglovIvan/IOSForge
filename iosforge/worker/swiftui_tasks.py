@@ -30,16 +30,29 @@ from iosforge.common.logging import get_logger
 from iosforge.common.queue import PipelineTask, celery_app
 from iosforge.common.types import JobState, Stage
 from iosforge.db.base import utcnow
-from iosforge.db.models import Job, StageTimeline, XcodeBuild
+from iosforge.db.models import (
+    DataArchiveArtifact,
+    GenerationResult,
+    Job,
+    StageTimeline,
+    WalkthroughResult,
+    XcodeBuild,
+)
 from iosforge.db.session import get_sessionmaker
 from iosforge.mvp import (
     apphud_provision,
     attribution,
     build_profile,
+    compliance,
+    feasibility,
+    frida_ingest,
     ios_delivery,
+    simulator,
+    swiftui_gen,
     swiftui_integrations,
 )
 from iosforge.mvp.paths import RunPaths
+from iosforge.mvp.source_locale import resolve_source_locale
 from iosforge.mvp.swiftui_scaffold import write_scaffold
 from iosforge.storage.client import ArtifactStorage, S3ArtifactStorage, build_key
 
@@ -227,6 +240,129 @@ def run_xcode_delivery(self: Any, job_id: str, build_id: str | None = None) -> s
         stage.duration_ms = build.duration_ms
         db.commit()
         return f"job {job_id} delivery {build.status}"
+
+
+REWORKABLE = (JobState.DONE, JobState.FAILED, JobState.NEEDS_INPUT)
+
+
+def hydrate_inputs(db: Session, job: Job, storage: ArtifactStorage, paths: RunPaths) -> None:
+    """Restore the job's crawl (screens, screenshots), app_spec and Frida archive context."""
+    job_id = str(job.id)
+    walk = db.scalar(select(WalkthroughResult).where(WalkthroughResult.job_id == job.id))
+    if walk is None:
+        raise RuntimeError(f"job {job_id} has no analysis")
+    paths.screens_json.write_text(json.dumps(walk.screen_map, ensure_ascii=False))
+    for key in walk.screenshot_keys:
+        (paths.screens_dir / key.rsplit("/", 1)[-1]).write_bytes(storage.get(key))
+    paths.app_spec_json.write_bytes(
+        storage.get(build_key(job_id=job_id, kind="app_spec", name="app_spec.json"))
+    )
+    archive = db.scalar(select(DataArchiveArtifact).where(DataArchiveArtifact.job_id == job.id))
+    if archive is not None:
+        raw = paths.run_dir / "data_archive.zip"
+        raw.write_bytes(storage.get(archive.storage_key))
+        frida_ingest.ingest_archive(raw, paths)
+
+
+def _scope_ids(storage: ArtifactStorage, job_id: str, spec: dict[str, Any]) -> list[str]:
+    try:
+        scope = feasibility.load_scope(storage, job_id)
+    except Exception:
+        scope = None
+    if scope is not None and scope.scope_mode == "core":
+        return [s.screen_id for s in scope.screens if s.include]
+    return [str(s["id"]) for s in spec.get("screens", []) if isinstance(s, dict)]
+
+
+@celery_app.task(base=PipelineTask, name="iosforge.rework_swiftui", bind=True, queue=XCODE_QUEUE)
+def rework_swiftui(
+    self: Any, job_id: str, instructions: str = "", add_screens: list[str] | None = None
+) -> str:
+    """Operator rework round of a SwiftUI app (Phase 6): extend scope and/or edit, then ship.
+
+    Allowed only while the job is not running (DONE / FAILED / NEEDS_INPUT) and its SwiftUI
+    sources exist. ``add_screens`` first grows the scope from the full app_spec, then
+    ``instructions`` run as one model round; a single Vision-Judge pass is recorded, the
+    new version is stored (``result_version`` + 1, new ``GenerationResult``) and native
+    delivery is enqueued. Fails loudly off-Mac.
+    """
+    settings = get_settings()
+    storage = S3ArtifactStorage()
+    maker = get_sessionmaker()
+    with maker() as db:
+        job = db.get(Job, uuid.UUID(job_id))
+        if job is None:
+            return f"job {job_id} not found"
+        scope_pending = (job.source_app_metadata or {}).get("scope_status") == "proposed"
+        if job.state not in REWORKABLE or scope_pending or not storage.exists(sources_key(job_id)):
+            return f"job {job_id} cannot be reworked in state {job.state}"
+        if not instructions.strip() and not add_screens:
+            return f"job {job_id}: nothing to rework"
+        job.state = JobState.CODEGEN
+        stage = StageTimeline(job_id=job.id, stage=Stage.CODEGEN, started_at=utcnow())
+        db.add(stage)
+        db.commit()
+        try:
+            simulator.require_toolchain()
+            with tempfile.TemporaryDirectory(prefix="iosforge-rework-") as tmp:
+                paths = RunPaths.create(Path(tmp) / "run")
+                hydrate_inputs(db, job, storage, paths)
+                full_spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
+                swiftui_gen.scope_to(paths, _scope_ids(storage, job_id, full_spec))
+                hydrate_sources(storage, job_id, paths.xcode_app)
+                if add_screens:
+                    swiftui_gen.extend(paths, list(add_screens), full_spec)
+                if instructions.strip():
+                    swiftui_gen.rework(
+                        paths, instructions, timeout=settings.codegen_rework_timeout_s
+                    )
+                report = compliance.verify_ios(
+                    paths,
+                    simulator.SimEnvironment(
+                        udid=settings.ios_simulator_udid, locale=_job_locale(job, paths)
+                    ),
+                    weights=compliance.ComplianceWeights.from_settings(settings),
+                    threshold=settings.frontend_verify_threshold,
+                    soft_floor=settings.compliance_soft_floor,
+                )
+                key = store_sources(storage, job_id, paths.xcode_app)
+            job.result_version = (job.result_version or 1) + 1
+            db.add(
+                GenerationResult(
+                    job_id=job.id,
+                    sources_key=key,
+                    compliance_score=report.get("compliance_score"),
+                    selftest_report=report,
+                )
+            )
+            stage.finished_at = utcnow()
+            job.state = JobState.DONE
+            db.commit()
+            try:
+                queue_delivery(db, job)
+            except Exception as exc:
+                log.error("swiftui.rework.delivery_enqueue_failed", job_id=job_id, error=str(exc))
+        except Exception as exc:
+            log.error("swiftui.rework.failed", job_id=job_id, error=str(exc))
+            stage.error = str(exc)[:4000]
+            stage.finished_at = utcnow()
+            job.state = JobState.FAILED
+            db.commit()
+            return f"job {job_id} rework failed: {exc}"
+    return f"job {job_id} reworked (v{job.result_version})"
+
+
+def _job_locale(job: Job, paths: RunPaths) -> str:
+    spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
+    manifest = (
+        json.loads(paths.capture_manifest_json.read_text(encoding="utf-8"))
+        if paths.capture_manifest_json.is_file()
+        else None
+    )
+    country = (job.source_app_metadata or {}).get("country")
+    return resolve_source_locale(
+        spec, manifest=manifest, storefront_country=str(country) if country else None
+    )
 
 
 def latest_xcode_build(db: Session, job_id: uuid.UUID) -> XcodeBuild | None:

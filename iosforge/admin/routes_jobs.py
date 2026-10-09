@@ -216,12 +216,43 @@ def jobs_rework(
     if gen is None or not text:
         return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
     try:
-        from iosforge.worker.run_job import rework_frontend
+        from iosforge.worker.swiftui_tasks import SOURCES_NAME, XCODE_QUEUE, rework_swiftui
 
-        rework_frontend.apply_async(args=[str(job_id), text], queue="codegen")
+        if gen.sources_key.endswith(SOURCES_NAME):
+            rework_swiftui.apply_async(args=[str(job_id), text], queue=XCODE_QUEUE)
+        else:
+            from iosforge.worker.run_job import rework_frontend
+
+            rework_frontend.apply_async(args=[str(job_id), text], queue="codegen")
         log.info("jobs.rework_requested", job_id=str(job_id))
     except Exception as exc:
         log.error("jobs.rework_enqueue_failed", job_id=str(job_id), error=str(exc))
+    return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
+
+
+@router.post("/jobs/{job_id}/extend-scope")
+def jobs_extend_scope(
+    request: Request,
+    job_id: uuid.UUID,
+    csrf_token: str = Form(...),
+    screens: str = Form(...),
+    user: SessionData = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Post-MVP scope extension of a SwiftUI app: add screens (ids, comma/space separated)."""
+    if not csrf.verify(user.csrf_token, csrf_token):
+        return Response("Invalid request (CSRF).", status_code=400)
+    ids = [part for part in re.split(r"[\s,]+", screens or "") if part]
+    gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
+    from iosforge.worker.swiftui_tasks import SOURCES_NAME, XCODE_QUEUE, rework_swiftui
+
+    if not ids or gen is None or not gen.sources_key.endswith(SOURCES_NAME):
+        return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
+    try:
+        rework_swiftui.apply_async(args=[str(job_id), "", ids], queue=XCODE_QUEUE)
+        log.info("jobs.extend_scope_requested", job_id=str(job_id), screens=ids)
+    except Exception as exc:
+        log.error("jobs.extend_scope_enqueue_failed", job_id=str(job_id), error=str(exc))
     return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
 
 

@@ -246,6 +246,8 @@ class Settings(BaseSettings):
     xcode_team_id: str = Field(default="")
     xcode_archive_timeout_s: int = Field(default=3600, gt=0)
     ios_delivery_upload: bool = Field(default=False)
+    # iOS Simulator the Mac worker renders on (Vision Judge); empty = not configured.
+    ios_simulator_udid: str = Field(default="")
     # ATT prompt copy (Info.plist NSUserTrackingUsageDescription). Without ATT consent
     # attribution degrades to SKAN campaign-level aggregates (no keyword/creative).
     att_usage_description: str = Field(

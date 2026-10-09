@@ -633,6 +633,16 @@
             {% if busy %}<span class="hint">Pipeline is busy…</span>{% endif %}
           </div>
         </form>
+        {% if gen and gen.sources_key and gen.sources_key.endswith('xcode_app.zip') %}
+        <form method="post" action="/jobs/{{ job.id }}/extend-scope" style="margin-top:16px;">
+          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+          <label class="hint">Extend the scope beyond the MVP — screen ids to add (from the full app spec):</label>
+          <input type="text" name="screens" placeholder="e.g. 0009, 0012" {{ 'disabled' if busy else '' }}>
+          <div class="form-actions">
+            <button class="btn btn--ghost" type="submit" {{ 'disabled' if busy else '' }}>Add screens</button>
+          </div>
+        </form>
+        {% endif %}
       </div>
 
       <div class="card">
