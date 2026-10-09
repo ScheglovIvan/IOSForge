@@ -79,13 +79,10 @@ def test_strip_ad_components_returns_a_clean_copy() -> None:
         ("let banner = GADBannerView(adSize: size)\n", "ad SDK type `GADBannerView`"),
         ('Text("This action may contain Ads")\n', "ad UI text"),
         ('Text("Loading ads…")\n', "ad UI text"),
+        ('Text("Advertisement")\n', "ad UI text"),
         ('Text("Ad").font(.caption)\n', "ad UI text"),
-        ('Button("Watch an ad to unlock") {}\n', "ad UI text"),
-        ('Label("Remove Ads", systemImage: "xmark")\n', "ad UI text"),
         ('Text("Sponsored")\n', "ad UI text"),
         ('/* " */ Text("Sponsored")\n', "ad UI text"),
-        ('Text("Ads by Example")\n', "ad UI text"),
-        ('Button("Watch video to unlock") {}\n', "ad UI text"),
         ("@_exported import AppLovinSDK\n", "ad SDK `AppLovinSDK`"),
         ("import GoogleMobileAdsMediationMeta\n", "ad SDK `GoogleMobileAdsMediationMeta`"),
     ],
@@ -108,24 +105,14 @@ def test_regular_copy_and_comments_pass(tmp_path: Path) -> None:
     assert ad_violations(tmp_path) == []
 
 
-def test_paywall_keeps_its_component_but_loses_the_ad_phrase() -> None:
-    spec = {
-        "screens": [
-            {
-                "id": "0001",
-                "components": [
-                    {
-                        "type": "paywall",
-                        "role": "paywall",
-                        "data": "Unlimited scans; Remove ads; Weekly",
-                    }
-                ],
-            }
-        ]
+def test_paywall_with_ad_wording_is_kept_byte_for_byte() -> None:
+    component = {
+        "type": "paywall",
+        "role": "paywall",
+        "data": "Unlimited scans; Remove ads; Weekly",
     }
-    clean, removed = strip_ad_components(spec)
-    assert removed == 0
-    assert clean["screens"][0]["components"][0]["data"] == "Unlimited scans; Weekly"
+    clean, removed = strip_ad_components({"screens": [{"id": "0001", "components": [component]}]})
+    assert removed == 0 and clean["screens"][0]["components"] == [component]
 
 
 def test_multiline_string_ad_text_fails_the_gate(tmp_path: Path) -> None:
@@ -148,26 +135,24 @@ def test_plain_video_text_is_not_an_ad(tmp_path: Path, text: str) -> None:
     assert removed == 0 and clean["screens"][0]["components"][0]["data"] == text
 
 
-def test_video_ad_offers_are_still_ads(tmp_path: Path) -> None:
-    _write(
-        tmp_path,
-        "App/Features/0000/Screen0000View.swift",
-        'Text("Watch a video ad")\nText("Watch video to earn coins")\n',
-    )
-    assert len(ad_violations(tmp_path)) == 2
-
-
-def test_scrub_drops_dangling_joiners() -> None:
-    clean, _ = strip_ad_components(
-        {
-            "screens": [
-                {"components": [{"type": "card", "data": "Remove ads and unlock all features"}]}
-            ]
-        }
-    )
-    assert clean["screens"][0]["components"][0]["data"] == "unlock all features"
+@pytest.mark.parametrize(
+    "text",
+    ["Watch an ad to unlock", "Remove Ads", "Ad-free experience", "Ads by Example", "No ads"],
+)
+def test_ambiguous_ad_wording_is_left_alone(tmp_path: Path, text: str) -> None:
+    _write(tmp_path, "App/Features/0000/Screen0000View.swift", f'Text("{text}")\n')
+    assert ad_violations(tmp_path) == []
 
 
 def test_import_matches_whole_module_names(tmp_path: Path) -> None:
     _write(tmp_path, "App/Features/0000/Screen0000View.swift", "import StartAppKit\n")
     assert ad_violations(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "data", ["Or continue with email", "Plus 50 sounds", "And more...", "Tap; or swipe", "a ;  b"]
+)
+def test_components_without_ads_are_untouched(data: str) -> None:
+    spec = {"screens": [{"components": [{"type": "text", "role": "divider", "data": data}]}]}
+    clean, removed = strip_ad_components(spec)
+    assert removed == 0 and clean["screens"][0]["components"][0]["data"] == data

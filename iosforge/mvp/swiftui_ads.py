@@ -2,11 +2,14 @@
 
 IOSForge clones monetise through subscriptions (Apphud), never advertising, and must
 pass App Review clean, so ad removal cannot depend on per-screen ``layout_notes``.
-:func:`strip_ad_components` cleans the app_spec copy the model works from: ad
-components and ad-only text (disclaimers, labels, "Loading ads" overlays) are
-dropped, while paywalls, upsells and other components only lose the ad phrase in
-their data. :func:`ad_violations` makes any ad SDK import, ad SDK type or ad UI
-text in the generated sources a compile-gate error.
+Structural signals win over text: ad component types/roles, ad SDK imports and ad
+SDK types are reliable; phrase matching is limited to unambiguous ad markers
+("Loading ads", "may contain ads", "Advertisement", bare "Ad"/"Sponsored" labels)
+and stays conservative — when in doubt content is kept (a leftover artefact is
+caught by review / Phase 4, corrupted copy is silent). :func:`strip_ad_components`
+drops ad components and pure text carriers of those markers from the model's spec
+and never rewrites any other component; :func:`ad_violations` makes ad SDK
+imports/types and those markers in generated sources a compile-gate error.
 """
 
 from __future__ import annotations
@@ -71,14 +74,8 @@ _TEXT_CARRIERS = {
     "overlay",
     "loading_status",
 }
-_AD_PHRASE = (
-    r"loading\s+ads?|(?:may|might|can)\s+contain\s+ads?|advertisements?|advertising|"
-    r"sponsored|ads\s+by\b[^;,.]*|watch\s+(?:an?\s+)?ad(?:\s+to\s+\w+)?|"
-    r"watch\s+(?:an?\s+)?video\s+(?:ad\b|to\s+(?:unlock|get|earn|claim|continue|remove)\b)|"
-    r"remove\s+(?:all\s+)?ads|ad[-\s]free(?:\s+experience)?|no\s+(?:more\s+)?ads"
-)
+_AD_PHRASE = r"loading\s+ads?|(?:may|might|can)\s+contain\s+ads?|advertisements?"
 _AD_TEXT = re.compile(rf"\b(?:{_AD_PHRASE})\b", re.I)
-_AD_PHRASE_IN_DATA = re.compile(rf"\s*[;,/•|-]?\s*\b(?:{_AD_PHRASE})\b\s*[;,/•|-]?", re.I)
 _MONETIZATION = {
     "paywall",
     "upsell",
@@ -94,8 +91,7 @@ _MONETIZATION = {
     "purchase",
     "benefit",
 }
-_LEADING_JOINER = re.compile(r"^(?:and|&|or|plus)\s+", re.I)
-_AD_LABEL = re.compile(r"^\s*(?:ad|ads)\s*$", re.I)
+_AD_LABEL = re.compile(r"^\s*(?:ad|ads|sponsored|advertisement)\s*$", re.I)
 _AD_IMPORT = re.compile(
     rf"^\s*(?:@_exported\s+)?import\s+(?:(?:struct|class|enum|protocol|func|typealias|var|let)"
     rf"\s+)?((?:{'|'.join(AD_SDK_MODULES)})(?:Mediation\w*|Adapter\w*)?)\b",
@@ -124,13 +120,8 @@ def is_ad_component(component: dict[str, Any]) -> bool:
         return True
     if kind & _MONETIZATION:
         return False
-    return bool(kind & _TEXT_CARRIERS) and bool(_AD_TEXT.search(str(component.get("data") or "")))
-
-
-def _scrub(data: str) -> str:
-    cleaned = _AD_PHRASE_IN_DATA.sub("; ", data)
-    parts = [_LEADING_JOINER.sub("", part.strip()) for part in re.split(r"\s*;\s*", cleaned)]
-    return "; ".join(part for part in parts if part)
+    data = str(component.get("data") or "")
+    return bool(kind & _TEXT_CARRIERS) and bool(_AD_TEXT.search(data) or _AD_LABEL.match(data))
 
 
 def strip_ad_components(spec: dict[str, Any]) -> tuple[dict[str, Any], int]:
@@ -148,8 +139,6 @@ def strip_ad_components(spec: dict[str, Any]) -> tuple[dict[str, Any], int]:
             if isinstance(component, dict) and is_ad_component(component):
                 removed += 1
                 continue
-            if isinstance(component, dict) and isinstance(component.get("data"), str):
-                component["data"] = _scrub(component["data"])
             kept.append(component)
         screen["components"] = kept
     monetization = clean.get("monetization")
