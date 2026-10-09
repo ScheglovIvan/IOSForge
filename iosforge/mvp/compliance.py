@@ -125,6 +125,21 @@ def _original_screen_ids(paths: RunPaths) -> list[str]:
     return [str(s["id"]) for s in screens if isinstance(s, dict) and "id" in s]
 
 
+def _render_ids(paths: RunPaths) -> list[str]:
+    """Originals first, then planned app_spec screens the capture has no screenshot for.
+
+    The judge scores only the originals (:func:`match_screens` drops the surplus), but
+    every planned screen is rendered so the structural audit sees that it draws and the
+    blank detector checks it.
+    """
+    ids = _original_screen_ids(paths)
+    if paths.app_spec_json.is_file():
+        spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
+        seen = set(ids)
+        ids += [e.screen_id for e in build_plan(spec).entries if e.screen_id not in seen]
+    return ids
+
+
 def match_screens(
     original: list[dict[str, Any]], generated: list[dict[str, Any]]
 ) -> list[tuple[str, str | None]]:
@@ -299,7 +314,7 @@ def render_generated_ios(
     app: Path,
     screen_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Install ``app`` and render each original screen on the iOS Simulator.
+    """Install ``app`` and render every planned screen on the iOS Simulator.
 
     Pins the environment once, relaunches per screen with ``-screen-id`` and the job
     locale, keeps only stable frames (:func:`~iosforge.mvp.simulator.capture_stable`)
@@ -313,7 +328,7 @@ def render_generated_ios(
     simulator.pin_environment(env)
     xcode.install(env.udid, app)
     generated: list[dict[str, Any]] = []
-    for sid in screen_ids if screen_ids is not None else _original_screen_ids(paths):
+    for sid in screen_ids if screen_ids is not None else _render_ids(paths):
         out = paths.generated_screens_dir / f"{sid}.png"
         try:
             shot = simulator.render_screen(env, bundle_id, sid, out)

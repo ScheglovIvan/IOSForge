@@ -210,3 +210,35 @@ def test_judge_prompt_keeps_diffs_actionable() -> None:
 def test_pipeline_cli_exits_2_without_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(xcode, "toolchain_available", lambda: False)
     assert ios_pipeline.main(["--run-dir", "/tmp/x", "--udid", "U"]) == 2
+
+
+def test_planned_screens_without_a_capture_are_rendered_but_not_judged(
+    paths: RunPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = ["0000", "0001", "0011"]
+    paths.screens_json.write_text(json.dumps({"screens": [{"id": sid} for sid in captured]}))
+    (paths.xcode_app / "project.yml").write_text(
+        "name: SpeakerTest\ntargets:\n  SpeakerTest:\n    settings:\n      base:\n"
+        "        PRODUCT_BUNDLE_IDENTIFIER: com.ex.s\n"
+    )
+    rendered: list[str] = []
+    monkeypatch.setattr(simulator, "require_toolchain", lambda: None)
+    monkeypatch.setattr(simulator, "pin_environment", lambda env: None)
+    monkeypatch.setattr(xcode, "install", lambda udid, app: None)
+
+    def render(env: Any, bundle: str, sid: str, out: Path) -> simulator.StableShot:
+        rendered.append(sid)
+        return simulator.StableShot(out, 2, 0.0)
+
+    monkeypatch.setattr(simulator, "render_screen", render)
+    result = compliance.render_generated_ios(
+        paths, simulator.SimEnvironment(udid="U", locale="en-US"), app=Path("/tmp/App.app")
+    )
+
+    planned = [e.screen_id for e in build_plan(SPEC).entries]
+    assert rendered[:3] == captured and sorted(rendered) == sorted(set(captured) | set(planned))
+    assert compliance.nav_audit_ios(paths)["missing_screens"] == []
+    pairs = compliance.match_screens(
+        json.loads(paths.screens_json.read_text())["screens"], result["screens"]
+    )
+    assert [oid for oid, _ in pairs] == captured
