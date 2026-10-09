@@ -75,6 +75,32 @@ struct Screen0001View: View {
 }
 """
 
+UNCONFIRMED_SCREEN = """import SwiftUI
+
+struct Screen0001View: View {
+    @State private var groups: [ContactDuplicateGroup] = []
+    @State private var status = "Not scanned"
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text(status)
+            Button("Scan") {
+                Task {
+                    groups = (try? await ContactsCleaner.scan()) ?? []
+                    status = "\\(groups.count) groups"
+                }
+            }
+            Button("Merge") {
+                Task {
+                    let merged = (try? await ContactsCleaner.merge(groups)) ?? 0
+                    status = "Merged \\(merged)"
+                }
+            }
+        }
+    }
+}
+"""
+
 STORAGE_SCREEN = """import SwiftUI
 
 struct Screen0001View: View {
@@ -153,16 +179,19 @@ def test_cleaner_modules_never_merge_by_name_or_hash_alone() -> None:
     photos = swiftui_cleaners.PHOTOS_SWIFT
     assert "SHA256.hash" in photos and "pixelWidth" in photos and "value != 0" in photos
     assert "photos.error" in photos
-    assert swiftui_cleaners.CONFIRM_ID in swiftui_cleaners.CONTACTS_RULE
     assert ".alert" in swiftui_cleaners.CONTACTS_RULE
 
 
 def test_contacts_check_confirms_before_merging() -> None:
+    from iosforge.mvp import swiftui_functional as swf
+
     spec = _spec("contacts_cleaner", "contacts_cleaner")
     check = caps.functional_checks(caps.select(spec, caps.integ.Integrations()))[0]
     kinds = [(step.kind, step.identifier) for step in check.steps]
     clean = kinds.index(("tap", swiftui_cleaners.CLEAN_ID))
-    assert kinds[clean + 1] == ("tap", swiftui_cleaners.CONFIRM_ID)
+    assert check.steps[clean + 1].kind == "confirm"
+    source = swf.render_ui_tests([check], [])
+    assert "try tapInConfirmation(app, " in source and "app.alerts.firstMatch" in source
 
 
 def test_patterns_are_word_bounded() -> None:
@@ -216,6 +245,13 @@ def test_photos_cleaner_deletes_seeded_duplicates(tmp_path: Path) -> None:
 def test_contacts_cleaner_merges_seeded_duplicates(tmp_path: Path) -> None:
     report = _run(tmp_path, "contacts_cleaner", "contacts_cleaner", CONTACTS_SCREEN)
     assert report["ok"], report
+
+
+@pytest.mark.mac
+@pytest.mark.skipif(_first_iphone() is None, reason="needs Xcode, XcodeGen and an iPhone simulator")
+def test_contacts_merge_without_confirmation_fails(tmp_path: Path) -> None:
+    check = _run(tmp_path, "contacts_cleaner", "contacts_cleaner", UNCONFIRMED_SCREEN)["checks"][0]
+    assert not check["passed"] and not check["ui_passed"] and not check["infra_error"]
 
 
 @pytest.mark.mac

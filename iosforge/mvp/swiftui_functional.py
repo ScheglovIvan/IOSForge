@@ -45,8 +45,10 @@ class Step:
     text containing ``value`` appears within ``timeout`` seconds), ``system`` (tap the
     ``value`` button of a system alert, e.g. the photo deletion confirmation), ``allow``
     (if a system permission alert shows within ``timeout`` seconds, tap the first of the
-    ``|``-separated ``value`` labels; no alert is fine) or ``pause`` (sleep ``timeout``
-    seconds).
+    ``|``-separated ``value`` labels; no alert is fine), ``confirm`` (an in-app alert or
+    action sheet must appear within ``timeout`` seconds; tap its button whose label matches
+    the ``value`` regex — fails when the screen acted without asking) or ``pause`` (sleep
+    ``timeout`` seconds).
     """
 
     kind: str
@@ -153,6 +155,8 @@ def _step(step: Step) -> str:
         return f"        try waitForText(app, {_swift(step.value)}, timeout: {step.timeout})"
     if step.kind == "system":
         return f"        tapSystemAlert({_swift(step.value)}, timeout: {step.timeout})"
+    if step.kind == "confirm":
+        return f"        try tapInConfirmation(app, {_swift(step.value)}, timeout: {step.timeout})"
     if step.kind == "allow":
         return f"        allowIfAsked({_swift(step.value)}, timeout: {step.timeout})"
     if step.kind == "pause":
@@ -245,6 +249,24 @@ final class FunctionalTests: XCTestCase {{
             sleep(1)
         }}
         XCTFail("no button matching /\\(pattern)/ on screen")
+    }}
+
+    private func tapInConfirmation(_ app: XCUIApplication, _ pattern: String, timeout: TimeInterval) throws {{
+        let regex = try NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {{
+            for container in [app.alerts.firstMatch, app.sheets.firstMatch] where container.exists {{
+                let buttons = container.buttons.allElementsBoundByIndex.filter {{ $0.exists && $0.isHittable }}
+                if let button = buttons.first(where: {{
+                    regex.firstMatch(in: $0.label, range: NSRange($0.label.startIndex..., in: $0.label)) != nil
+                }}) {{
+                    button.tap()
+                    return
+                }}
+            }}
+            sleep(1)
+        }}
+        XCTFail("no confirmation alert with a button matching /\\(pattern)/")
     }}
 
     private func tapSystemAlert(_ label: String, timeout: TimeInterval) {{

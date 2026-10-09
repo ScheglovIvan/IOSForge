@@ -39,8 +39,7 @@ SCAN_PATTERN = r"\b(scan|find|search|analy[sz]e|detect|check)\b"
 CLEAN_PATTERN = r"\b(delete|clean|remove|merge|clear)\b|free up"
 SCAN_ID = "iosforge.scan"
 CLEAN_ID = "iosforge.clean"
-CONFIRM_ID = "iosforge.confirm"
-CONFIRM_PATTERN = "merge|delete|confirm|yes"
+CONFIRM_PATTERN = r"\b(merge|delete|confirm|yes)\b"
 MARK_RULE = (
     f'\n  Mark the scan button `.accessibilityIdentifier("{SCAN_ID}")` and the delete / clean /'
     f' merge\n  button `.accessibilityIdentifier("{CLEAN_ID}")`.'
@@ -232,10 +231,13 @@ enum ContactsCleaner {{
     /// Returns how many cards were removed.
     @discardableResult
     static func merge(_ groups: [ContactDuplicateGroup]) async throws -> Int {{
-        let work = groups.filter {{ $0.contacts.count > 1 }}
+        let work = groups.filter {{ group in
+            group.contacts.count > 1 && !group.contacts.contains {{ merged.contains($0.identifier) }}
+        }}
         guard !work.isEmpty, !Headless.isActive else {{ return 0 }}
         do {{
             let (removed, copied) = try await Task.detached {{ try save(work) }}.value
+            merged.formUnion(work.flatMap {{ $0.contacts.map(\.identifier) }})
             Functional.record("contacts.merged", ["count": String(removed), "copied": String(copied)])
             return removed
         }} catch {{
@@ -244,14 +246,19 @@ enum ContactsCleaner {{
         }}
     }}
 
-    nonisolated private static func fetchAll() throws -> [CNContact] {{
-        let keys: [CNKeyDescriptor] = [
+    private static var merged: Set<String> = []
+
+    nonisolated private static var keys: [CNKeyDescriptor] {{
+        [
             CNContactGivenNameKey as CNKeyDescriptor,
             CNContactFamilyNameKey as CNKeyDescriptor,
             CNContactPhoneNumbersKey as CNKeyDescriptor,
             CNContactEmailAddressesKey as CNKeyDescriptor,
             CNContactIdentifierKey as CNKeyDescriptor,
         ]
+    }}
+
+    nonisolated private static func fetchAll() throws -> [CNContact] {{
         var all: [CNContact] = []
         try CNContactStore().enumerateContacts(with: CNContactFetchRequest(keysToFetch: keys)) {{ contact, _ in
             all.append(contact)
@@ -302,11 +309,13 @@ enum ContactsCleaner {{
     }}
 
     nonisolated private static func save(_ groups: [ContactDuplicateGroup]) throws -> (Int, Int) {{
+        let store = CNContactStore()
         let request = CNSaveRequest()
         var removed = 0
         var copied = 0
         for group in groups {{
-            guard let keeper = group.contacts[0].mutableCopy() as? CNMutableContact else {{ continue }}
+            let current = try store.unifiedContact(withIdentifier: group.contacts[0].identifier, keysToFetch: keys)
+            guard let keeper = current.mutableCopy() as? CNMutableContact else {{ continue }}
             var known = handles(keeper)
             for card in group.contacts.dropFirst() {{
                 for phone in card.phoneNumbers where known.insert(phoneKey(phone.value)).inserted {{
@@ -324,7 +333,7 @@ enum ContactsCleaner {{
             }}
             request.update(keeper)
         }}
-        try CNContactStore().execute(request)
+        try store.execute(request)
         return (removed, copied)
     }}
 }}
@@ -416,8 +425,8 @@ CONTACTS_RULE = (
     "  for access itself), the screen lists the groups (`ContactDuplicateGroup.name`,\n"
     "  `.duplicates`). The merge `Button` only opens an `.alert` that says the extra cards are\n"
     '  deleted after their numbers and emails are copied; the alert\'s destructive `Button("Merge")`\n'
-    f'  (`.accessibilityIdentifier("{CONFIRM_ID}")`) runs `try await ContactsCleaner.merge(groups)`\n'
-    "  in a `Task`. Never merge without that confirmation, never import Contacts in screens and\n"
+    "  runs `try await ContactsCleaner.merge(groups)` in a `Task` and then clears `groups`.\n"
+    "  Never merge without that confirmation, never import Contacts in screens and\n"
     "  never fake results; headless shows fixtures."
 )
 STORAGE_RULE = (
@@ -458,10 +467,10 @@ def _contacts_check(ctx: caps.CapabilityContext) -> FunctionalCheck | None:
         steps=(
             Step("tap", SCAN_PATTERN, timeout=10, identifier=SCAN_ID),
             Step("allow", CONTACTS_ALLOW, timeout=4),
-            Step("pause", timeout=4),
+            Step("pause", timeout=6),
             Step("tap", CLEAN_PATTERN, timeout=20, identifier=CLEAN_ID),
-            Step("tap", CONFIRM_PATTERN, timeout=10, identifier=CONFIRM_ID),
-            Step("pause", timeout=3),
+            Step("confirm", CONFIRM_PATTERN, timeout=10),
+            Step("pause", timeout=6),
         ),
         expect_events=("contacts.duplicates_found", "contacts.merged"),
         mock=CONTACTS,
