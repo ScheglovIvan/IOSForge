@@ -164,6 +164,35 @@ def queue_delivery(db: Session, job: Job) -> XcodeBuild | None:
     return build
 
 
+def render_release(
+    job: Job, storage: ArtifactStorage, paths: RunPaths, settings: Settings
+) -> build_profile.BuildIdentity:
+    """Hydrate the stored app and re-render its contract exactly as it ships.
+
+    The built scope, the job's identity, the frozen Apphud / Tenjin integrations and
+    the icon go into ``paths.xcode_app``; delivery archives this tree and the legal
+    pages describe it.
+    """
+    job_id = str(job.id)
+    hydrate_sources(storage, job_id, paths.xcode_app)
+    paths.app_spec_json.write_bytes(
+        storage.get(build_key(job_id=job_id, kind="app_spec", name="app_spec.json"))
+    )
+    full_spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
+    swiftui_gen.scope_to(paths, effective_scope_ids(job, storage, full_spec, settings))
+    spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
+    ident = build_profile.resolve_identity(job.source_app_metadata, spec, settings)
+    write_scaffold(
+        paths.xcode_app,
+        spec,
+        app_name=ident.app_name,
+        bundle_id=ident.bundle_id,
+        integrations=job_integrations(job, spec, paths, settings),
+        icon_png=_icon(storage, job_id, paths.run_dir / "app_icon.png"),
+    )
+    return ident
+
+
 def _icon(storage: ArtifactStorage, job_id: str, out: Path) -> Path | None:
     key = build_key(job_id=job_id, kind="app_icon", name="app_icon.png")
     if not storage.exists(key):
@@ -202,22 +231,7 @@ def run_xcode_delivery(self: Any, job_id: str, build_id: str | None = None) -> s
         try:
             with tempfile.TemporaryDirectory(prefix="iosforge-delivery-") as tmp:
                 paths = RunPaths.create(Path(tmp) / "run")
-                hydrate_sources(storage, job_id, paths.xcode_app)
-                paths.app_spec_json.write_bytes(
-                    storage.get(build_key(job_id=job_id, kind="app_spec", name="app_spec.json"))
-                )
-                full_spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
-                swiftui_gen.scope_to(paths, effective_scope_ids(job, storage, full_spec, settings))
-                spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
-                ident = build_profile.resolve_identity(job.source_app_metadata, spec, settings)
-                write_scaffold(
-                    paths.xcode_app,
-                    spec,
-                    app_name=ident.app_name,
-                    bundle_id=ident.bundle_id,
-                    integrations=job_integrations(job, spec, paths, settings),
-                    icon_png=_icon(storage, job_id, paths.run_dir / "app_icon.png"),
-                )
+                render_release(job, storage, paths, settings)
                 result = ios_delivery.deliver(
                     paths.xcode_app,
                     paths.run_dir / "delivery",

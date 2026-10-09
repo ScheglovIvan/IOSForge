@@ -11,7 +11,7 @@ import pytest
 
 from iosforge.common.config import Settings
 from iosforge.common.types import JobState
-from iosforge.db.models import GenerationResult, Job, StageTimeline
+from iosforge.db.models import GenerationResult, Job, StageTimeline, WalkthroughResult
 from iosforge.mvp.paths import RunPaths
 from iosforge.worker import swiftui_build, swiftui_tasks
 from tests.test_feasibility import _spec_three_screens
@@ -20,6 +20,11 @@ from tests.test_feasibility import _spec_three_screens
 class _Session:
     def __init__(self, job: Job, existing: GenerationResult | None = None) -> None:
         self.job, self.existing, self.added = job, existing, []
+        self.walk: WalkthroughResult | None = WalkthroughResult(
+            job_id=job.id, screen_map={"screens": [{"id": "0000"}]}
+        )
+        self.running: StageTimeline | None = None
+        self.rolled_back = False
 
     def __enter__(self) -> _Session:
         return self
@@ -27,17 +32,29 @@ class _Session:
     def __exit__(self, *exc: object) -> None:
         return None
 
-    def get(self, model: type, pk: object) -> Job:
-        return self.job
+    def get(self, model: type, pk: object) -> Any:
+        if model is Job:
+            return self.job
+        return next((o for o in self.added if getattr(o, "id", None) == pk), None)
 
-    def scalar(self, stmt: object) -> GenerationResult | None:
+    def scalar(self, stmt: object) -> Any:
+        text = str(stmt)
+        if "walkthrough_results" in text:
+            return self.walk
+        if "stage_timeline" in text:
+            return self.running
         return self.existing
 
     def add(self, obj: object) -> None:
+        if getattr(obj, "id", "x") is None:
+            obj.id = uuid.uuid4()  # type: ignore[attr-defined]
         self.added.append(obj)
 
     def commit(self) -> None:
         return None
+
+    def rollback(self) -> None:
+        self.rolled_back = True
 
 
 def _wire(
@@ -51,6 +68,14 @@ def _wire(
     monkeypatch.setattr(swiftui_build, "get_settings", lambda: Settings())
     monkeypatch.setattr(swiftui_build.simulator, "require_toolchain", lambda: None)
     monkeypatch.setattr(swiftui_build.simulator, "resolve_udid", lambda c: "UDID")
+
+    def claim(db: Any, job_id: Any, allowed: Any, state: JobState) -> bool:
+        if job.state not in allowed:
+            return False
+        job.state = state
+        return True
+
+    monkeypatch.setattr(swiftui_build, "claim_job", claim)
 
     def inputs(db: Any, j: Job, s: Any, paths: RunPaths) -> None:
         paths.app_spec_json.write_text(json.dumps(_spec_three_screens()))
@@ -112,6 +137,8 @@ def test_structural_gaps_park_the_job_without_delivery(monkeypatch: pytest.Monke
     assert "hold delivery" in swiftui_build.build_swiftui.run(str(job.id))
     assert job.state == JobState.NEEDS_INPUT and seen["queued"] == []
     assert any(isinstance(o, GenerationResult) for o in session.added)
+    stage = next(o for o in session.added if isinstance(o, StageTimeline))
+    assert "held for the operator" in (stage.error or "")
 
 
 def test_codegen_errors_fail_the_job(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -119,6 +146,7 @@ def test_codegen_errors_fail_the_job(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "build failed" in swiftui_build.build_swiftui.run(str(job.id))
     stage = next(o for o in session.added if isinstance(o, StageTimeline))
     assert job.state == JobState.FAILED and "boom" in (stage.error or "")
+    assert session.rolled_back
     assert not any(isinstance(o, GenerationResult) for o in session.added)
 
 
@@ -127,6 +155,43 @@ def test_existing_result_is_not_rebuilt(monkeypatch: pytest.MonkeyPatch) -> None
     session.existing = GenerationResult(job_id=job.id, sources_key="k")
     assert "already built" in swiftui_build.build_swiftui.run(str(job.id))
     assert session.added == [] and job.state == JobState.CODEGEN
+
+
+@pytest.mark.parametrize(
+    ("state", "meta", "expected"),
+    [
+        (JobState.NEEDS_INPUT, {}, "job is"),
+        (JobState.ANALYSIS, {}, "job is"),
+        (JobState.DONE, {"scope_status": "proposed"}, "awaits approval"),
+    ],
+)
+def test_build_refuses_unbuildable_jobs(
+    state: JobState, meta: dict[str, Any], expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job, session, _ = _wire(monkeypatch, {})
+    job.state, job.source_app_metadata = state, meta
+    assert expected in swiftui_build.build_swiftui.run(str(job.id))
+    assert session.added == [] and job.state == state
+
+
+def test_build_refuses_without_analysis_or_while_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job, session, _ = _wire(monkeypatch, {})
+    session.walk = None
+    assert "no finished analysis" in swiftui_build.build_swiftui.run(str(job.id))
+    session.walk = WalkthroughResult(job_id=job.id, screen_map={"screens": []})
+    session.running = StageTimeline(job_id=job.id)
+    assert "already running" in swiftui_build.build_swiftui.run(str(job.id))
+    assert session.added == []
+
+
+def test_failed_job_can_be_built_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    report = {"compliance_score": 0.85, "stop_reason": "all_closed"}
+    job, _, seen = _wire(monkeypatch, report)
+    job.state = JobState.FAILED
+    assert swiftui_build.build_swiftui.run(str(job.id)) == f"job {job.id} built"
+    assert job.state == JobState.DONE and seen["queued"] == [job]
 
 
 def test_off_mac_build_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:

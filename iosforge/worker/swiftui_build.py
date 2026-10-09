@@ -18,19 +18,21 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from iosforge.common.config import get_settings
 from iosforge.common.logging import get_logger
 from iosforge.common.queue import PipelineTask, celery_app
 from iosforge.common.types import JobState, Stage
 from iosforge.db.base import utcnow
-from iosforge.db.models import GenerationResult, Job, StageTimeline
+from iosforge.db.models import GenerationResult, Job, StageTimeline, WalkthroughResult
 from iosforge.db.session import get_sessionmaker
 from iosforge.mvp import build_profile, compliance, simulator, swiftui_gen
 from iosforge.mvp.paths import RunPaths
 from iosforge.storage.client import S3ArtifactStorage, build_key
 from iosforge.worker.swiftui_tasks import (
     XCODE_QUEUE,
+    claim_job,
     hydrate_inputs,
     job_locale,
     queue_delivery,
@@ -42,9 +44,51 @@ from iosforge.worker.swiftui_tasks import (
 log = get_logger("worker.swiftui_build")
 
 
+BUILDABLE = (JobState.DONE, JobState.CODEGEN, JobState.FAILED)
+
+
+def build_refusal(db: Session, job: Job) -> str | None:
+    """Why the job cannot be built now (None when it can).
+
+    A build needs a finished analysis, no generated app yet, no scope proposal awaiting
+    approval, and a job that is idle (DONE / FAILED) or handed over for codegen.
+    """
+    if job.state not in BUILDABLE:
+        return f"job is {job.state}"
+    if (job.source_app_metadata or {}).get("scope_status") == "proposed":
+        return "the scope proposal awaits approval"
+    walk = db.scalar(select(WalkthroughResult).where(WalkthroughResult.job_id == job.id))
+    if walk is None or not walk.screen_map:
+        return "no finished analysis"
+    if db.scalar(select(GenerationResult).where(GenerationResult.job_id == job.id)):
+        return "already built"
+    running = db.scalar(
+        select(StageTimeline).where(
+            StageTimeline.job_id == job.id,
+            StageTimeline.stage == Stage.CODEGEN,
+            StageTimeline.finished_at.is_(None),
+        )
+    )
+    if running is not None:
+        return "a build is already running"
+    return None
+
+
 def enqueue_build(job_id: str) -> None:
     """Queue the job's SwiftUI build on the Mac queue (pipeline chain and admin)."""
     build_swiftui.apply_async(args=[job_id], queue=XCODE_QUEUE)
+
+
+def _gate_reason(report: dict[str, Any]) -> str:
+    structural = report.get("structural") or {}
+    counts = ", ".join(
+        f"{key.replace('_', ' ')} {len(structural.get(key) or [])}"
+        for key in ("missing_screens", "blank_screens", "dead_links", "missing_edges")
+    )
+    return (
+        f"held for the operator: structural gaps remain after refine "
+        f"({report.get('stop_reason')}; {counts}); ship or rework from the admin"
+    )[:4000]
 
 
 def _store_screens(storage: Any, job_id: str, paths: RunPaths) -> None:
@@ -66,14 +110,18 @@ def build_swiftui(self: Any, job_id: str) -> str:
         job = db.get(Job, uuid.UUID(job_id))
         if job is None:
             return f"job {job_id} not found"
-        if db.scalar(select(GenerationResult).where(GenerationResult.job_id == job.id)):
-            log.info("build_swiftui.skip_existing", job_id=job_id)
-            return f"job {job_id} already built"
+        refusal = build_refusal(db, job)
+        if refusal:
+            log.info("build_swiftui.refused", job_id=job_id, reason=refusal)
+            return f"job {job_id} not built: {refusal}"
+        if not claim_job(db, job.id, BUILDABLE, JobState.CODEGEN):
+            return f"job {job_id} not built: another build claimed it"
         job.state = JobState.CODEGEN
         job.codegen_target = "swiftui"
         stage = StageTimeline(job_id=job.id, stage=Stage.CODEGEN, started_at=utcnow())
         db.add(stage)
         db.commit()
+        stage_id = stage.id
         try:
             simulator.require_toolchain()
             with tempfile.TemporaryDirectory(prefix="iosforge-swiftui-") as tmp:
@@ -125,13 +173,20 @@ def build_swiftui(self: Any, job_id: str) -> str:
                 )
             )
             stage.finished_at = utcnow()
+            if gated:
+                stage.error = _gate_reason(report)
             job.state = JobState.NEEDS_INPUT if gated else JobState.DONE
             db.commit()
         except Exception as exc:
             log.error("build_swiftui.failed", job_id=job_id, error=str(exc))
-            stage.error = str(exc)[:4000]
-            stage.finished_at = utcnow()
-            job.state = JobState.FAILED
+            db.rollback()
+            failed = db.get(Job, uuid.UUID(job_id))
+            row = db.get(StageTimeline, stage_id)
+            if row is not None:
+                row.error = str(exc)[:4000]
+                row.finished_at = utcnow()
+            if failed is not None:
+                failed.state = JobState.FAILED
             db.commit()
             return f"job {job_id} build failed: {exc}"
         if gated:

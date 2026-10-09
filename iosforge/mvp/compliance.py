@@ -786,7 +786,7 @@ def refine_ios_until_complete(
     timeout: int = 1800,
     structural_gate: bool = True,
 ) -> dict[str, Any]:
-    """iOS twin of :func:`refine_web_until_complete`: Simulator render + Swift nav audit.
+    """The Vision-Judge loop: Simulator render + Swift navigation audit.
 
     Each iteration builds the SwiftUI app, renders every screen on the iOS Simulator and
     vision-judges it; the structural audit is :func:`nav_audit_ios` plus blank screens

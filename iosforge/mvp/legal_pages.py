@@ -19,7 +19,6 @@ review accepts it, and it needs no hosting or maintenance.
 
 from __future__ import annotations
 
-import json
 import re
 import subprocess
 import tempfile
@@ -454,12 +453,3 @@ def build_pages(facts: AppLegalFacts, *, updated: date | None = None) -> dict[st
         "support.html": support,
         "support/index.html": support,
     }
-
-
-def load_permissions(path: Path) -> dict[str, Any]:
-    """Read an ``ios_permissions.json``; an empty mapping when absent."""
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}

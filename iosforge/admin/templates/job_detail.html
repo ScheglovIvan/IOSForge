@@ -608,10 +608,8 @@
         {% set busy = job.state.value not in ['done', 'failed', 'needs_input']
           or (xcode_build and xcode_build.status in ['queued', 'archiving']) %}
         {% else %}
-        <p class="hint">Version {{ job.result_version }}. Describe the bugs or paste an updated spec —
-          the existing app is edited in place, re-pushed to the same repo and rebuilt. Runs only when
-          the pipeline is idle.</p>
-        {% set busy = job.state.value not in ['done', 'failed', 'cancelled'] %}
+        <p class="hint">This is a legacy Flutter job: it can be viewed, but not reworked or rebuilt.</p>
+        {% set busy = true %}
         {% endif %}
         <form method="post" action="/jobs/{{ job.id }}/rework">
           <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">

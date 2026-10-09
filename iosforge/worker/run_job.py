@@ -37,7 +37,10 @@ from iosforge.db.session import get_sessionmaker
 from iosforge.storage.client import S3ArtifactStorage, build_key
 
 if TYPE_CHECKING:
-    from iosforge.mvp.legal_pages import DataPractice
+    from iosforge.common.config import Settings
+    from iosforge.mvp.legal_pages import AppLegalFacts, DataPractice
+    from iosforge.mvp.paths import RunPaths
+    from iosforge.storage.client import ArtifactStorage
 
 log = get_logger("worker.run_job")
 
@@ -413,7 +416,7 @@ def scope_gate(self, job_id: str) -> str:
     ``proposed``) to the versioned bucket, records the version id and
     ``scope_status`` in ``Job.source_app_metadata``, then sets the Job to
     ``NEEDS_INPUT`` so an operator approves/edits the scope before codegen
-    (symmetry with ``reverify_web``; ``PipelineTask`` supplies retry/dead-letter).
+    (``PipelineTask`` supplies retry/dead-letter).
     """
     from iosforge.mvp import feasibility
     from iosforge.mvp.paths import RunPaths
@@ -559,34 +562,40 @@ def publish_legal_pages(
 
     App Store Connect will not accept a submission without a Privacy Policy URL, and
     review rejects a paywall whose Terms/Privacy links do nothing. The page is built
-    from what the stored SwiftUI app actually declares — its SDKs
-    (``Config/integrations.json``) and the usage descriptions in ``project.yml`` — and
-    pushed to the ``gh-pages`` branch of a pages-only repository, created on first use
-    (``legal_repo_url``); a legacy job keeps publishing to its code repository.
+    from the app exactly as delivery ships it (:func:`legal_facts`) and pushed to the
+    ``gh-pages`` branch of a pages-only repository, created on first use
+    (``legal_repo_url``). Jobs without SwiftUI sources (legacy Flutter) are skipped.
     """
     from iosforge.mvp import github_publish, legal_pages
-    from iosforge.worker.swiftui_tasks import hydrate_sources
+    from iosforge.mvp.paths import RunPaths
+    from iosforge.worker.swiftui_tasks import sources_key
 
     settings = get_settings()
     storage = S3ArtifactStorage()
     maker = get_sessionmaker()
     tmp = Path(tempfile.mkdtemp(prefix="iosforge-legal-"))
     try:
-        spec = json.loads(
-            storage.get(build_key(job_id=job_id, kind="app_spec", name="app_spec.json"))
-        )
-        app_name = app_name_override or str(spec.get("app_name") or spec.get("name") or "This app")
         token = github_publish.load_token(settings)
         with maker() as db:
             job = db.get(Job, uuid.UUID(job_id))
             if job is None:
                 return f"job {job_id} not found"
-            gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job.id))
+            if not storage.exists(sources_key(job_id)):
+                return f"job {job_id}: no SwiftUI sources to describe"
+            if not token:
+                return f"job {job_id}: no GitHub token to host the legal pages"
+            facts = legal_facts(
+                job,
+                storage,
+                RunPaths.at(tmp / "run"),
+                settings,
+                contact_email=contact_email or settings.legal_contact_email,
+                app_name_override=app_name_override,
+            )
+            app_name = facts.app_name
             meta = dict(job.source_app_metadata or {})
-            repo_url = str(meta.get("legal_repo_url") or (gen.github_repo_url if gen else "") or "")
+            repo_url = str(meta.get("legal_repo_url") or "")
             if not repo_url:
-                if not token:
-                    return f"job {job_id}: no GitHub token to host the legal pages"
                 repo = github_publish.create_repo(
                     settings,
                     token,
@@ -598,16 +607,6 @@ def publish_legal_pages(
                 job.source_app_metadata = meta
                 db.commit()
 
-        app_dir = tmp / "xcode_app"
-        hydrate_sources(storage, job_id, app_dir)
-        facts = legal_pages.facts_from_build(
-            app_name=app_name,
-            bundle_id=str(spec.get("bundle_id") or ""),
-            contact_email=contact_email or settings.legal_contact_email,
-            sdks=_app_sdks(app_dir),
-            permissions=_usage_descriptions(app_dir),
-            remote_endpoints=_remote_endpoints(spec),
-        )
         url = legal_pages.publish_pages(
             settings=settings,
             token=token,
@@ -635,6 +634,36 @@ def publish_legal_pages(
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def legal_facts(
+    job: Job,
+    storage: ArtifactStorage,
+    paths: RunPaths,
+    settings: Settings,
+    *,
+    contact_email: str,
+    app_name_override: str = "",
+) -> AppLegalFacts:
+    """Policy facts of the app as it ships: SDKs, usage descriptions, identity, endpoints.
+
+    Re-renders the release contract (:func:`iosforge.worker.swiftui_tasks.render_release`)
+    so the frozen Apphud / Tenjin integrations and the ATT purpose string are the ones
+    the archived app carries, even before its first delivery.
+    """
+    from iosforge.mvp import legal_pages
+    from iosforge.worker.swiftui_tasks import render_release
+
+    ident = render_release(job, storage, paths, settings)
+    spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
+    return legal_pages.facts_from_build(
+        app_name=app_name_override or ident.app_name,
+        bundle_id=ident.bundle_id,
+        contact_email=contact_email,
+        sdks=_app_sdks(paths.xcode_app),
+        permissions=_usage_descriptions(paths.xcode_app),
+        remote_endpoints=_remote_endpoints(spec),
+    )
+
+
 def _app_sdks(app_dir: Path) -> list[str]:
     """Third-party SDKs compiled into the app (as ``legal_pages`` processor names)."""
     from iosforge.mvp import swiftui_integrations
@@ -652,7 +681,17 @@ def _usage_descriptions(app_dir: Path) -> dict[str, str]:
     found = re.findall(
         r"^\s*(NS\w+UsageDescription):\s*(.*)$", project.read_text(encoding="utf-8"), re.M
     )
-    return {key: value.strip().strip('"') for key, value in found}
+    return {key: _yaml_scalar(value) for key, value in found}
+
+
+def _yaml_scalar(raw: str) -> str:
+    value = raw.strip()
+    if value.startswith('"') and value.endswith('"'):
+        try:
+            return str(json.loads(value))
+        except ValueError:
+            return value.strip('"')
+    return value
 
 
 def _remote_endpoints(spec: dict[str, Any]) -> list[DataPractice]:

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 from datetime import date
-from pathlib import Path
 
 import pytest
 
@@ -142,19 +140,6 @@ def test_repo_full_name_reads_the_owner_and_repo() -> None:
 def test_repo_full_name_rejects_nonsense() -> None:
     with pytest.raises(lp.LegalPagesError):
         lp.repo_full_name("nonsense")
-
-
-def test_permissions_file_missing_is_not_fatal(tmp_path: Path) -> None:
-    assert lp.load_permissions(tmp_path / "absent.json") == {}
-    broken = tmp_path / "broken.json"
-    broken.write_text("{not json")
-    assert lp.load_permissions(broken) == {}
-
-
-def test_permissions_file_is_read(tmp_path: Path) -> None:
-    path = tmp_path / "ios_permissions.json"
-    path.write_text(json.dumps(_CARPLAY_PERMS))
-    assert lp.load_permissions(path)["NSAppleMusicUsageDescription"]
 
 
 def test_publish_refuses_without_a_token() -> None:

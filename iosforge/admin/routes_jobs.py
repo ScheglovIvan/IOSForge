@@ -286,7 +286,6 @@ def jobs_build_settings(
     # Tenjin iOS SDK key (32-char uppercase alphanumeric), also one per app.
     if tenjin_api_key and not re.fullmatch(r"[A-Za-z0-9]{16,64}", tenjin_api_key):
         return Response("Invalid Tenjin SDK key.", status_code=400)
-    # The app's numeric App Store id (store listing, review submission).
     if appstore_apple_id and not re.fullmatch(r"[0-9]{5,15}", appstore_apple_id):
         return Response("Invalid App Store Apple ID (numbers only).", status_code=400)
 
@@ -303,10 +302,12 @@ def jobs_build_settings(
 
     gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
     try:
+        from iosforge.worker.swiftui_build import build_refusal
         from iosforge.worker.swiftui_tasks import DELIVERABLE_STATES, SOURCES_NAME, queue_delivery
 
         if gen is None:
-            _enqueue_build(job_id)
+            if job.state == JobState.DONE and build_refusal(db, job) is None:
+                _enqueue_build(job_id)
         elif gen.sources_key.endswith(SOURCES_NAME) and job.state in DELIVERABLE_STATES:
             queue_delivery(db, job)
         log.info(
@@ -991,11 +992,11 @@ def jobs_build(
     job = db.get(Job, job_id)
     if job is None:
         return Response("Not found", status_code=404)
-    walk = db.scalar(select(WalkthroughResult).where(WalkthroughResult.job_id == job_id))
-    gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
-    # Guard: analysis must be FINISHED (state DONE — not still WALKTHROUGH/ANALYSIS)
-    # and no build may already exist. state==DONE also excludes an in-flight CODEGEN.
-    if walk is None or not walk.screen_map or gen is not None or job.state != JobState.DONE:
+    from iosforge.worker.swiftui_build import build_refusal
+
+    refusal = build_refusal(db, job)
+    if refusal or job.state not in (JobState.DONE, JobState.FAILED):
+        log.info("jobs.build_refused", job_id=str(job_id), reason=refusal or str(job.state))
         return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
     _enqueue_build(job_id)
     log.info("jobs.build_requested", job_id=str(job_id))
@@ -1066,7 +1067,7 @@ def artifact_object(
         data = storage.get(key)
     except Exception:
         return Response("Not found", status_code=404)
-    filename = key.rsplit("/", 1)[-1]  # e.g. xcode_app.zip / 0000.png
+    filename = key.rsplit("/", 1)[-1]
 
     # A gallery tile shows a 1290x2796 slide at ~120px. Serving the original for
     # that pulled tens of megabytes per tab; `w` asks for a cached downscale

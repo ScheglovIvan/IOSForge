@@ -1,15 +1,9 @@
-"""Analysis (Stage B) and decomposition (Stage C) of the crawl output.
+"""Analysis (Stage B) of the capture output, plus the task-graph layering helper.
 
-These two steps sit between the emulator crawl and the single-pass codegen in
-:mod:`iosforge.mvp.claude_gen`. They do not replace or modify that path; they
-produce richer intermediate artifacts (``app_spec.json``, ``tasks.json``) for a
-future multi-pass generator.
-
-Stage B (:func:`analyze`) asks the local Claude Code CLI to read the screenshots
-(vision) plus ``screens.json`` and emit a structured ``app_spec.json``.
-
-Stage C (:func:`decompose`) turns that spec into an ordered, acyclic task graph
-``tasks.json`` that a codegen loop can execute task by task.
+:func:`analyze` asks the local Claude Code CLI to read the screenshots (vision) plus
+``screens.json`` and the capture context and emit a structured ``app_spec.json``
+(contract v3). :func:`topo_layers` groups a task DAG into parallel layers for the
+SwiftUI codegen.
 
 The prompts here are inlined to mirror :mod:`iosforge.mvp.claude_gen`. Moving
 them to a managed ``PromptSetProvider`` (SPEC §6, no hardcoded prompts) is
