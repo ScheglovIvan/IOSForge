@@ -30,6 +30,7 @@ class PermissionKind:
     plist_keys: tuple[str, ...]
     patterns: tuple[str, ...]
     aliases: tuple[str, ...] = ()
+    capture: tuple[str, ...] = ()
 
 
 PERMISSION_KINDS: tuple[PermissionKind, ...] = (
@@ -55,16 +56,15 @@ PERMISSION_KINDS: tuple[PermissionKind, ...] = (
             r"requestWhenInUseAuthorization",
             r"requestAlwaysAuthorization",
             r"requestTemporaryFullAccuracyAuthorization",
-            r"CLLocationUpdate\s*\.\s*liveUpdates",
-            r"CLServiceSession\b",
         ),
         ("gps",),
+        capture=(r"CLLocationUpdate\s*\.\s*liveUpdates", r"CLServiceSession\b"),
     ),
     PermissionKind(
         "camera",
         ("NSCameraUsageDescription",),
-        (
-            r"requestAccess\s*\(\s*for:\s*(?:AVMediaType)?\s*\.video",
+        (r"requestAccess\s*\(\s*for:\s*(?:AVMediaType)?\s*\.video",),
+        capture=(
             r"AVCaptureSession\s*\(",
             r"UIImagePickerController\b",
             r"\bARSession\s*\(",
@@ -78,10 +78,9 @@ PERMISSION_KINDS: tuple[PermissionKind, ...] = (
         (
             r"requestAccess\s*\(\s*for:\s*(?:AVMediaType)?\s*\.audio",
             r"requestRecordPermission",
-            r"AVAudioRecorder\s*\(",
-            r"\.inputNode\b",
         ),
         ("mic", "audio input", "voice recording"),
+        capture=(r"AVAudioRecorder\s*\(", r"\.inputNode\b"),
     ),
     PermissionKind(
         "photos",
@@ -128,13 +127,14 @@ PERMISSION_KINDS: tuple[PermissionKind, ...] = (
     PermissionKind(
         "motion",
         ("NSMotionUsageDescription",),
-        (
+        (),
+        ("coremotion", "fitness", "pedometer"),
+        capture=(
             r"CMMotionActivityManager\s*\(",
             r"CMPedometer\s*\(",
             r"CMAltimeter\s*\(",
             r"CMSensorRecorder\s*\(",
         ),
-        ("coremotion", "fitness", "pedometer"),
     ),
     PermissionKind(
         "speech",
@@ -145,7 +145,8 @@ PERMISSION_KINDS: tuple[PermissionKind, ...] = (
     PermissionKind(
         "bluetooth",
         ("NSBluetoothAlwaysUsageDescription",),
-        (r"CBCentralManager\s*\(", r"CBPeripheralManager\s*\("),
+        (),
+        capture=(r"CBCentralManager\s*\(", r"CBPeripheralManager\s*\("),
     ),
     PermissionKind(
         "face_id",
@@ -173,20 +174,23 @@ PERMISSION_KINDS: tuple[PermissionKind, ...] = (
     PermissionKind(
         "home_kit",
         ("NSHomeKitUsageDescription",),
-        (r"HMHomeManager\s*\(",),
+        (),
         ("homekit",),
+        capture=(r"HMHomeManager\s*\(",),
     ),
     PermissionKind(
         "local_network",
         ("NSLocalNetworkUsageDescription",),
-        (r"NWBrowser\s*\(", r"NetServiceBrowser\s*\(", r"NWListener\s*\("),
+        (),
         ("bonjour",),
+        capture=(r"NWBrowser\s*\(", r"NetServiceBrowser\s*\(", r"NWListener\s*\("),
     ),
     PermissionKind(
         "nearby_interaction",
         ("NSNearbyInteractionUsageDescription",),
-        (r"NISession\s*\(",),
+        (),
         ("uwb",),
+        capture=(r"NISession\s*\(",),
     ),
     PermissionKind(
         "family_controls",
@@ -197,7 +201,8 @@ PERMISSION_KINDS: tuple[PermissionKind, ...] = (
     PermissionKind(
         "nfc",
         ("NFCReaderUsageDescription",),
-        (r"NFC\w*ReaderSession\s*\(",),
+        (),
+        capture=(r"NFC\w*ReaderSession\s*\(",),
     ),
     PermissionKind(
         "pasteboard",
@@ -219,6 +224,9 @@ _GENERIC_PROMPTS = (
     r"\brequestPermission\s*\(",
 )
 _DIRECT_PROMPT_CALL = re.compile(r"\.\s*prompt\s*\(\s*\)")
+_GATE_CALL = re.compile(r"Permissions\s*\.\s*request\s*\(\s*(\w+)\s*\.\s*self")
+_HEADLESS_GUARD = re.compile(r"Headless\s*\.\s*isActive")
+SERVICE_SUFFIX = "Service.swift"
 
 
 def kinds_for(name: str) -> list[PermissionKind]:
@@ -284,9 +292,18 @@ def _line_of(source: str, offset: int) -> int:
     return source.count("\n", 0, offset) + 1
 
 
-def _file_violations(rel: Path, source: str) -> list[str]:
+def _overlaps(span: tuple[int, int], spans: list[tuple[int, int]]) -> bool:
+    return any(span[0] < end and start < span[1] for start, end in spans)
+
+
+def _file_violations(
+    rel: Path, source: str, *, declared: set[str] | None, service: bool
+) -> list[str]:
     found: dict[int, str] = {}
     spans: list[tuple[int, int]] = []
+    move = (
+        f"move it into a PermissionPrompter in {PERMISSIONS_DIR}/ and call Permissions.request(...)"
+    )
     for kind in PERMISSION_KINDS:
         for pattern in kind.patterns:
             for match in re.finditer(pattern, source):
@@ -295,18 +312,34 @@ def _file_violations(rel: Path, source: str) -> list[str]:
                 found.setdefault(
                     match.start(),
                     f"{rel}:{_line_of(source, match.start())}: error: {kind.case} permission "
-                    f"API `{api}` outside {PERMISSIONS_DIR}/ — move it into a PermissionPrompter "
-                    "and call Permissions.request(...)",
+                    f"API `{api}` outside {PERMISSIONS_DIR}/ — {move}",
+                )
+        for pattern in kind.capture:
+            for match in re.finditer(pattern, source):
+                spans.append(match.span())
+                if service and _HEADLESS_GUARD.search(source):
+                    continue
+                api = re.sub(r"\s+", "", match.group(0))[:60]
+                hint = (
+                    "this service must not start in headless mode — guard it with "
+                    "`Headless.isActive`"
+                    if service
+                    else f"move it into a `*{SERVICE_SUFFIX}` that checks `Headless.isActive` and "
+                    "starts only after Permissions.request(...) returned true"
+                )
+                found.setdefault(
+                    match.start(),
+                    f"{rel}:{_line_of(source, match.start())}: error: {kind.case} capture "
+                    f"API `{api}` — {hint}",
                 )
     for pattern in _GENERIC_PROMPTS:
         for match in re.finditer(pattern, source):
-            if any(start <= match.start() < end for start, end in spans):
+            if _overlaps(match.span(), spans):
                 continue
             found.setdefault(
                 match.start(),
                 f"{rel}:{_line_of(source, match.start())}: error: permission API "
-                f"`{match.group(0).strip()}` outside {PERMISSIONS_DIR}/ — move it into a "
-                "PermissionPrompter and call Permissions.request(...)",
+                f"`{match.group(0).strip()}` outside {PERMISSIONS_DIR}/ — {move}",
             )
     for match in _DIRECT_PROMPT_CALL.finditer(source):
         found.setdefault(
@@ -314,16 +347,36 @@ def _file_violations(rel: Path, source: str) -> list[str]:
             f"{rel}:{_line_of(source, match.start())}: error: direct `.prompt()` call "
             "bypasses the headless gate — call Permissions.request(...) instead",
         )
+    if declared is not None:
+        for match in _GATE_CALL.finditer(source):
+            if match.group(1) not in declared:
+                found.setdefault(
+                    match.start(),
+                    f"{rel}:{_line_of(source, match.start())}: error: `{match.group(1)}` is not "
+                    "declared in app_spec.permissions — available prompters: "
+                    f"{', '.join(sorted(declared)) or 'none'}",
+                )
     return [found[offset] for offset in sorted(found)]
 
 
-def permission_violations(app_dir: Path) -> list[str]:
-    """Prompting APIs used outside ``App/Permissions/`` (empty list = clean)."""
+def permission_violations(app_dir: Path, *, declared: set[str] | None = None) -> list[str]:
+    """Prompting APIs used outside ``App/Permissions/`` (empty list = clean).
+
+    Explicit request APIs are only allowed in ``App/Permissions/``; capture APIs that
+    prompt implicitly are also allowed in ``*Service.swift`` files that check
+    ``Headless.isActive``. ``declared`` (prompter type names) additionally flags
+    ``Permissions.request(X.self)`` for a kind the app_spec does not declare.
+    """
     violations: list[str] = []
     allowed = (app_dir / PERMISSIONS_DIR).resolve()
     for swift in sorted((app_dir / "App").rglob("*.swift")):
         if swift.resolve().is_relative_to(allowed):
             continue
         source = blank_comments_and_strings(swift.read_text(encoding="utf-8", errors="replace"))
-        violations += _file_violations(swift.relative_to(app_dir), source)
+        violations += _file_violations(
+            swift.relative_to(app_dir),
+            source,
+            declared=declared,
+            service=swift.name.endswith(SERVICE_SUFFIX),
+        )
     return violations

@@ -43,7 +43,7 @@ def test_registry_covers_every_required_kind() -> None:
     cases = {kind.case for kind in PERMISSION_KINDS}
     assert REQUIRED_KINDS <= cases
     assert len(cases) == len(PERMISSION_KINDS)
-    assert all(kind.patterns for kind in PERMISSION_KINDS)
+    assert all(kind.patterns or kind.capture for kind in PERMISSION_KINDS)
 
 
 @pytest.mark.parametrize(
@@ -108,7 +108,7 @@ def test_prompt_api_outside_gate_is_a_violation(tmp_path: Path, snippet: str, ca
     violations = permission_violations(tmp_path)
     assert violations
     assert all("App/Features/0001/Screen0001View.swift:2: error:" in v for v in violations)
-    assert any(f" {case} permission API" in v for v in violations)
+    assert any(f" {case} permission API" in v or f" {case} capture API" in v for v in violations)
 
 
 def test_prompt_api_inside_permissions_dir_is_allowed(tmp_path: Path) -> None:
@@ -194,3 +194,54 @@ def test_blanking_keeps_offsets_and_lines() -> None:
     assert blanked.count("\n") == source.count("\n")
     assert "x" not in blanked and "nested" not in blanked and "q" not in blanked
     assert blanked.rstrip().endswith("b")
+
+
+def test_capture_api_allowed_in_guarded_service(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "App/Features/0013/LevelMeterService.swift",
+        "final class LevelMeterService {\n"
+        "    func start() {\n"
+        "        guard !Headless.isActive else { return }\n"
+        "        let input = engine.inputNode\n"
+        "    }\n}\n",
+    )
+    assert permission_violations(tmp_path) == []
+
+
+def test_capture_api_in_unguarded_service_is_flagged(tmp_path: Path) -> None:
+    _write(tmp_path, "App/Features/0013/LevelMeterService.swift", "let input = engine.inputNode\n")
+    violations = permission_violations(tmp_path)
+    assert len(violations) == 1 and "guard it with `Headless.isActive`" in violations[0]
+
+
+def test_capture_api_in_a_view_is_flagged(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "App/Features/0013/Screen0013View.swift",
+        "if Headless.isActive { return }\nlet input = engine.inputNode\n",
+    )
+    violations = permission_violations(tmp_path)
+    assert len(violations) == 1 and "move it into a `*Service.swift`" in violations[0]
+
+
+def test_undeclared_prompter_is_flagged(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "App/Features/0013/Screen0013View.swift",
+        "Task { await Permissions.request(CameraPermission.self) }\n"
+        "Task { await Permissions.request(MicrophonePermission.self) }\n",
+    )
+    violations = permission_violations(tmp_path, declared={"MicrophonePermission"})
+    assert len(violations) == 1
+    assert "`CameraPermission` is not declared" in violations[0]
+    assert "MicrophonePermission" in violations[0]
+
+
+def test_one_error_per_call_site(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "App/Features/0001/Screen0001View.swift",
+        "await AVCaptureDevice.requestAccess(for: AVMediaType.video)\n",
+    )
+    assert len(permission_violations(tmp_path)) == 1

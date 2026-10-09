@@ -1,34 +1,56 @@
 """Deterministic SwiftUI scaffold that hard-wires the screen-id contract into every app.
 
-The model never writes navigation, headless mode, the unknown-id screen or the
-XcodeGen project: this module renders them from ``app_spec.json`` so
-``SCREEN_NAV_CONTRACT`` holds for every generated app regardless of model output.
-The model only fills the fixed extension points it is given: ``App/Theme/``,
-``App/Features/<id>/Screen<id>View.swift``, ``App/Fixtures/`` and
-``App/Permissions/`` prompters. Reference implementation:
-``docs/swiftui-reference`` (Phase 0 spike).
+The model never writes navigation, tabs, headless mode, the unknown-id screen,
+permission prompters or the XcodeGen project: this module plans them from
+``app_spec.json`` (:func:`build_plan`) and renders them through
+:mod:`iosforge.mvp.swiftui_templates`, so ``SCREEN_NAV_CONTRACT`` holds for every
+generated app regardless of model output. The model only fills fixed extension
+points: ``App/Theme/``, ``App/Components/`` (incl. ``AppTabBar``),
+``App/Features/<id>/`` and ``App/Fixtures/``. :func:`enforce_contract` restores
+the contract byte-for-byte and strips foreign files from contract directories
+before every compile-gate pass. Reference: ``docs/swiftui-reference``.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any
 
-from iosforge.mvp.swiftui_permissions import PERMISSION_KINDS, PERMISSIONS_DIR, kinds_for
+from iosforge.mvp import swiftui_templates as tpl
+from iosforge.mvp.swiftui_navigation import Tab, derive_tabs, has_tab_bar, tab_owners
+from iosforge.mvp.swiftui_permissions import PERMISSIONS_DIR, PermissionKind, kinds_for
+from iosforge.mvp.swiftui_prompters import PROMPTERS, render_prompter
+from iosforge.mvp.swiftui_templates import PENDING_MARKER, ScreenEntry, TabEntry, swift_str
 
-Presentation = Literal["root", "push", "sheet", "fullScreenCover"]
+__all__ = [
+    "PENDING_MARKER",
+    "AppIdentity",
+    "ContractReport",
+    "NavPlan",
+    "ScreenEntry",
+    "build_plan",
+    "declared_kinds",
+    "enforce_contract",
+    "pending_screens",
+    "screen_entries",
+    "swift_str",
+    "target_name",
+    "write_scaffold",
+]
 
 DEPLOYMENT_TARGET = "17.0"
-PENDING_MARKER = "PendingScreenView(id:"
+CONTRACT_DIRS = ("App/Navigation", "App/Headless", PERMISSIONS_DIR, "App/Support")
+MODEL_DIRS = ("App/Theme", "App/Components", "App/Features", "App/Fixtures")
+APP_ROOT_ENTRIES = {"project.yml", "App", "Resources", "Config"}
 
-_MODAL = re.compile(r"\b(paywall|sheet|modal|popup|pop-up|dialog|alert|picker)\b", re.I)
+_FULL_SCREEN = re.compile(r"\b(paywall|subscription|upgrade)\b", re.I)
+_MODAL = re.compile(r"\b(sheet|modal|popup|pop-up|dialog|alert|picker)\b", re.I)
 _ONBOARDING = re.compile(r"\b(splash|launch|onboarding|welcome|intro|loading)\b", re.I)
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
-_SWIFT_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
 
 
 @dataclass(frozen=True)
@@ -40,20 +62,25 @@ class AppIdentity:
 
 
 @dataclass(frozen=True)
-class ScreenEntry:
-    """One ``app_spec`` screen as the scaffold sees it (Swift names + presentation)."""
+class NavPlan:
+    """Screens with final presentation/owner, root tabs and tab-bar visibility."""
 
-    screen_id: str
-    name: str
-    case_name: str
-    type_name: str
-    presentation: Presentation
-    onboarding: bool
+    entries: list[ScreenEntry]
+    tabs: list[TabEntry]
+    shows_tab_bar: bool
+
+
+@dataclass
+class ContractReport:
+    """What :func:`enforce_contract` fixed or found: restored, removed, unexpected paths."""
+
+    restored: list[str] = field(default_factory=list)
+    removed: list[str] = field(default_factory=list)
+    unexpected: list[str] = field(default_factory=list)
 
     @property
-    def view_path(self) -> str:
-        """Model-owned view file of this screen, relative to the app directory."""
-        return f"App/Features/{self.screen_id}/{self.type_name}.swift"
+    def tampered(self) -> list[str]:
+        return [*self.restored, *self.removed]
 
 
 def _swift_suffix(screen_id: str) -> str:
@@ -61,21 +88,7 @@ def _swift_suffix(screen_id: str) -> str:
     return cleaned[0].upper() + cleaned[1:]
 
 
-def _presentation(screen: dict[str, Any], onboarding: bool) -> Presentation:
-    declared = screen.get("presentation")
-    if declared in ("root", "push", "sheet", "fullScreenCover"):
-        return cast(Presentation, declared)
-    if onboarding or screen.get("route") == "/":
-        return "root"
-    return "sheet" if _MODAL.search(str(screen.get("name", ""))) else "push"
-
-
-def screen_entries(spec: dict[str, Any]) -> list[ScreenEntry]:
-    """Scaffold view of every screen in ``spec`` (order preserved).
-
-    Case names are always ``s<Suffix>`` (never a Swift keyword) and de-duplicated
-    when two ids normalise to the same identifier; duplicate ids are rejected.
-    """
+def _base_entries(spec: dict[str, Any]) -> list[ScreenEntry]:
     entries: list[ScreenEntry] = []
     seen_ids: set[str] = set()
     used: set[str] = set()
@@ -86,35 +99,94 @@ def screen_entries(spec: dict[str, Any]) -> list[ScreenEntry]:
         if screen_id in seen_ids:
             raise ValueError(f"duplicate screen id {screen_id!r} in app_spec")
         seen_ids.add(screen_id)
-        name = _CONTROL.sub(" ", str(screen.get("name") or screen_id)).strip()
+        name = tpl.clean_text(str(screen.get("name") or screen_id))
         onboarding = bool(_ONBOARDING.search(name))
         suffix = base = _swift_suffix(screen_id)
         counter = 2
         while suffix in used:
             suffix, counter = f"{base}_{counter}", counter + 1
         used.add(suffix)
+        declared = screen.get("presentation")
+        if onboarding:
+            presentation: tpl.Presentation = "onboarding"
+        elif declared in ("sheet", "fullScreenCover"):
+            presentation = declared
+        elif _FULL_SCREEN.search(name):
+            presentation = "fullScreenCover"
+        elif _MODAL.search(name):
+            presentation = "sheet"
+        else:
+            presentation = "push"
         entries.append(
             ScreenEntry(
                 screen_id=screen_id,
                 name=name,
                 case_name=f"s{suffix}",
                 type_name=f"Screen{suffix}View",
-                presentation=_presentation(screen, onboarding),
+                presentation=presentation,
                 onboarding=onboarding,
             )
         )
     return entries
 
 
-def home_entry(entries: list[ScreenEntry]) -> ScreenEntry:
-    """Base screen under pushed/modal targets: first non-onboarding root, else first."""
+def _home_id(spec: dict[str, Any], entries: list[ScreenEntry]) -> str:
+    routes = {
+        str(s.get("id")): s.get("route") for s in spec.get("screens", []) if isinstance(s, dict)
+    }
+    candidates = [e for e in entries if e.presentation == "push"]
+    for entry in candidates:
+        if routes.get(entry.screen_id) == "/":
+            return entry.screen_id
+    if candidates:
+        return candidates[0].screen_id
+    raise ValueError("app_spec has no non-onboarding, non-modal screen to use as home")
+
+
+def build_plan(spec: dict[str, Any]) -> NavPlan:
+    """Plan screens, tabs and tab ownership from ``spec`` (raises on ambiguity).
+
+    Tab apps get their tabs from :func:`derive_tabs`; other apps get one implicit
+    tab rooted at the home screen with the tab bar hidden. Every pushed screen must
+    be reachable from a tab root (:func:`tab_owners`).
+    """
+    entries = _base_entries(spec)
+    if not entries:
+        raise ValueError("app_spec has no screens to scaffold")
+    tabs = derive_tabs(spec)
+    shows_bar = bool(tabs)
+    if not tabs:
+        tabs = [Tab(_home_id(spec, entries), "Home")]
+    roots = {t.screen_id for t in tabs}
+    stack = [e.screen_id for e in entries if e.presentation == "push" and e.screen_id not in roots]
+    owners = tab_owners(spec, tabs, stack_screens=stack)
+    with_bar = {
+        str(s.get("id")) for s in spec.get("screens", []) if isinstance(s, dict) and has_tab_bar(s)
+    }
+    final: list[ScreenEntry] = []
     for entry in entries:
-        if entry.presentation == "root" and not entry.onboarding:
-            return entry
-    for entry in entries:
-        if not entry.onboarding:
-            return entry
-    return entries[0]
+        if entry.screen_id in roots:
+            entry = dataclasses.replace(
+                entry, presentation="tabRoot", tab_root=entry.screen_id, shows_tab_bar=shows_bar
+            )
+        elif entry.screen_id in owners:
+            entry = dataclasses.replace(
+                entry,
+                tab_root=owners[entry.screen_id],
+                shows_tab_bar=shows_bar and entry.screen_id in with_bar,
+            )
+        final.append(entry)
+    by_id = {e.screen_id: e for e in final}
+    tab_entries = [
+        TabEntry(case_name=f"t{_swift_suffix(t.screen_id)}", title=t.title, root=by_id[t.screen_id])
+        for t in tabs
+    ]
+    return NavPlan(final, tab_entries, shows_bar)
+
+
+def screen_entries(spec: dict[str, Any]) -> list[ScreenEntry]:
+    """Planned screens of ``spec`` (see :func:`build_plan`)."""
+    return build_plan(spec).entries
 
 
 def target_name(app_name: str) -> str:
@@ -124,13 +196,23 @@ def target_name(app_name: str) -> str:
     return f"App{name}" if name[0].isdigit() else name
 
 
+def declared_kinds(spec: dict[str, Any]) -> list[PermissionKind]:
+    """Permission kinds ``app_spec.permissions`` declares (unique, registry order)."""
+    found: dict[str, PermissionKind] = {}
+    for item in spec.get("permissions", []) or []:
+        if isinstance(item, dict):
+            for kind in kinds_for(str(item.get("permission", ""))):
+                found.setdefault(kind.case, kind)
+    return list(found.values())
+
+
 def _purpose_strings(spec: dict[str, Any], app_name: str) -> dict[str, str]:
     strings: dict[str, str] = {}
     for item in spec.get("permissions", []) or []:
         if not isinstance(item, dict):
             continue
         reason = re.sub(r"\s*\([^)]*\)", "", str(item.get("reason") or "")).strip()
-        text = _CONTROL.sub(" ", reason.split(". ")[0].rstrip(".")) if reason else ""
+        text = tpl.clean_text(reason.split(". ")[0].rstrip(".")) if reason else ""
         for kind in kinds_for(str(item.get("permission", ""))):
             for key in kind.plist_keys:
                 strings.setdefault(
@@ -152,7 +234,7 @@ def render_project_yml(
     purpose_strings: dict[str, str],
     has_media: bool,
 ) -> str:
-    """XcodeGen spec: one iOS app target, signing off, Info.plist from properties."""
+    """XcodeGen spec: one iOS app target with a scheme, signing off, Info.plist in Config/."""
     lines = [
         f"name: {target}",
         "options:",
@@ -181,7 +263,7 @@ def render_project_yml(
         "        CODE_SIGNING_ALLOWED: NO",
         '        TARGETED_DEVICE_FAMILY: "1"',
         "    info:",
-        "      path: App/Info.plist",
+        "      path: Config/Info.plist",
         "      properties:",
         f"        CFBundleDisplayName: {_yaml_str(app_name)}",
         "        UILaunchScreen: {}",
@@ -198,302 +280,6 @@ def render_project_yml(
     return "\n".join(lines) + "\n"
 
 
-def _swift_str(value: str) -> str:
-    """Swift string literal; control characters as ``\\u{..}`` (JSON's ``\\uXXXX`` is invalid)."""
-    body = "".join(
-        _SWIFT_ESCAPES.get(ch) or (f"\\u{{{ord(ch):x}}}" if ord(ch) < 0x20 else ch) for ch in value
-    )
-    return f'"{body}"'
-
-
-def _render_screen_id(entries: list[ScreenEntry], home: ScreenEntry) -> str:
-    cases = "\n".join(
-        f"    case {e.case_name} = {_swift_str(e.screen_id)}  // {e.name}" for e in entries
-    )
-    presentations = "\n".join(f"        case .{e.case_name}: .{e.presentation}" for e in entries)
-    onboarding = [e for e in entries if e.onboarding]
-    onboarding_check = (
-        "[" + ", ".join(f".{e.case_name}" for e in onboarding) + "].contains(self)"
-        if onboarding
-        else "false"
-    )
-    views = "\n".join(f"        case .{e.case_name}: {e.type_name}()" for e in entries)
-    first_onboarding = f".{onboarding[0].case_name}" if onboarding else "nil"
-    return f"""import SwiftUI
-
-/// Every screen of the app, keyed by its app_spec id (the `-screen-id` value).
-/// Generated by the IOSForge scaffold — do not edit.
-enum ScreenID: String, CaseIterable, Identifiable, Hashable {{
-{cases}
-
-    var id: String {{ rawValue }}
-
-    /// Base screen that pushed and modal targets sit on.
-    static let home: ScreenID = .{home.case_name}
-
-    /// First onboarding screen for a normal (non-headless) first launch.
-    static let onboardingStart: ScreenID? = {first_onboarding}
-
-    var presentation: ScreenPresentation {{
-        switch self {{
-{presentations}
-        }}
-    }}
-
-    var isOnboarding: Bool {{
-        {onboarding_check}
-    }}
-
-    @MainActor @ViewBuilder
-    func makeView() -> some View {{
-        switch self {{
-{views}
-        }}
-    }}
-}}
-
-enum ScreenPresentation {{
-    case root, push, sheet, fullScreenCover
-}}
-"""
-
-
-_ROUTER = """import Observation
-import SwiftUI
-
-/// Navigation state. `open(_:)` implements the headless screen-id contract:
-/// it rebuilds the stack so the requested screen is on top, with modal targets
-/// presented over `ScreenID.home`. Generated by the IOSForge scaffold — do not edit.
-@Observable
-final class Router {
-    var base: ScreenID = .home
-    var path: [ScreenID] = []
-    var sheet: ScreenID?
-    var cover: ScreenID?
-    var unknownID: String?
-
-    static let onboardingDoneKey = "iosforge.onboarding_done"
-
-    static func launch() -> Router {
-        let router = Router()
-        if let raw = Headless.screenID {
-            router.open(raw)
-        } else if !UserDefaults.standard.bool(forKey: onboardingDoneKey),
-                  let start = ScreenID.onboardingStart {
-            router.base = start
-        }
-        return router
-    }
-
-    func open(_ raw: String) {
-        path = []
-        sheet = nil
-        cover = nil
-        unknownID = nil
-        base = .home
-        guard let screen = ScreenID(rawValue: raw) else {
-            unknownID = raw
-            return
-        }
-        show(screen)
-    }
-
-    func show(_ screen: ScreenID) {
-        switch screen.presentation {
-        case .root:
-            path = []
-            base = screen
-        case .push:
-            path.append(screen)
-        case .sheet:
-            sheet = screen
-        case .fullScreenCover:
-            cover = screen
-        }
-    }
-
-    func dismiss() {
-        if cover != nil {
-            cover = nil
-        } else if sheet != nil {
-            sheet = nil
-        } else if !path.isEmpty {
-            path.removeLast()
-        }
-    }
-
-    func finishOnboarding() {
-        if !Headless.isActive {
-            UserDefaults.standard.set(true, forKey: Router.onboardingDoneKey)
-        }
-        path = []
-        base = .home
-    }
-
-    func handle(_ url: URL) {
-        guard url.scheme == "iosforge", url.host == "screen",
-              let raw = url.pathComponents.dropFirst().first else { return }
-        open(raw)
-    }
-}
-"""
-
-_ROOT_VIEW = """import SwiftUI
-
-/// Hosts the navigation stack and modal presentations driven by `Router`.
-/// Generated by the IOSForge scaffold — do not edit.
-struct RootView: View {
-    @Environment(Router.self) private var router
-
-    var body: some View {
-        @Bindable var router = router
-        if let unknown = router.unknownID {
-            UnknownScreenView(id: unknown)
-        } else {
-            NavigationStack(path: $router.path) {
-                router.base.makeView()
-                    .navigationDestination(for: ScreenID.self) { $0.makeView() }
-            }
-            .sheet(item: $router.sheet) { $0.makeView() }
-            .fullScreenCover(item: $router.cover) { $0.makeView() }
-        }
-    }
-}
-
-/// Explicit, detectable screen for an unknown `-screen-id` (never a silent fallback).
-struct UnknownScreenView: View {
-    let id: String
-
-    var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 48))
-            Text("UNKNOWN SCREEN-ID")
-                .font(.title2.bold())
-            Text(id)
-                .font(.body.monospaced())
-        }
-        .foregroundStyle(.red)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.white)
-        .accessibilityIdentifier("iosforge.unknown-screen")
-    }
-}
-
-/// Placeholder for a screen the generator has not produced yet.
-struct PendingScreenView: View {
-    let id: String
-
-    var body: some View {
-        Text("Screen \\(id) not generated")
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .accessibilityIdentifier("iosforge.pending-screen")
-    }
-}
-"""
-
-_HEADLESS = """import Foundation
-
-/// Headless screen-id mode (`-screen-id <id>` launch argument, UserDefaults
-/// argument domain). While active: no onboarding, no permission prompts,
-/// fixture data only. Generated by the IOSForge scaffold — do not edit.
-enum Headless {
-    static let screenID: String? = UserDefaults.standard.string(forKey: "screen-id")
-
-    static var isActive: Bool { screenID != nil }
-}
-"""
-
-
-def _render_permissions() -> str:
-    cases = "\n".join(f"    case {kind.case}" for kind in PERMISSION_KINDS)
-    return f"""import Foundation
-
-/// Every system permission prompt iOS can show. Generated by the IOSForge
-/// scaffold — do not edit.
-enum PermissionKind: String, CaseIterable {{
-{cases}
-}}
-
-/// One concrete system prompt. Implementations live in `{PERMISSIONS_DIR}/` and are
-/// only ever invoked through `Permissions.request(_:)`.
-protocol PermissionPrompter {{
-    static var kind: PermissionKind {{ get }}
-    static func prompt() async -> Bool
-}}
-
-/// The single gate for permission prompts: a no-op returning `false` in headless
-/// screen-id mode so no system alert can cover the captured screen.
-enum Permissions {{
-    @discardableResult
-    static func request<P: PermissionPrompter>(_ prompter: P.Type) async -> Bool {{
-        guard !Headless.isActive else {{ return false }}
-        return await prompter.prompt()
-    }}
-}}
-"""
-
-
-_MEDIA = """import UIKit
-
-/// Bundled media from the source app (`Resources/Media`, folder reference).
-/// Generated by the IOSForge scaffold — do not edit.
-enum MediaAsset {
-    static func url(_ file: String) -> URL? {
-        Bundle.main.url(forResource: file, withExtension: nil, subdirectory: "Media")
-    }
-
-    static func image(_ file: String) -> UIImage? {
-        url(file).flatMap { UIImage(contentsOfFile: $0.path) }
-    }
-}
-"""
-
-_THEME_PLACEHOLDER = """import SwiftUI
-
-/// Design tokens. Replaced by the theme task.
-enum Theme {}
-"""
-
-_FIXTURES_PLACEHOLDER = """import Foundation
-
-/// Fixture data for headless rendering; screens add `extension Fixtures` files.
-enum Fixtures {}
-"""
-
-
-def _render_app(target: str) -> str:
-    return f"""import SwiftUI
-
-/// App entry point. Generated by the IOSForge scaffold — do not edit.
-@main
-struct {target}App: App {{
-    @State private var router = Router.launch()
-
-    var body: some Scene {{
-        WindowGroup {{
-            RootView()
-                .environment(router)
-                .onOpenURL {{ router.handle($0) }}
-        }}
-    }}
-}}
-"""
-
-
-def _render_pending(entry: ScreenEntry) -> str:
-    return f"""import SwiftUI
-
-/// {entry.name} — placeholder until the screen task generates it.
-struct {entry.type_name}: View {{
-    var body: some View {{
-        {PENDING_MARKER} {_swift_str(entry.screen_id)})
-    }}
-}}
-"""
-
-
 def _bundled_fonts(app_dir: Path) -> list[str]:
     fonts = app_dir / "Resources" / "Fonts"
     if not fonts.is_dir():
@@ -503,12 +289,10 @@ def _bundled_fonts(app_dir: Path) -> list[str]:
 
 def render_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) -> dict[str, str]:
     """Contract files (relative path → text) for ``spec``, given resources in ``app_dir``."""
-    entries = screen_entries(spec)
-    if not entries:
-        raise ValueError("app_spec has no screens to scaffold")
+    plan = build_plan(spec)
     target = target_name(identity.app_name)
     media = app_dir / "Resources" / "Media"
-    return {
+    files = {
         "project.yml": render_project_yml(
             target=target,
             app_name=identity.app_name,
@@ -517,31 +301,66 @@ def render_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) 
             purpose_strings=_purpose_strings(spec, identity.app_name),
             has_media=media.is_dir() and any(media.iterdir()),
         ),
-        "App/App.swift": _render_app(target),
-        "App/Navigation/ScreenID.swift": _render_screen_id(entries, home_entry(entries)),
-        "App/Navigation/Router.swift": _ROUTER,
-        "App/Navigation/RootView.swift": _ROOT_VIEW,
-        "App/Headless/Headless.swift": _HEADLESS,
-        f"{PERMISSIONS_DIR}/Permissions.swift": _render_permissions(),
-        "App/Support/MediaAsset.swift": _MEDIA,
+        "App/App.swift": tpl.render_app(target),
+        "App/Navigation/ScreenID.swift": tpl.render_screen_id(plan.entries, plan.tabs),
+        "App/Navigation/AppTab.swift": tpl.render_app_tab(plan.tabs, shows_bar=plan.shows_tab_bar),
+        "App/Navigation/Router.swift": tpl.ROUTER,
+        "App/Navigation/RootView.swift": tpl.ROOT_VIEW,
+        "App/Headless/Headless.swift": tpl.HEADLESS,
+        f"{PERMISSIONS_DIR}/Permissions.swift": tpl.render_permissions(),
+        "App/Support/MediaAsset.swift": tpl.MEDIA,
     }
+    for kind in declared_kinds(spec):
+        if kind.case in PROMPTERS:
+            name, text = render_prompter(kind.case)
+            files[f"{PERMISSIONS_DIR}/{name}"] = text
+    return files
 
 
-def enforce_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) -> list[str]:
-    """Rewrite any contract file the model changed or deleted; return the restored paths.
+def _rel(path: Path, app_dir: Path) -> str:
+    return path.relative_to(app_dir).as_posix()
 
-    Run before every compile-gate check so the build always verifies the real
-    contract, whatever a screen or fix task did to the scaffold files.
+
+def enforce_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) -> ContractReport:
+    """Make the contract layer byte-identical to the template; report every deviation.
+
+    Contract files are rewritten when changed or missing; any other file inside a
+    contract directory (or loose under ``App/``) is deleted. Unknown top-level
+    entries of the app or of ``App/`` and feature folders of unknown screens are
+    reported as ``unexpected`` (gate errors) but left in place.
     """
-    restored: list[str] = []
-    for rel, text in render_contract(app_dir, spec, identity).items():
+    report = ContractReport()
+    contract = render_contract(app_dir, spec, identity)
+    for rel, text in contract.items():
         path = app_dir / rel
         current = path.read_text(encoding="utf-8") if path.is_file() else None
         if current != text:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
-            restored.append(rel)
-    return restored
+            report.restored.append(rel)
+    for folder in CONTRACT_DIRS:
+        root = app_dir / folder
+        for path in sorted(root.rglob("*")) if root.is_dir() else []:
+            if path.is_file() and _rel(path, app_dir) not in contract:
+                path.unlink()
+                report.removed.append(_rel(path, app_dir))
+    app_root = app_dir / "App"
+    allowed_dirs = {Path(d).name for d in (*CONTRACT_DIRS, *MODEL_DIRS)}
+    for path in sorted(app_root.iterdir()) if app_root.is_dir() else []:
+        if path.is_file() and _rel(path, app_dir) not in contract:
+            path.unlink()
+            report.removed.append(_rel(path, app_dir))
+        elif path.is_dir() and path.name not in allowed_dirs:
+            report.unexpected.append(_rel(path, app_dir))
+    for path in sorted(app_dir.iterdir()):
+        if path.name not in APP_ROOT_ENTRIES and path.suffix != ".xcodeproj":
+            report.unexpected.append(_rel(path, app_dir))
+    screen_ids = {e.screen_id for e in build_plan(spec).entries}
+    features = app_dir / "App" / "Features"
+    for path in sorted(features.iterdir()) if features.is_dir() else []:
+        if path.name not in screen_ids:
+            report.unexpected.append(_rel(path, app_dir))
+    return report
 
 
 def write_scaffold(
@@ -556,12 +375,10 @@ def write_scaffold(
     """Render the full Xcode project skeleton into ``app_dir``; return its screens.
 
     Contract files (:func:`render_contract`) are always rewritten; model-owned
-    extension points (theme, fixtures, screen views) are only created when missing
-    so re-running the scaffold never discards generated code.
+    extension points (theme, tab bar, fixtures, screen views) are only created when
+    missing so re-running the scaffold never discards generated code.
     """
-    entries = screen_entries(spec)
-    if not entries:
-        raise ValueError("app_spec has no screens to scaffold")
+    plan = build_plan(spec)
     if fonts_dir is not None and fonts_dir.is_dir():
         dst = app_dir / "Resources" / "Fonts"
         dst.mkdir(parents=True, exist_ok=True)
@@ -573,16 +390,17 @@ def write_scaffold(
 
     enforce_contract(app_dir, spec, AppIdentity(app_name, bundle_id))
     extension_points = {
-        "App/Theme/Theme.swift": _THEME_PLACEHOLDER,
-        "App/Fixtures/Fixtures.swift": _FIXTURES_PLACEHOLDER,
-        **{entry.view_path: _render_pending(entry) for entry in entries},
+        "App/Theme/Theme.swift": tpl.THEME_PLACEHOLDER,
+        "App/Components/AppTabBar.swift": tpl.TAB_BAR_PLACEHOLDER,
+        "App/Fixtures/Fixtures.swift": tpl.FIXTURES_PLACEHOLDER,
+        **{entry.view_path: tpl.render_pending(entry) for entry in plan.entries},
     }
     for rel, text in extension_points.items():
         path = app_dir / rel
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
-    return entries
+    return plan.entries
 
 
 def pending_screens(app_dir: Path, entries: list[ScreenEntry]) -> list[str]:
