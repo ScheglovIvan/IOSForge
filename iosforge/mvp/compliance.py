@@ -463,9 +463,15 @@ def render_generated_ios(
     xcode.install(env.udid, app)
     generated: list[dict[str, Any]] = []
     for sid in screen_ids if screen_ids is not None else _original_screen_ids(paths):
-        shot = simulator.render_screen(
-            env, bundle_id, sid, paths.generated_screens_dir / f"{sid}.png"
-        )
+        out = paths.generated_screens_dir / f"{sid}.png"
+        try:
+            shot = simulator.render_screen(env, bundle_id, sid, out)
+        except simulator.UnstableFrame as exc:
+            bound.warning("compliance.render_ios.unstable", screen=sid, error=str(exc))
+            generated.append(
+                {"id": sid, "screenshot": f"generated_screens/{sid}.png", "unstable": True}
+            )
+            continue
         generated.append(
             {
                 "id": sid,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -142,6 +143,8 @@ def test_build_ios_raises_with_build_errors(
 def _first_iphone() -> str | None:
     if not xcode.toolchain_available():
         return None
+    if os.environ.get("IOSFORGE_TEST_SIMULATOR_UDID"):
+        return os.environ["IOSFORGE_TEST_SIMULATOR_UDID"]
     out = subprocess.run(
         ["xcrun", "simctl", "list", "devices", "available", "-j"],
         capture_output=True, text=True, check=False,
@@ -173,3 +176,25 @@ def test_reference_app_renders_on_the_simulator(tmp_path: Path) -> None:
     for screen in result["screens"]:
         assert screen["frame_diff"] < simulator.STABLE_FRAME_MAX_DIFF and not screen["blank"]
         assert (rp.run_dir / screen["screenshot"]).stat().st_size > 10_000
+
+
+def test_unstable_screen_is_recorded_and_rendering_continues(
+    paths: RunPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(simulator, "require_toolchain", lambda: None)
+    monkeypatch.setattr(simulator, "pin_environment", lambda env: None)
+    monkeypatch.setattr(xcode, "install", lambda udid, app: None)
+
+    def render(env: Any, bundle: str, sid: str, out: Path) -> simulator.StableShot:
+        if sid == "0001":
+            raise simulator.UnstableFrame("0001: no stable frame")
+        return simulator.StableShot(out, 2, 0.0)
+
+    monkeypatch.setattr(simulator, "render_screen", render)
+    result = compliance.render_generated_ios(
+        paths, simulator.SimEnvironment(udid="U", locale="en-US"), app=Path("/tmp/App.app")
+    )
+    assert result["screens"][0] == {
+        "id": "0001", "screenshot": "generated_screens/0001.png", "unstable": True,
+    }  # fmt: skip
+    assert result["screens"][1]["id"] == "0011" and result["screens"][1]["frames"] == 2

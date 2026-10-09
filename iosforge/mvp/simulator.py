@@ -129,13 +129,14 @@ def capture_stable(
             time.sleep(interval_s)
             xcode.screenshot(udid, out)
             frames += 1
+            expired = time.monotonic() > deadline
             if frames > 1:
                 diff = frame_diff(previous, out)
                 if diff < max_diff:
                     blank = near_uniform(out)
-                    if not blank or time.monotonic() > deadline:
+                    if not blank or expired:
                         return StableShot(out, frames, diff, blank)
-            if time.monotonic() > deadline:
+            if expired:
                 raise UnstableFrame(
                     f"{out.stem}: no stable frame after {frames} frames "
                     f"(last diff {diff:.4f} >= {max_diff})"

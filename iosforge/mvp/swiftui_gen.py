@@ -27,7 +27,7 @@ from typing import Any
 
 from iosforge.common.config import Settings
 from iosforge.common.logging import get_logger
-from iosforge.mvp import claude_gen, frida_ingest, swiftui_media, xcode
+from iosforge.mvp import claude_gen, frida_ingest, simulator, swiftui_media, xcode
 from iosforge.mvp.analyze import stage_archive_context, topo_layers
 from iosforge.mvp.feasibility import apply_scope
 from iosforge.mvp.paths import RunPaths
@@ -603,10 +603,12 @@ def correct(
     )
     if gate.errors:
         raise RuntimeError(f"corrective round left a non-compiling app: {gate.errors[:10]}")
+    staged = paths.run_dir / "xcode_app.next"
+    if staged.exists():
+        shutil.rmtree(staged)
+    shutil.copytree(_workspace_app(paths), staged, ignore=shutil.ignore_patterns("*.xcodeproj"))
     shutil.rmtree(paths.xcode_app)
-    shutil.copytree(
-        _workspace_app(paths), paths.xcode_app, ignore=shutil.ignore_patterns("*.xcodeproj")
-    )
+    staged.rename(paths.xcode_app)
     bound.info("compliance.correct.done", screens=sorted(groups), tasks=len(tasks))
     return runs
 
@@ -632,7 +634,8 @@ def report(result: SwiftUIResult) -> dict[str, Any]:
     }
 
 
-def _scope_to(paths: RunPaths, screen_ids: list[str]) -> None:
+def scope_to(paths: RunPaths, screen_ids: list[str]) -> None:
+    """Prune ``app_spec.json`` to ``screen_ids`` through the regular scope mechanism."""
     spec = json.loads(paths.app_spec_json.read_text())
     screens = [
         ScreenScope(
@@ -654,30 +657,17 @@ def _scope_to(paths: RunPaths, screen_ids: list[str]) -> None:
     apply_scope(paths, scope)
 
 
-def _capture_stable(udid: str, out: Path, *, timeout_s: float = 6.0) -> Path:
-    deadline = time.monotonic() + timeout_s
-    previous = b""
-    while True:
-        time.sleep(0.4)
-        xcode.screenshot(udid, out)
-        current = out.read_bytes()
-        if current == previous or time.monotonic() > deadline:
-            return out
-        previous = current
-
-
 def verify_on_simulator(
     result: SwiftUIResult, *, udid: str, bundle_id: str, out_dir: Path
 ) -> dict[str, Path]:
-    """Install the built app and screenshot every screen plus an unknown id."""
-    xcode.boot(udid)
-    xcode.pin_status_bar(udid)
+    """Install the built app and screenshot every screen plus an unknown id (stable frames)."""
+    env = simulator.SimEnvironment(udid=udid, locale="en-US")
+    simulator.pin_environment(env)
     xcode.install(udid, xcode.built_app(result.derived_data, result.scheme))
-    shots: dict[str, Path] = {}
-    for screen_id in [*(e.screen_id for e in result.entries), UNKNOWN_SCREEN_ID]:
-        xcode.launch_screen(udid, bundle_id, screen_id)
-        shots[screen_id] = _capture_stable(udid, out_dir / f"{screen_id}.png")
-    return shots
+    return {
+        sid: simulator.render_screen(env, bundle_id, sid, out_dir / f"{sid}.png").path
+        for sid in [*(e.screen_id for e in result.entries), UNKNOWN_SCREEN_ID]
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -702,7 +692,7 @@ def main(argv: list[str] | None = None) -> int:
     frida_ingest.ingest_archive(args.archive, paths)
     spec = json.loads(paths.app_spec_json.read_text())
     wanted = args.screens or [str(s["id"]) for s in spec.get("screens", [])]
-    _scope_to(paths, [sid for sid in wanted if sid not in set(args.exclude)])
+    scope_to(paths, [sid for sid in wanted if sid not in set(args.exclude)])
     spec = json.loads(paths.app_spec_json.read_text())
     app_name = args.app_name or str(spec.get("app_name") or "Generated App")
 

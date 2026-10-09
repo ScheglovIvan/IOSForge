@@ -196,7 +196,7 @@ def test_compile_errors_without_toolchain_cover_contract_and_lint(
 
 def test_scope_to_prunes_spec_to_requested_screens(paths: RunPaths) -> None:
     paths.app_spec_json.write_text(json.dumps(_spec_three_screens()))
-    swiftui_gen._scope_to(paths, ["0000"])
+    swiftui_gen.scope_to(paths, ["0000"])
     spec = json.loads(paths.app_spec_json.read_text())
     assert [s["id"] for s in spec["screens"]] == ["0000"]
     assert spec["navigation"]["map"] == []

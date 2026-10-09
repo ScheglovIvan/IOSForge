@@ -16,6 +16,7 @@ from pathlib import Path
 from iosforge.common.config import get_settings
 from iosforge.mvp import compliance, frida_ingest, simulator, swiftui_gen, xcode
 from iosforge.mvp.paths import RunPaths
+from iosforge.mvp.source_locale import resolve_source_locale
 
 
 def _generate(args: argparse.Namespace) -> RunPaths:
@@ -24,7 +25,7 @@ def _generate(args: argparse.Namespace) -> RunPaths:
     frida_ingest.ingest_archive(args.archive, paths)
     spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
     wanted = args.screens or [str(s["id"]) for s in spec.get("screens", [])]
-    swiftui_gen._scope_to(paths, [sid for sid in wanted if sid not in set(args.exclude)])
+    swiftui_gen.scope_to(paths, [sid for sid in wanted if sid not in set(args.exclude)])
     spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
     app_name = args.app_name or str(spec.get("app_name") or "Generated App")
     result = swiftui_gen.generate(
@@ -42,6 +43,15 @@ def _generate(args: argparse.Namespace) -> RunPaths:
     return paths
 
 
+def _resolve_locale(paths: RunPaths, storefront: str | None) -> str:
+    spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
+    manifest_path = paths.run_dir / "_frida_raw" / "manifest.json"
+    manifest = (
+        json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else None
+    )
+    return resolve_source_locale(spec, manifest=manifest, storefront_country=storefront)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Generate (or reuse) a SwiftUI app and refine it against the Vision Judge."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -55,7 +65,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=Path("runs"))
     parser.add_argument("--max-parallel", type=int, default=4)
     parser.add_argument("--udid", required=True)
-    parser.add_argument("--locale", default="en-US")
+    parser.add_argument("--locale", help="BCP-47; default: resolve_source_locale(spec)")
+    parser.add_argument("--storefront", help="App Store country, last-resort locale source")
     args = parser.parse_args(argv)
 
     if not xcode.toolchain_available():
@@ -68,9 +79,10 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--app-spec and --archive are required without --run-dir")
         paths = _generate(args)
     settings = get_settings()
+    locale = args.locale or _resolve_locale(paths, args.storefront)
     report = compliance.refine_ios_until_complete(
         paths,
-        simulator.SimEnvironment(udid=args.udid, locale=args.locale),
+        simulator.SimEnvironment(udid=args.udid, locale=locale),
         threshold=settings.frontend_verify_threshold,
         soft_floor=settings.compliance_soft_floor,
         max_iterations=settings.compliance_max_iterations,
