@@ -85,13 +85,21 @@ def render_screen_id(
     """``ScreenID`` enum: cases, presentation, owning tab, view factory, launch screens."""
     by_id = {e.screen_id: e for e in entries}
     launch_rows = [
-        f"        LaunchScreen(screen: .{by_id[item['screen_id']].case_name}, "
+        f"        ScaffoldLaunchScreen(screen: .{by_id[item['screen_id']].case_name}, "
         f"asSheet: {'true' if item.get('presentation') == 'sheet' else 'false'}, "
         f"condition: .{_LAUNCH_CONDITIONS.get(item.get('condition', ''), 'everyLaunch')}),"
         for item in launch or []
         if item.get("screen_id") in by_id
     ]
-    launch_list = "[\n" + "\n".join(launch_rows) + "\n    ]" if launch_rows else "[]"
+    launch_block = (
+        "\n\n    /// Screens presented over the app on start (`app_spec.navigation.launch`).\n"
+        "    static let launchScreens: [ScaffoldLaunchScreen] = [\n"
+        + "\n".join(launch_rows)
+        + "\n    ]\n"
+        if launch_rows
+        else "\n"
+    )
+    launch_type = LAUNCH_TYPE if launch_rows else ""
     by_root = {t.root.screen_id: t for t in tabs}
     cases = "\n".join(
         f"    case {e.case_name} = {swift_str(e.screen_id)}  // {clean_text(e.name)}"
@@ -120,11 +128,7 @@ enum ScreenID: String, CaseIterable, Identifiable, Hashable {{
     var id: String {{ rawValue }}
 
     /// First onboarding screen for a normal (non-headless) first launch.
-    static let onboardingStart: ScreenID? = {first_onboarding}
-
-    /// Screens presented over the app on start (`app_spec.navigation.launch`).
-    static let launchScreens: [LaunchScreen] = {launch_list}
-
+    static let onboardingStart: ScreenID? = {first_onboarding}{launch_block}
     var presentation: ScreenPresentation {{
         switch self {{
 {presentations}
@@ -155,18 +159,7 @@ enum ScreenID: String, CaseIterable, Identifiable, Hashable {{
 enum ScreenPresentation {{
     case onboarding, tabRoot, push, sheet, fullScreenCover
 }}
-
-/// A screen the app presents over itself on start, and when.
-struct LaunchScreen {{
-    enum Condition {{
-        case everyLaunch, firstLaunch, notPremium
-    }}
-
-    let screen: ScreenID
-    let asSheet: Bool
-    let condition: Condition
-}}
-"""
+{launch_type}"""
 
 
 def render_app_tab(tabs: list[TabEntry], *, shows_bar: bool) -> str:
@@ -300,31 +293,6 @@ final class Router {{
         selectedTab = .home
     }}
 
-    /// Presents the first `ScreenID.launchScreens` entry whose condition holds; never in
-    /// headless screen-id mode or over onboarding.
-    @MainActor
-    func presentLaunch() {{
-        guard !Headless.isActive, onboarding == nil else {{ return }}
-        for entry in ScreenID.launchScreens {{
-            let key = "iosforge.launch_shown.\\(entry.screen.rawValue)"
-            switch entry.condition {{
-            case .everyLaunch:
-                break
-            case .firstLaunch:
-                if UserDefaults.standard.bool(forKey: key) {{ continue }}
-            case .notPremium:
-                if Subscriptions.hasPremium {{ continue }}
-            }}
-            UserDefaults.standard.set(true, forKey: key)
-            if entry.asSheet {{
-                sheet = entry.screen
-            }} else {{
-                cover = entry.screen
-            }}
-            return
-        }}
-    }}
-
     func handle(_ url: URL) {{
         guard url.scheme == "iosforge", url.host == "screen",
               let raw = url.pathComponents.dropFirst().first else {{ return }}
@@ -332,6 +300,64 @@ final class Router {{
     }}
 }}
 """
+
+LAUNCH_TYPE = """
+/// A screen the app presents over itself on start, and when.
+struct ScaffoldLaunchScreen {
+    enum Condition {
+        case everyLaunch, firstLaunch, notPremium
+    }
+
+    let screen: ScreenID
+    let asSheet: Bool
+    let condition: Condition
+}
+"""
+
+LAUNCH_METHOD = """\
+    /// Presents the first `ScreenID.launchScreens` entry whose condition holds;
+    /// never in headless screen-id mode or over onboarding.
+    @MainActor
+    func presentLaunch() {
+        guard !Headless.isActive, onboarding == nil else { return }
+        for entry in ScreenID.launchScreens {
+            let key = "iosforge.launch_shown.\\(entry.screen.rawValue)"
+            switch entry.condition {
+            case .everyLaunch:
+                break
+            case .firstLaunch:
+                if UserDefaults.standard.bool(forKey: key) { continue }
+            case .notPremium:
+                if Subscriptions.hasPremium { continue }
+            }
+            UserDefaults.standard.set(true, forKey: key)
+            if entry.asSheet {
+                sheet = entry.screen
+            } else {
+                cover = entry.screen
+            }
+            return
+        }
+    }
+
+"""
+
+
+def render_router(*, launch: bool = False) -> str:
+    """``Router``; with ``launch`` it also presents the launch screens (after onboarding too)."""
+    if not launch:
+        return ROUTER
+    finish = "    func finishOnboarding() {"
+    router = ROUTER.replace(finish, "    @MainActor\n" + finish, 1)
+    router = router.replace(
+        "        onboarding = nil\n        selectedTab = .home\n    }\n",
+        "        onboarding = nil\n        selectedTab = .home\n        presentLaunch()\n    }\n",
+        1,
+    )
+    return router.replace(
+        "    func handle(_ url: URL) {", LAUNCH_METHOD + "    func handle(_ url: URL) {", 1
+    )
+
 
 ROOT_VIEW = f"""import SwiftUI
 

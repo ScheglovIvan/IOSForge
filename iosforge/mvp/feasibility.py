@@ -205,7 +205,7 @@ def _parse_proposal(payload: dict[str, Any], spec: dict[str, Any]) -> ScopeDecis
 
 def _coerce_tier(value: object) -> Literal[1, 2, 3, 4] | None:
     try:
-        tier = int(str(value))
+        tier = int(float(str(value)))
     except ValueError:
         return None
     if tier == 1:
@@ -358,7 +358,8 @@ def apply_scope(paths: RunPaths, scope: ScopeDecision | None = None) -> None:
 def confirm_routing(scope: ScopeDecision, form: dict[str, str]) -> None:
     """Apply the operator's per-finding ``tier_<i>`` / ``module_<i>`` choices (in place).
 
-    Blank fields keep the proposal; an unknown module key or tier is ignored.
+    A blank or unknown tier keeps the proposed tier; a submitted module field sets the
+    module, and a blank or unknown key clears it (the "—" choice).
     """
     for index, finding in enumerate(scope.feasibility.findings):
         tier = _coerce_tier(form.get(f"tier_{index}"))
@@ -383,12 +384,15 @@ def route_capabilities(
     for capability in capabilities:
         if not isinstance(capability, dict):
             continue
-        screens = [sid for sid in capability.get("screens", []) if str(sid) in included]
-        if not screens:
+        declared = capability.get("screens") or []
+        screens = [sid for sid in declared if str(sid) in included]
+        if declared and not screens:
             log.info("feasibility.apply_scope.capability_dropped", name=capability.get("name"))
             continue
         routed = {**capability, "screens": screens}
         finding = routing.get(str(capability.get("name")))
+        if finding is None:
+            log.warning("feasibility.apply_scope.capability_unrouted", name=capability.get("name"))
         if finding is not None and finding.tier is not None:
             routed["tier"] = finding.tier
             routed["module"] = finding.module

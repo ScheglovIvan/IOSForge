@@ -357,6 +357,7 @@ def render_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) 
     media = app_dir / "Resources" / "Media"
     integrations = integ.load(app_dir)
     selected = caps.select(spec, integrations)
+    launch = launch_screens(spec, plan)
     has_icon = (app_dir / ICON_SET / ICON_FILE).is_file()
     files = {
         "project.yml": render_project_yml(
@@ -371,14 +372,10 @@ def render_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) 
             selected=selected,
         ),
         **caps.render_files(selected),
-        "App/App.swift": tpl.render_app(
-            target, caps.startup_calls(selected), launch=bool(launch_screens(spec, plan))
-        ),
-        "App/Navigation/ScreenID.swift": tpl.render_screen_id(
-            plan.entries, plan.tabs, launch_screens(spec, plan)
-        ),
+        "App/App.swift": tpl.render_app(target, caps.startup_calls(selected), launch=bool(launch)),
+        "App/Navigation/ScreenID.swift": tpl.render_screen_id(plan.entries, plan.tabs, launch),
         "App/Navigation/AppTab.swift": tpl.render_app_tab(plan.tabs, shows_bar=plan.shows_tab_bar),
-        "App/Navigation/Router.swift": tpl.ROUTER,
+        "App/Navigation/Router.swift": tpl.render_router(launch=bool(launch)),
         "App/Navigation/RootView.swift": tpl.ROOT_VIEW,
         "App/Headless/Headless.swift": tpl.HEADLESS,
         f"{PERMISSIONS_DIR}/Permissions.swift": tpl.render_permissions(),
@@ -397,8 +394,11 @@ def render_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) 
 
 
 def launch_screens(spec: dict[str, Any], plan: NavPlan) -> list[dict[str, str]]:
-    """``navigation.launch`` entries whose screen the app builds (Q15)."""
-    built = {e.screen_id for e in plan.entries}
+    """``navigation.launch`` entries whose screen the app builds as a modal-able screen (Q15).
+
+    Onboarding screens and tab roots are skipped: they have their own presentation.
+    """
+    built = {e.screen_id for e in plan.entries if e.presentation not in ("onboarding", "tabRoot")}
     navigation = spec.get("navigation") or {}
     entries = navigation.get("launch") if isinstance(navigation, dict) else None
     return [

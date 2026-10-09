@@ -263,21 +263,27 @@ def test_launch_screens_render_into_the_scaffold(tmp_path: Path) -> None:
     app = tmp_path / "xcode_app"
     swiftui_gen.write_scaffold(app, spec, app_name="Demo", bundle_id="com.ex.d")
     screen_id = (app / "App/Navigation/ScreenID.swift").read_text()
-    assert "LaunchScreen(screen: .s0001, asSheet: false, condition: .firstLaunch)," in screen_id
+    assert (
+        "ScaffoldLaunchScreen(screen: .s0001, asSheet: false, condition: .firstLaunch),"
+        in screen_id
+    )
     assert "9999" not in screen_id
     assert "router.presentLaunch()" in (app / "App/App.swift").read_text()
     router = (app / "App/Navigation/Router.swift").read_text()
     assert 'let key = "iosforge.launch_shown.\\(entry.screen.rawValue)"' in router
+    assert "        selectedTab = .home\n        presentLaunch()\n" in router
+    assert "    @MainActor\n    func finishOnboarding()" in router
 
 
 def test_no_launch_screens_keep_the_entry_point_plain(tmp_path: Path) -> None:
     app = tmp_path / "xcode_app"
     swiftui_gen.write_scaffold(app, _spec_three_screens(), app_name="Demo", bundle_id="com.ex.d")
+    from iosforge.mvp import swiftui_templates as tpl
+
     assert "presentLaunch" not in (app / "App/App.swift").read_text()
-    assert (
-        "static let launchScreens: [LaunchScreen] = []"
-        in (app / "App/Navigation/ScreenID.swift").read_text()
-    )
+    assert (app / "App/Navigation/Router.swift").read_text() == tpl.ROUTER
+    screen_id = (app / "App/Navigation/ScreenID.swift").read_text()
+    assert "launchScreens" not in screen_id and "ScaffoldLaunchScreen" not in screen_id
 
 
 def test_analysis_prompt_asks_for_capabilities_and_launch() -> None:
@@ -288,3 +294,48 @@ def test_analysis_prompt_asks_for_capabilities_and_launch() -> None:
     )
     assert '"launch": [' in analyze.ANALYZE_PROMPT
     assert "capabilities" in analyze._SPEC_MD_ORDER
+
+
+def test_launch_on_an_onboarding_screen_is_ignored(tmp_path: Path) -> None:
+    spec = _spec_three_screens()
+    spec["navigation"]["launch"] = [
+        {"screen_id": "0002", "presentation": "sheet", "condition": "every_launch"}
+    ]
+    plan = build_plan(spec)
+    onboarding = {e.screen_id for e in plan.entries if e.presentation == "onboarding"}
+    from iosforge.mvp.swiftui_scaffold import launch_screens
+
+    expected = [] if "0002" in onboarding else [spec["navigation"]["launch"][0]]
+    assert launch_screens(spec, plan) == expected
+
+
+def test_attribution_rule_only_with_tenjin() -> None:
+    bare = caps.screen_rules(caps.select({}, integ.Integrations()))
+    assert not any("Attribution" in rule for rule in bare)
+    tenjin = caps.screen_rules(caps.select({}, integ.Integrations(tenjin_key="T")))
+    assert any("never ask for tracking" in rule for rule in tenjin)
+
+
+def test_every_routable_module_has_a_descriptor() -> None:
+    assert set(capability_registry.MODULES) <= set(caps.REGISTRY)
+
+
+def test_capability_without_screens_survives_scoping() -> None:
+    capability = {**CAPABILITY, "screens": []}
+    routed = feasibility.route_capabilities([capability], _routed_scope(), {"0000"})
+    assert routed and routed[0]["screens"] == []
+
+
+def test_old_scope_json_without_routing_still_loads() -> None:
+    from iosforge.mvp.scope_models import ScopeDecision
+
+    legacy = _scope().model_dump(mode="json")
+    legacy["feasibility"]["findings"] = [
+        {"capability": "widgets", "verdict": "partial", "note": "x", "screens": []}
+    ]
+    finding = ScopeDecision.model_validate(legacy).feasibility.findings[0]
+    assert (finding.tier, finding.module) == (None, None)
+
+
+def test_tier_coercion_accepts_float_strings() -> None:
+    assert feasibility._coerce_tier("2.0") == 2 and feasibility._coerce_tier(None) is None

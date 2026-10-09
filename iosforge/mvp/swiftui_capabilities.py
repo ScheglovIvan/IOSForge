@@ -65,6 +65,7 @@ class CapabilityDescriptor:
     packages: Callable[[CapabilityContext], tuple[SwiftPackage, ...]] = lambda ctx: ()
     info_properties: Callable[[CapabilityContext], list[str]] = lambda ctx: []
     prompters: Callable[[CapabilityContext], tuple[str, ...]] = lambda ctx: ()
+    rule_applies: Callable[[CapabilityContext], bool] = lambda ctx: True
     mock: str = ""
     functional_check: str = ""
 
@@ -109,6 +110,7 @@ ATTRIBUTION = CapabilityDescriptor(
     packages=_attribution_packages,
     info_properties=lambda ctx: integ.attribution_properties(ctx.integrations),
     prompters=lambda ctx: ("tracking",) if ctx.integrations.attribution else (),
+    rule_applies=lambda ctx: ctx.integrations.attribution,
     screen_api_rule=(
         "Install attribution starts by itself from the app entry point (`Attribution`); "
         "screens never\n  import TenjinSDK or AppTrackingTransparency and never ask for "
@@ -217,7 +219,11 @@ def startup_calls(selected: list[Selected]) -> list[str]:
 
 def screen_rules(selected: list[Selected]) -> list[str]:
     """One rule per selected module for the screen-generation prompts."""
-    return [item.descriptor.screen_api_rule for item in selected if item.descriptor.screen_api_rule]
+    return [
+        item.descriptor.screen_api_rule
+        for item in selected
+        if item.descriptor.screen_api_rule and item.descriptor.rule_applies(item.context)
+    ]
 
 
 def directories() -> tuple[str, ...]:
