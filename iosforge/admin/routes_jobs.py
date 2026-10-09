@@ -208,6 +208,7 @@ def jobs_rework(
     instructions: str = Form(...),
     user: SessionData = Depends(require_user),
     db: Session = Depends(get_db),
+    storage: ArtifactStorage = Depends(get_storage),
 ) -> Response:
     if not csrf.verify(user.csrf_token, csrf_token):
         return Response("Invalid request (CSRF).", status_code=400)
@@ -215,15 +216,14 @@ def jobs_rework(
     gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
     if gen is None or not text:
         return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
+    from iosforge.worker.swiftui_tasks import SOURCES_NAME
+
+    if gen.sources_key.endswith(SOURCES_NAME):
+        return _enqueue_swiftui_round(db, storage, job_id, text, None)
     try:
-        from iosforge.worker.swiftui_tasks import SOURCES_NAME, XCODE_QUEUE, rework_swiftui
+        from iosforge.worker.run_job import rework_frontend
 
-        if gen.sources_key.endswith(SOURCES_NAME):
-            rework_swiftui.apply_async(args=[str(job_id), text], queue=XCODE_QUEUE)
-        else:
-            from iosforge.worker.run_job import rework_frontend
-
-            rework_frontend.apply_async(args=[str(job_id), text], queue="codegen")
+        rework_frontend.apply_async(args=[str(job_id), text], queue="codegen")
         log.info("jobs.rework_requested", job_id=str(job_id))
     except Exception as exc:
         log.error("jobs.rework_enqueue_failed", job_id=str(job_id), error=str(exc))
@@ -238,21 +238,41 @@ def jobs_extend_scope(
     screens: str = Form(...),
     user: SessionData = Depends(require_user),
     db: Session = Depends(get_db),
+    storage: ArtifactStorage = Depends(get_storage),
 ) -> Response:
     """Post-MVP scope extension of a SwiftUI app: add screens (ids, comma/space separated)."""
     if not csrf.verify(user.csrf_token, csrf_token):
         return Response("Invalid request (CSRF).", status_code=400)
     ids = [part for part in re.split(r"[\s,]+", screens or "") if part]
     gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
-    from iosforge.worker.swiftui_tasks import SOURCES_NAME, XCODE_QUEUE, rework_swiftui
+    from iosforge.worker.swiftui_tasks import SOURCES_NAME
 
     if not ids or gen is None or not gen.sources_key.endswith(SOURCES_NAME):
         return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
+    return _enqueue_swiftui_round(db, storage, job_id, "", ids)
+
+
+def _enqueue_swiftui_round(
+    db: Session,
+    storage: ArtifactStorage,
+    job_id: uuid.UUID,
+    instructions: str,
+    add_screens: list[str] | None,
+) -> Response:
+    from iosforge.worker.swiftui_rework import rework_refusal, rework_swiftui
+    from iosforge.worker.swiftui_tasks import XCODE_QUEUE
+
+    job = db.get(Job, job_id)
+    if job is None:
+        return Response("Not found", status_code=404)
+    refusal = rework_refusal(db, job, storage)
+    if refusal:
+        return Response(f"Rework is not possible now: {refusal}.", status_code=409)
     try:
-        rework_swiftui.apply_async(args=[str(job_id), "", ids], queue=XCODE_QUEUE)
-        log.info("jobs.extend_scope_requested", job_id=str(job_id), screens=ids)
+        rework_swiftui.apply_async(args=[str(job_id), instructions, add_screens], queue=XCODE_QUEUE)
+        log.info("jobs.swiftui_round_requested", job_id=str(job_id), screens=add_screens)
     except Exception as exc:
-        log.error("jobs.extend_scope_enqueue_failed", job_id=str(job_id), error=str(exc))
+        log.error("jobs.swiftui_round_enqueue_failed", job_id=str(job_id), error=str(exc))
     return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
 
 

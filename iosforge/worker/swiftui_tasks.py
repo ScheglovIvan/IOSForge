@@ -22,7 +22,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from iosforge.common.config import Settings, get_settings
@@ -32,7 +32,6 @@ from iosforge.common.types import JobState, Stage
 from iosforge.db.base import utcnow
 from iosforge.db.models import (
     DataArchiveArtifact,
-    GenerationResult,
     Job,
     StageTimeline,
     WalkthroughResult,
@@ -43,11 +42,9 @@ from iosforge.mvp import (
     apphud_provision,
     attribution,
     build_profile,
-    compliance,
     feasibility,
     frida_ingest,
     ios_delivery,
-    simulator,
     swiftui_gen,
     swiftui_integrations,
 )
@@ -59,6 +56,7 @@ from iosforge.storage.client import ArtifactStorage, S3ArtifactStorage, build_ke
 log = get_logger("worker.swiftui")
 
 SOURCES_NAME = "xcode_app.zip"
+BUILT_SCOPE_NAME = "swiftui_scope.json"
 LOG_LIMIT = 200_000
 XCODE_QUEUE = "xcode"
 ACTIVE_STATUSES = ("queued", "archiving")
@@ -70,8 +68,15 @@ def sources_key(job_id: str) -> str:
     return build_key(job_id=job_id, kind="sources", name=SOURCES_NAME)
 
 
-def store_sources(storage: ArtifactStorage, job_id: str, app_dir: Path) -> str:
-    """Zip ``app_dir`` (without derived/xcodeproj files) into the job's sources key."""
+def store_sources(
+    storage: ArtifactStorage, job_id: str, app_dir: Path, *, version: int | None = None
+) -> str:
+    """Zip ``app_dir`` (without derived/xcodeproj files) into the job's sources key.
+
+    The canonical key always holds the latest app; with ``version`` the same archive is
+    also kept as ``sources/v<version>/xcode_app.zip`` and that key is returned, so every
+    ``GenerationResult`` keeps pointing at its own version.
+    """
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in sorted(app_dir.rglob("*")):
@@ -80,7 +85,11 @@ def store_sources(storage: ArtifactStorage, job_id: str, app_dir: Path) -> str:
                 zf.write(path, rel.as_posix())
     key = sources_key(job_id)
     storage.put(key, buffer.getvalue(), content_type="application/zip")
-    return key
+    if version is None:
+        return key
+    versioned = build_key(job_id=job_id, kind="sources", name=f"v{version}/{SOURCES_NAME}")
+    storage.put(versioned, buffer.getvalue(), content_type="application/zip")
+    return versioned
 
 
 def hydrate_sources(storage: ArtifactStorage, job_id: str, app_dir: Path) -> None:
@@ -194,9 +203,12 @@ def run_xcode_delivery(self: Any, job_id: str, build_id: str | None = None) -> s
             with tempfile.TemporaryDirectory(prefix="iosforge-delivery-") as tmp:
                 paths = RunPaths.create(Path(tmp) / "run")
                 hydrate_sources(storage, job_id, paths.xcode_app)
-                spec = json.loads(
+                paths.app_spec_json.write_bytes(
                     storage.get(build_key(job_id=job_id, kind="app_spec", name="app_spec.json"))
                 )
+                full_spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
+                swiftui_gen.scope_to(paths, effective_scope_ids(job, storage, full_spec, settings))
+                spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
                 ident = build_profile.resolve_identity(job.source_app_metadata, spec, settings)
                 write_scaffold(
                     paths.xcode_app,
@@ -242,9 +254,6 @@ def run_xcode_delivery(self: Any, job_id: str, build_id: str | None = None) -> s
         return f"job {job_id} delivery {build.status}"
 
 
-REWORKABLE = (JobState.DONE, JobState.FAILED, JobState.NEEDS_INPUT)
-
-
 def hydrate_inputs(db: Session, job: Job, storage: ArtifactStorage, paths: RunPaths) -> None:
     """Restore the job's crawl (screens, screenshots), app_spec and Frida archive context."""
     job_id = str(job.id)
@@ -264,95 +273,77 @@ def hydrate_inputs(db: Session, job: Job, storage: ArtifactStorage, paths: RunPa
         frida_ingest.ingest_archive(raw, paths)
 
 
-def _scope_ids(storage: ArtifactStorage, job_id: str, spec: dict[str, Any]) -> list[str]:
-    try:
-        scope = feasibility.load_scope(storage, job_id)
-    except Exception:
-        scope = None
-    if scope is not None and scope.scope_mode == "core":
-        return [s.screen_id for s in scope.screens if s.include]
-    return [str(s["id"]) for s in spec.get("screens", []) if isinstance(s, dict)]
+def scope_ids(
+    job: Job, storage: ArtifactStorage, spec: dict[str, Any], settings: Settings
+) -> list[str]:
+    """Screens to build: the operator-approved core scope, else every app_spec screen.
 
-
-@celery_app.task(base=PipelineTask, name="iosforge.rework_swiftui", bind=True, queue=XCODE_QUEUE)
-def rework_swiftui(
-    self: Any, job_id: str, instructions: str = "", add_screens: list[str] | None = None
-) -> str:
-    """Operator rework round of a SwiftUI app (Phase 6): extend scope and/or edit, then ship.
-
-    Allowed only while the job is not running (DONE / FAILED / NEEDS_INPUT) and its SwiftUI
-    sources exist. ``add_screens`` first grows the scope from the full app_spec, then
-    ``instructions`` run as one model round; a single Vision-Judge pass is recorded, the
-    new version is stored (``result_version`` + 1, new ``GenerationResult``) and native
-    delivery is enqueued. Fails loudly off-Mac.
+    Same rule as the Flutter build: only with ``pipeline_scope_gate`` on and an
+    ``approved`` scope (its pinned version); a missing or broken scope never blocks.
     """
-    settings = get_settings()
-    storage = S3ArtifactStorage()
-    maker = get_sessionmaker()
-    with maker() as db:
-        job = db.get(Job, uuid.UUID(job_id))
-        if job is None:
-            return f"job {job_id} not found"
-        scope_pending = (job.source_app_metadata or {}).get("scope_status") == "proposed"
-        if job.state not in REWORKABLE or scope_pending or not storage.exists(sources_key(job_id)):
-            return f"job {job_id} cannot be reworked in state {job.state}"
-        if not instructions.strip() and not add_screens:
-            return f"job {job_id}: nothing to rework"
-        job.state = JobState.CODEGEN
-        stage = StageTimeline(job_id=job.id, stage=Stage.CODEGEN, started_at=utcnow())
-        db.add(stage)
-        db.commit()
-        try:
-            simulator.require_toolchain()
-            with tempfile.TemporaryDirectory(prefix="iosforge-rework-") as tmp:
-                paths = RunPaths.create(Path(tmp) / "run")
-                hydrate_inputs(db, job, storage, paths)
-                full_spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
-                swiftui_gen.scope_to(paths, _scope_ids(storage, job_id, full_spec))
-                hydrate_sources(storage, job_id, paths.xcode_app)
-                if add_screens:
-                    swiftui_gen.extend(paths, list(add_screens), full_spec)
-                if instructions.strip():
-                    swiftui_gen.rework(
-                        paths, instructions, timeout=settings.codegen_rework_timeout_s
-                    )
-                report = compliance.verify_ios(
-                    paths,
-                    simulator.SimEnvironment(
-                        udid=settings.ios_simulator_udid, locale=_job_locale(job, paths)
-                    ),
-                    weights=compliance.ComplianceWeights.from_settings(settings),
-                    threshold=settings.frontend_verify_threshold,
-                    soft_floor=settings.compliance_soft_floor,
-                )
-                key = store_sources(storage, job_id, paths.xcode_app)
-            job.result_version = (job.result_version or 1) + 1
-            db.add(
-                GenerationResult(
-                    job_id=job.id,
-                    sources_key=key,
-                    compliance_score=report.get("compliance_score"),
-                    selftest_report=report,
-                )
-            )
-            stage.finished_at = utcnow()
-            job.state = JobState.DONE
-            db.commit()
-            try:
-                queue_delivery(db, job)
-            except Exception as exc:
-                log.error("swiftui.rework.delivery_enqueue_failed", job_id=job_id, error=str(exc))
-        except Exception as exc:
-            log.error("swiftui.rework.failed", job_id=job_id, error=str(exc))
-            stage.error = str(exc)[:4000]
-            stage.finished_at = utcnow()
-            job.state = JobState.FAILED
-            db.commit()
-            return f"job {job_id} rework failed: {exc}"
-    return f"job {job_id} reworked (v{job.result_version})"
+    every = [str(s["id"]) for s in spec.get("screens", []) if isinstance(s, dict)]
+    meta = job.source_app_metadata or {}
+    if not settings.pipeline_scope_gate or meta.get("scope_status") != "approved":
+        return every
+    try:
+        scope = feasibility.load_scope(
+            storage, str(job.id), version_id=meta.get("scope_version_id")
+        )
+    except Exception as exc:
+        log.warning("swiftui.scope_load_failed", job_id=str(job.id), error=str(exc))
+        return every
+    if scope is None or scope.scope_mode != "core":
+        return every
+    included = [s.screen_id for s in scope.screens if s.include]
+    return included or every
 
 
-def _job_locale(job: Job, paths: RunPaths) -> str:
+def built_scope_key(job_id: str) -> str:
+    """Storage key of the screen ids the stored SwiftUI app was built for."""
+    return build_key(job_id=job_id, kind="sources", name=BUILT_SCOPE_NAME)
+
+
+def save_built_scope(storage: ArtifactStorage, job_id: str, screen_ids: list[str]) -> None:
+    """Record the screens the stored app contains (after a build or a scope extension)."""
+    storage.put(
+        built_scope_key(job_id),
+        json.dumps({"screens": screen_ids}).encode(),
+        content_type="application/json",
+    )
+
+
+def effective_scope_ids(
+    job: Job, storage: ArtifactStorage, spec: dict[str, Any], settings: Settings
+) -> list[str]:
+    """Screens of the stored app: the recorded built scope, else :func:`scope_ids`.
+
+    Rework rounds and delivery start from here so an extension survives later rounds
+    and the archived app is the one the Vision Judge scored.
+    """
+    known = {str(s["id"]) for s in spec.get("screens", []) if isinstance(s, dict)}
+    try:
+        if storage.exists(built_scope_key(str(job.id))):
+            data = json.loads(storage.get(built_scope_key(str(job.id))))
+            recorded = [str(i) for i in data.get("screens", []) if str(i) in known]
+            if recorded:
+                return recorded
+    except (OSError, ValueError, AttributeError) as exc:
+        log.warning("swiftui.built_scope_unreadable", job_id=str(job.id), error=str(exc))
+    return scope_ids(job, storage, spec, settings)
+
+
+def claim_job(
+    db: Session, job_id: uuid.UUID, allowed: tuple[JobState, ...], state: JobState
+) -> bool:
+    """Atomically move the job into ``state`` if it is in ``allowed`` (one winner only)."""
+    result = db.execute(
+        update(Job).where(Job.id == job_id, Job.state.in_(allowed)).values(state=state)
+    )
+    db.commit()
+    return bool(getattr(result, "rowcount", 0))
+
+
+def job_locale(job: Job, paths: RunPaths) -> str:
     spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
     manifest = (
         json.loads(paths.capture_manifest_json.read_text(encoding="utf-8"))

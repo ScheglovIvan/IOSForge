@@ -12,6 +12,7 @@ accepted only once two consecutive frames differ by less than
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,6 +70,25 @@ def require_toolchain() -> None:
         raise SimulatorUnavailable(
             "xcodegen / xcodebuild / xcrun not found: iOS rendering only runs on a Mac worker"
         )
+
+
+def resolve_udid(configured: str = "") -> str:
+    """``configured`` when set, else the first available iPhone simulator (booted first)."""
+    if configured:
+        return configured
+    require_toolchain()
+    devices = json.loads(xcode.simctl("list", "devices", "available", "-j") or "{}")
+    phones = [
+        device
+        for runtime, items in devices.get("devices", {}).items()
+        if "iOS" in runtime
+        for device in items
+        if str(device.get("name", "")).startswith("iPhone")
+    ]
+    if not phones:
+        raise SimulatorUnavailable("no available iPhone simulator; set IOS_SIMULATOR_UDID")
+    phones.sort(key=lambda d: d.get("state") != "Booted")
+    return str(phones[0]["udid"])
 
 
 def pin_environment(env: SimEnvironment) -> None:

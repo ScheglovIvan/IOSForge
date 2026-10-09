@@ -9,12 +9,13 @@ from typing import Any
 
 import pytest
 
+from iosforge.common.config import Settings
 from iosforge.common.types import JobState
-from iosforge.db.models import Job
+from iosforge.db.models import GenerationResult, Job, StageTimeline, XcodeBuild
 from iosforge.mvp import swiftui_gen, xcode
 from iosforge.mvp.paths import RunPaths
 from iosforge.mvp.swiftui_prompts import rework_prompt
-from iosforge.worker import swiftui_tasks
+from iosforge.worker import swiftui_rework, swiftui_tasks
 from tests.test_feasibility import _spec_three_screens
 
 FULL: dict[str, Any] = _spec_three_screens()
@@ -107,10 +108,17 @@ class _Storage:
     def exists(self, key: str) -> bool:
         return key in self.objects
 
+    def get(self, key: str, version_id: str | None = None) -> bytes:
+        return self.objects[key]
+
+    def put(self, key: str, data: bytes, content_type: str | None = None) -> None:
+        self.objects[key] = data
+
 
 class _Session:
-    def __init__(self, job: Job) -> None:
-        self.job = job
+    def __init__(self, job: Job, gen: GenerationResult | None = None) -> None:
+        self.job, self.gen, self.added, self.rolled_back = job, gen, [], False
+        self.active: XcodeBuild | None = None
 
     def __enter__(self) -> _Session:
         return self
@@ -118,79 +126,255 @@ class _Session:
     def __exit__(self, *exc: object) -> None:
         return None
 
-    def get(self, model: type, pk: object) -> Job:
-        return self.job
+    def get(self, model: type, pk: object) -> Any:
+        if model is Job:
+            return self.job
+        return next((o for o in self.added if getattr(o, "id", None) == pk), None)
+
+    def scalar(self, stmt: Any) -> Any:
+        text = str(stmt)
+        if "xcode_builds" in text:
+            return self.active
+        return self.gen
 
     def add(self, obj: object) -> None:
-        return None
+        if getattr(obj, "id", "x") is None:
+            obj.id = uuid.uuid4()  # type: ignore[attr-defined]
+        self.added.append(obj)
 
     def commit(self) -> None:
         return None
 
-
-@pytest.mark.parametrize("state", [JobState.CODEGEN, JobState.DELIVERY, JobState.ANALYSIS])
-def test_rework_task_refuses_running_jobs(state: JobState, monkeypatch: pytest.MonkeyPatch) -> None:
-    job = Job(id=uuid.uuid4(), state=state, source_app_metadata={})
-    storage = _Storage({swiftui_tasks.sources_key(str(job.id)): b"zip"})
-    monkeypatch.setattr(swiftui_tasks, "get_sessionmaker", lambda: lambda: _Session(job))
-    monkeypatch.setattr(swiftui_tasks, "S3ArtifactStorage", lambda: storage)
-    assert "cannot be reworked" in swiftui_tasks.rework_swiftui.run(str(job.id), "fix it")
-    assert job.state == state
+    def rollback(self) -> None:
+        self.rolled_back = True
 
 
-def test_rework_task_fails_loudly_off_mac(monkeypatch: pytest.MonkeyPatch) -> None:
-    job = Job(id=uuid.uuid4(), state=JobState.DONE, source_app_metadata={})
-    storage = _Storage({swiftui_tasks.sources_key(str(job.id)): b"zip"})
-    monkeypatch.setattr(swiftui_tasks, "get_sessionmaker", lambda: lambda: _Session(job))
-    monkeypatch.setattr(swiftui_tasks, "S3ArtifactStorage", lambda: storage)
-    enqueued: list[Any] = []
-    monkeypatch.setattr(
-        swiftui_tasks.run_xcode_delivery, "apply_async", lambda **k: enqueued.append(k)
+SPEC_KEY = "jobs/{}/app_spec/app_spec.json"
+
+
+def _job(state: JobState = JobState.DONE, **meta: Any) -> tuple[Job, _Storage]:
+    job = Job(id=uuid.uuid4(), state=state, source_app_metadata=meta, result_version=2)
+    storage = _Storage(
+        {
+            swiftui_tasks.sources_key(str(job.id)): b"zip",
+            SPEC_KEY.format(job.id): json.dumps(FULL).encode(),
+        }
     )
-    result = swiftui_tasks.rework_swiftui.run(str(job.id), "fix it")
-    assert "rework failed" in result and job.state == JobState.FAILED and enqueued == []
+    return job, storage
 
 
-def test_rework_task_refuses_a_job_awaiting_scope_approval(
+def _wire(
+    monkeypatch: pytest.MonkeyPatch, job: Job, storage: _Storage, session: _Session
+) -> dict[str, Any]:
+    seen: dict[str, Any] = {"queued": [], "rounds": [], "extended": [], "claims": 0}
+    monkeypatch.setattr(swiftui_rework, "get_sessionmaker", lambda: lambda: session)
+    monkeypatch.setattr(swiftui_rework, "S3ArtifactStorage", lambda: storage)
+    monkeypatch.setattr(swiftui_rework, "get_settings", lambda: Settings())
+    monkeypatch.setattr(swiftui_rework.simulator, "require_toolchain", lambda: None)
+    monkeypatch.setattr(swiftui_rework.simulator, "resolve_udid", lambda c: "UDID")
+
+    def claim(db: Any, job_id: Any, allowed: Any, state: JobState) -> bool:
+        seen["claims"] += 1
+        if job.state not in allowed:
+            return False
+        job.state = state
+        return True
+
+    monkeypatch.setattr(swiftui_rework, "claim_job", claim)
+
+    def inputs(db: Any, j: Job, s: Any, paths: RunPaths) -> None:
+        paths.app_spec_json.write_text(json.dumps(FULL))
+
+    monkeypatch.setattr(swiftui_rework, "hydrate_inputs", inputs)
+    monkeypatch.setattr(
+        swiftui_rework.swiftui_gen, "scope_to", lambda p, ids: seen.update(scope=list(ids))
+    )
+    monkeypatch.setattr(swiftui_rework, "hydrate_sources", lambda s, j, d: None)
+    monkeypatch.setattr(
+        swiftui_rework.swiftui_gen, "extend", lambda p, ids, spec, **k: seen["extended"].append(ids)
+    )
+    monkeypatch.setattr(
+        swiftui_rework.swiftui_gen, "rework", lambda p, text, **k: seen["rounds"].append(text)
+    )
+    monkeypatch.setattr(swiftui_rework, "job_locale", lambda j, p: "en-US")
+    monkeypatch.setattr(
+        swiftui_rework.compliance, "verify_ios", lambda *a, **k: {"compliance_score": 0.9}
+    )
+    monkeypatch.setattr(
+        swiftui_rework, "queue_delivery", lambda db, j: seen["queued"].append(j) or object()
+    )
+    return seen
+
+
+@pytest.mark.parametrize("state", [JobState.CODEGEN, JobState.DELIVERY, JobState.CANCELLED])
+def test_round_refuses_running_or_cancelled_jobs(
+    state: JobState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job, storage = _job(state)
+    seen = _wire(monkeypatch, job, storage, _Session(job))
+    assert "cannot be reworked" in swiftui_rework.rework_swiftui.run(str(job.id), "fix it")
+    assert job.state == state and seen["claims"] == 0
+
+
+def test_round_refuses_pending_scope_and_inflight_delivery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    meta = {"scope_status": "proposed"}
-    job = Job(id=uuid.uuid4(), state=JobState.NEEDS_INPUT, source_app_metadata=meta)
-    storage = _Storage({swiftui_tasks.sources_key(str(job.id)): b"zip"})
-    monkeypatch.setattr(swiftui_tasks, "get_sessionmaker", lambda: lambda: _Session(job))
-    monkeypatch.setattr(swiftui_tasks, "S3ArtifactStorage", lambda: storage)
-    assert "cannot be reworked" in swiftui_tasks.rework_swiftui.run(str(job.id), "fix it")
-    assert job.state == JobState.NEEDS_INPUT
+    job, storage = _job(JobState.NEEDS_INPUT, scope_status="proposed")
+    _wire(monkeypatch, job, storage, _Session(job))
+    assert "awaits approval" in swiftui_rework.rework_swiftui.run(str(job.id), "fix it")
 
-
-def test_successful_round_bumps_the_version_and_queues_delivery(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    job = Job(id=uuid.uuid4(), state=JobState.DONE, source_app_metadata={}, result_version=2)
-    storage = _Storage({swiftui_tasks.sources_key(str(job.id)): b"zip"})
+    job, storage = _job(JobState.DONE)
     session = _Session(job)
-    monkeypatch.setattr(swiftui_tasks, "get_sessionmaker", lambda: lambda: session)
-    monkeypatch.setattr(swiftui_tasks, "S3ArtifactStorage", lambda: storage)
-    monkeypatch.setattr(swiftui_tasks.simulator, "require_toolchain", lambda: None)
+    session.active = XcodeBuild(job_id=job.id, status="archiving")
+    seen = _wire(monkeypatch, job, storage, session)
+    assert "delivery is in flight" in swiftui_rework.rework_swiftui.run(str(job.id), "fix it")
+    assert job.state == JobState.DONE and seen["claims"] == 0
 
-    def inputs(db: Any, j: Job, s: Any, p: RunPaths) -> None:
-        p.app_spec_json.write_text(json.dumps(_spec_three_screens()))
 
-    monkeypatch.setattr(swiftui_tasks, "hydrate_inputs", inputs)
-    monkeypatch.setattr(swiftui_tasks, "_scope_ids", lambda *a: ["0000", "0001"])
-    monkeypatch.setattr(swiftui_tasks.swiftui_gen, "scope_to", lambda p, ids: None)
-    monkeypatch.setattr(swiftui_tasks, "hydrate_sources", lambda s, j, d: None)
-    rounds: list[str] = []
-    monkeypatch.setattr(
-        swiftui_tasks.swiftui_gen, "rework", lambda p, text, **k: rounds.append(text)
+def test_off_mac_round_leaves_the_job_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    job, storage = _job()
+    seen = _wire(monkeypatch, job, storage, _Session(job))
+
+    def missing() -> None:
+        raise swiftui_rework.simulator.SimulatorUnavailable("needs a Mac worker")
+
+    monkeypatch.setattr(swiftui_rework.simulator, "require_toolchain", missing)
+    assert "Mac worker" in swiftui_rework.rework_swiftui.run(str(job.id), "fix it")
+    assert job.state == JobState.DONE and seen["claims"] == 0 and seen["queued"] == []
+
+
+def test_a_lost_claim_runs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    job, storage = _job()
+    seen = _wire(monkeypatch, job, storage, _Session(job))
+    monkeypatch.setattr(swiftui_rework, "claim_job", lambda *a: False)
+    assert "another round" in swiftui_rework.rework_swiftui.run(str(job.id), "fix it")
+    assert seen["rounds"] == [] and seen["queued"] == []
+
+
+def test_failed_round_restores_the_previous_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    job, storage = _job(JobState.NEEDS_INPUT)
+    session = _Session(job)
+    seen = _wire(monkeypatch, job, storage, session)
+
+    def boom(*a: Any, **k: Any) -> None:
+        raise RuntimeError("rework round left a non-compiling app")
+
+    monkeypatch.setattr(swiftui_rework.swiftui_gen, "rework", boom)
+    assert "rework failed" in swiftui_rework.rework_swiftui.run(str(job.id), "fix it")
+    stage = next(o for o in session.added if isinstance(o, StageTimeline))
+    assert job.state == JobState.NEEDS_INPUT and session.rolled_back
+    assert "non-compiling" in (stage.error or "") and seen["queued"] == []
+    assert job.result_version == 2
+
+
+def test_extension_is_recorded_and_survives_the_next_round(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job, storage = _job()
+    gen = GenerationResult(job_id=job.id, sources_key="jobs/x/sources/xcode_app.zip")
+    gen.compliance_score = 0.85
+    session = _Session(job, gen)
+    seen = _wire(monkeypatch, job, storage, session)
+    swiftui_tasks.save_built_scope(storage, str(job.id), ["0000", "0001"])  # type: ignore[arg-type]
+
+    out = swiftui_rework.rework_swiftui.run(str(job.id), "", ["0002", "0002", "9999"])
+
+    assert out.endswith("(v3)") and seen["extended"] == [["0002"]]
+    recorded = json.loads(storage.objects[swiftui_tasks.built_scope_key(str(job.id))])
+    assert recorded == {"screens": ["0000", "0001", "0002"]}
+    assert gen.sources_key == f"jobs/{job.id}/sources/v3/xcode_app.zip"
+    assert gen.sources_key in storage.objects
+    assert gen.selftest_report["versions"] == [
+        {"version": 2, "sources_key": "jobs/x/sources/xcode_app.zip", "compliance_score": 0.85}
+    ]
+    assert job.state == JobState.DONE and seen["queued"] == [job]
+
+    swiftui_rework.rework_swiftui.run(str(job.id), "bigger buttons")
+    assert seen["scope"] == ["0000", "0001", "0002"] and seen["rounds"] == ["bigger buttons"]
+    assert job.result_version == 4 and len(gen.selftest_report["versions"]) == 2
+
+
+def test_extension_with_nothing_new_is_a_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
+    job, storage = _job()
+    seen = _wire(monkeypatch, job, storage, _Session(job))
+    swiftui_tasks.save_built_scope(storage, str(job.id), ["0000", "0001", "0002"])  # type: ignore[arg-type]
+    out = swiftui_rework.rework_swiftui.run(str(job.id), "", ["0001", "9999"])
+    assert "nothing to rework" in out and seen["claims"] == 0 and job.result_version == 2
+
+
+def test_scope_to_restores_added_screens_for_the_judge(paths: RunPaths) -> None:
+    crawl = {"screens": [{"id": "0000"}, {"id": "0001"}, {"id": "0002"}]}
+    paths.screens_json.write_text(json.dumps(crawl))
+    paths.app_spec_json.write_text(json.dumps(FULL))
+    swiftui_gen.scope_to(paths, ["0000", "0001"])
+    assert [s["id"] for s in json.loads(paths.screens_json.read_text())["screens"]] == [
+        "0000", "0001",
+    ]  # fmt: skip
+    paths.app_spec_json.write_text(json.dumps(FULL))
+    swiftui_gen.scope_to(paths, ["0000", "0001", "0002"])
+    assert len(json.loads(paths.screens_json.read_text())["screens"]) == 3
+
+
+def test_effective_scope_prefers_the_recorded_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    job, storage = _job()
+    monkeypatch.setattr(swiftui_tasks, "scope_ids", lambda *a: ["0000"])
+    settings = Settings()
+    assert swiftui_tasks.effective_scope_ids(job, storage, FULL, settings) == ["0000"]  # type: ignore[arg-type]
+    storage.put(swiftui_tasks.built_scope_key(str(job.id)), b"{broken")
+    assert swiftui_tasks.effective_scope_ids(job, storage, FULL, settings) == ["0000"]  # type: ignore[arg-type]
+    swiftui_tasks.save_built_scope(storage, str(job.id), ["0001", "gone"])  # type: ignore[arg-type]
+    assert swiftui_tasks.effective_scope_ids(job, storage, FULL, settings) == ["0001"]  # type: ignore[arg-type]
+
+
+def _post(
+    monkeypatch: pytest.MonkeyPatch, session: _Session, storage: _Storage, *, sources: str
+) -> tuple[int, list[Any]]:
+    from iosforge.admin import routes_jobs
+    from iosforge.admin.session import SessionData
+
+    sent: list[Any] = []
+    monkeypatch.setattr(swiftui_rework.rework_swiftui, "apply_async", lambda **k: sent.append(k))
+    session.gen = GenerationResult(job_id=session.job.id, sources_key=sources)
+    user = SessionData(user_id="u", username="op", csrf_token="t")
+    response = routes_jobs.jobs_extend_scope(
+        None,
+        session.job.id,
+        "t",
+        "0002, 0003",
+        user,
+        session,
+        storage,  # type: ignore[arg-type]
     )
-    monkeypatch.setattr(swiftui_tasks, "_job_locale", lambda j, p: "en-US")
-    monkeypatch.setattr(
-        swiftui_tasks.compliance, "verify_ios", lambda *a, **k: {"compliance_score": 0.9}
-    )
-    monkeypatch.setattr(swiftui_tasks, "store_sources", lambda s, j, d: "jobs/x/sources/z.zip")
-    queued: list[Job] = []
-    monkeypatch.setattr(swiftui_tasks, "queue_delivery", lambda db, j: queued.append(j))
+    return response.status_code, sent
 
-    assert swiftui_tasks.rework_swiftui.run(str(job.id), "bigger buttons").endswith("(v3)")
-    assert rounds == ["bigger buttons"] and job.state == JobState.DONE and queued == [job]
+
+def test_extend_route_queues_on_the_mac_queue_and_guards(monkeypatch: pytest.MonkeyPatch) -> None:
+    job, storage = _job()
+    session = _Session(job)
+    status, sent = _post(monkeypatch, session, storage, sources="jobs/x/sources/v2/xcode_app.zip")
+    assert status == 303
+    assert sent == [{"args": [str(job.id), "", ["0002", "0003"]], "queue": "xcode"}]
+
+    job.state = JobState.CODEGEN
+    assert _post(monkeypatch, session, storage, sources="jobs/x/sources/xcode_app.zip") == (409, [])
+    job.state = JobState.DONE
+    session.active = XcodeBuild(job_id=job.id, status="queued")
+    assert _post(monkeypatch, session, storage, sources="jobs/x/sources/xcode_app.zip") == (409, [])
+
+
+def test_extend_route_rejects_bad_csrf(monkeypatch: pytest.MonkeyPatch) -> None:
+    from iosforge.admin import routes_jobs
+    from iosforge.admin.session import SessionData
+
+    job, storage = _job()
+    user = SessionData(user_id="u", username="op", csrf_token="t")
+    response = routes_jobs.jobs_extend_scope(
+        None,
+        job.id,
+        "forged",
+        "0002",
+        user,
+        _Session(job),
+        storage,  # type: ignore[arg-type]
+    )
+    assert response.status_code == 400

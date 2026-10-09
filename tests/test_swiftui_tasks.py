@@ -17,12 +17,9 @@ from iosforge.common.types import JobState, Stage
 from iosforge.db.models import Job, StageTimeline, XcodeBuild
 from iosforge.mvp import ios_delivery, swiftui_gen
 from iosforge.worker import swiftui_tasks
+from tests.test_feasibility import _spec_three_screens
 
-SPEC: dict[str, Any] = {
-    "app_name": "Demo",
-    "screens": [{"id": "0011", "name": "Home", "route": "/"}],
-    "navigation": {"type": "stack", "map": []},
-}
+SPEC: dict[str, Any] = _spec_three_screens()
 
 
 class _Storage:
@@ -236,3 +233,20 @@ def test_delivery_route_needs_sources_then_queues(monkeypatch: pytest.MonkeyPatc
     storage.put(swiftui_tasks.sources_key(str(job.id)), b"zip")
     status, queued = _post(job, storage, monkeypatch)
     assert status == 303 and queued == [job]
+
+
+def test_delivery_archives_only_the_built_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = ios_delivery.DeliveryResult("unsigned", False, "1.0", "1")
+    job, session, storage = _wire(monkeypatch, tmp_path, result)
+    swiftui_tasks.save_built_scope(storage, str(job.id), ["0000", "0001"])  # type: ignore[arg-type]
+    seen: list[str] = []
+
+    def deliver(app_dir: Path, out_dir: Path, **kw: Any) -> ios_delivery.DeliveryResult:
+        seen.append((app_dir / "App/Navigation/ScreenID.swift").read_text())
+        return result
+
+    monkeypatch.setattr(swiftui_tasks.ios_delivery, "deliver", deliver)
+    swiftui_tasks.run_xcode_delivery.run(str(job.id))
+    assert '"0001"' in seen[0] and '"0002"' not in seen[0]

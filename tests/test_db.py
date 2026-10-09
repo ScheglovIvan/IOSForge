@@ -294,3 +294,22 @@ def test_audit_log_roundtrip(schema_engine: tuple[Engine, str]) -> None:
         assert row.actor == "admin"
         assert row.object_ref["type"] == "prompt_set"
         assert row.created_at.tzinfo is not None
+
+
+def test_claim_job_has_exactly_one_winner(schema_engine: tuple[Engine, str]) -> None:
+    """Two rework rounds racing for one job: only the first conditional update wins."""
+    from iosforge.worker.swiftui_tasks import claim_job
+
+    engine, _ = schema_engine
+    with Session(engine) as session:
+        job = Job(source_app_ref="ref", state=JobState.DONE, emulator_provider="firebase")
+        session.add(job)
+        session.commit()
+        job_id = job.id
+    allowed = (JobState.DONE, JobState.FAILED, JobState.NEEDS_INPUT)
+    with Session(engine) as first, Session(engine) as second:
+        assert claim_job(first, job_id, allowed, JobState.CODEGEN)
+        assert not claim_job(second, job_id, allowed, JobState.CODEGEN)
+    with Session(engine) as session:
+        loaded = session.get(Job, job_id)
+        assert loaded is not None and loaded.state is JobState.CODEGEN

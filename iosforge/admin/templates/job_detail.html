@@ -619,10 +619,19 @@
     <section class="tab-panel panel-rework" role="tabpanel" aria-label="Rework">
       <div class="card">
         <h3>Rework <span class="muted" style="font-weight:400;">— fix bugs / apply changes</span></h3>
+        {% set swiftui = gen and gen.sources_key and gen.sources_key.endswith('xcode_app.zip') %}
+        {% if swiftui %}
+        <p class="hint">Version {{ job.result_version }}. Describe the bugs or the changes — the native
+          app is edited in place on the Mac worker, judged again and re-archived as a new version.
+          Runs only when the pipeline is idle and no native build is in flight.</p>
+        {% set busy = job.state.value not in ['done', 'failed', 'needs_input']
+          or (xcode_build and xcode_build.status in ['queued', 'archiving']) %}
+        {% else %}
         <p class="hint">Version {{ job.result_version }}. Describe the bugs or paste an updated spec —
           the existing app is edited in place, re-pushed to the same repo and rebuilt. Runs only when
           the pipeline is idle.</p>
         {% set busy = job.state.value not in ['done', 'failed', 'cancelled'] %}
+        {% endif %}
         <form method="post" action="/jobs/{{ job.id }}/rework">
           <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
           <textarea name="instructions" rows="5"
@@ -633,7 +642,7 @@
             {% if busy %}<span class="hint">Pipeline is busy…</span>{% endif %}
           </div>
         </form>
-        {% if gen and gen.sources_key and gen.sources_key.endswith('xcode_app.zip') %}
+        {% if swiftui %}
         <form method="post" action="/jobs/{{ job.id }}/extend-scope" style="margin-top:16px;">
           <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
           <label class="hint">Extend the scope beyond the MVP — screen ids to add (from the full app spec):</label>

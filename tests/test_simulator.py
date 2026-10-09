@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -125,3 +126,25 @@ def test_pin_environment_and_render_screen_commands(
 
 def test_minimal_screen_with_some_content_is_not_blank(tmp_path: Path) -> None:
     assert not simulator.near_uniform(_frame(tmp_path / "minimal.png", boxes=1))
+
+
+def test_resolve_udid_prefers_configured_then_a_booted_iphone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert simulator.resolve_udid("CONF") == "CONF"
+    monkeypatch.setattr(xcode, "toolchain_available", lambda: True)
+    listing = {
+        "devices": {
+            "com.apple.CoreSimulator.SimRuntime.watchOS-11": [{"name": "Watch", "udid": "W"}],
+            "com.apple.CoreSimulator.SimRuntime.iOS-18": [
+                {"name": "iPad Air", "udid": "P", "state": "Booted"},
+                {"name": "iPhone 15", "udid": "A", "state": "Shutdown"},
+                {"name": "iPhone 16", "udid": "B", "state": "Booted"},
+            ],
+        }
+    }
+    monkeypatch.setattr(xcode, "simctl", lambda *a, **k: json.dumps(listing))
+    assert simulator.resolve_udid("") == "B"
+    monkeypatch.setattr(xcode, "simctl", lambda *a, **k: json.dumps({"devices": {}}))
+    with pytest.raises(simulator.SimulatorUnavailable, match="IOS_SIMULATOR_UDID"):
+        simulator.resolve_udid("")

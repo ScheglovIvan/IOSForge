@@ -220,7 +220,11 @@ def make_celery_app(
         "iosforge",
         broker=broker,
         backend=backend,
-        include=["iosforge.worker.run_job", "iosforge.worker.swiftui_tasks"],
+        include=[
+            "iosforge.worker.run_job",
+            "iosforge.worker.swiftui_tasks",
+            "iosforge.worker.swiftui_rework",
+        ],
     )
     app.conf.update(
         task_default_queue="discovery",

@@ -684,7 +684,8 @@ def extend(
     the new screens in sandboxes and runs the compile gate. Unknown ids are ignored.
     """
     current = {
-        str(s.get("id")) for s in json.loads(paths.app_spec_json.read_text()).get("screens", [])
+        str(s.get("id"))
+        for s in json.loads(paths.app_spec_json.read_text(encoding="utf-8")).get("screens", [])
     }
     known = {str(s.get("id")) for s in full_spec.get("screens", []) if isinstance(s, dict)}
     added = [sid for sid in screen_ids if sid in known and sid not in current]
@@ -766,10 +767,10 @@ def scope_to(paths: RunPaths, screen_ids: list[str]) -> None:
     if not full_spec.exists() and paths.app_spec_json.is_file():
         shutil.copy2(paths.app_spec_json, full_spec)
     if paths.screens_json.is_file():
-        crawl = json.loads(paths.screens_json.read_text(encoding="utf-8"))
         full = paths.run_dir / "screens_full.json"
         if not full.exists():
-            full.write_text(json.dumps(crawl, ensure_ascii=False), encoding="utf-8")
+            shutil.copy2(paths.screens_json, full)
+        crawl = json.loads(full.read_text(encoding="utf-8"))
         if isinstance(crawl, dict):
             crawl["screens"] = [
                 s for s in crawl.get("screens", []) if str(s.get("id")) in set(screen_ids)
