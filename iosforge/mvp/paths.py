@@ -20,6 +20,9 @@ class RunPaths:
     (compliance/refinement) artifacts: the built Flutter APK, the deep-link
     render of each generated screen, the compliance report and the corrective
     task list.
+
+    ``xcode_app`` is the SwiftUI codegen output (XcodeGen project), the native
+    successor of ``flutter_app`` during the SwiftUI pivot.
     """
 
     run_dir: Path
@@ -41,6 +44,7 @@ class RunPaths:
     screen_labels_json: Path
     claude_ws: Path
     flutter_app: Path
+    xcode_app: Path
     app_spec_json: Path
     spec_md: Path
     handoff_dir: Path
@@ -78,6 +82,7 @@ class RunPaths:
             screen_labels_json=run_dir / "screen_labels.json",
             claude_ws=run_dir / "claude_ws",
             flutter_app=run_dir / "flutter_app",
+            xcode_app=run_dir / "xcode_app",
             app_spec_json=run_dir / "app_spec.json",
             spec_md=run_dir / "SPEC.md",
             handoff_dir=run_dir / "handoff",
