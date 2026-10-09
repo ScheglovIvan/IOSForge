@@ -221,7 +221,11 @@ REQUIRED; use [] / {} / "" when a section does not apply, never omit a key):
     "dark_mode": bool,
     "ios_adaptation": [str]
   },
-  "navigation": {"type": str, "map": [ {"from": str, "to": str, "via": str} ], "deep_links": [str]},
+  "navigation": {"type": str, "map": [ {"from": str, "to": str, "via": str} ], "deep_links": [str],
+    "tabs": [ {"screen_id": str, "title": str} ]  // ONLY if the original has a tab bar; else omit
+  },                                    // tabs: ordered left->right as on screen; screen_id =
+                                        // the screens[].id that is the ROOT of that tab; title =
+                                        // the tab label verbatim as in the original (no paraphrase)
   "content": {
     "data_model": [ {"entity": str, "fields": [str], "relations": [str]} ],
     "content_inventory": [str],         // sticker packs / presets / filters / templates / sounds

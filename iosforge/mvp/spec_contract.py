@@ -6,9 +6,10 @@ Senior/enterprise hardening of Stage B (see ``docs/app-spec-v2.md`` and the
 * a machine-checkable JSON Schema (Draft 2020-12) — typed, enum-constrained,
   with required sections, so an incomplete or malformed spec never reaches
   codegen;
-* cross-reference integrity — navigation / requirements may only point at
-  screen ids that exist, mirroring the acyclic check already done for
-  ``tasks.json``;
+* cross-reference integrity — navigation (``navigates_to``, ``navigation.map``,
+  the optional ordered ``navigation.tabs`` roots) / requirements may only point
+  at screen ids that exist, with no duplicate tab roots, mirroring the acyclic
+  check already done for ``tasks.json``;
 * screen-coverage check against the crawl, so every crawled screen is accounted
   for;
 * provenance + ``spec_version`` for reproducibility and audit.
@@ -151,6 +152,14 @@ APP_SPEC_SCHEMA: dict[str, Any] = {
                         "properties": {"from": _STR, "to": _STR, "via": _STR},
                     },
                 },
+                "tabs": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["screen_id", "title"],
+                        "properties": {"screen_id": _STR, "title": _STR},
+                    },
+                },
             },
         },
         "content": {"type": "object"},
@@ -235,6 +244,16 @@ def _cross_reference_errors(spec: dict[str, Any]) -> list[str]:
                 value = edge.get(side)
                 if value and value not in ids:
                     errors.append(f"navigation.map.{side} references unknown screen {value!r}")
+        seen_tabs: set[str] = set()
+        for tab in navigation.get("tabs", []):
+            if not isinstance(tab, dict):
+                continue
+            tab_id = tab.get("screen_id")
+            if tab_id not in ids:
+                errors.append(f"navigation.tabs references unknown screen {tab_id!r}")
+            if tab_id in seen_tabs:
+                errors.append(f"navigation.tabs lists screen {tab_id!r} more than once")
+            seen_tabs.add(str(tab_id))
     for req in spec.get("requirements", []):
         if not isinstance(req, dict):
             continue

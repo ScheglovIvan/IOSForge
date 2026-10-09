@@ -117,6 +117,11 @@ def test_analyze_prompt_references_archive_context() -> None:
         assert token in ANALYZE_PROMPT
 
 
+def test_analyze_prompt_describes_navigation_tabs() -> None:
+    for token in ('"tabs"', '"screen_id"', "left->right", "verbatim"):
+        assert token in ANALYZE_PROMPT
+
+
 def test_analyze_workspace_stages_monetization_channels(tmp_path: Path) -> None:
     rp = RunPaths.create(tmp_path)
     _seed_archive(rp)

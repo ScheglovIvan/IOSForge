@@ -246,7 +246,7 @@ def apply_scope(paths: RunPaths, scope: ScopeDecision | None = None) -> None:
     :func:`load_scope`). ``scope_mode == "full"`` and a missing/empty scope are
     no-ops. Otherwise the spec keeps only ``include`` screens and drops the
     dangling references they leave behind (``navigates_to``, ``navigation.map``
-    edges, ``requirements[].screens``, ``screen_count``) — mirroring
+    edges, ``navigation.tabs`` roots, ``requirements[].screens``, ``screen_count``) — mirroring
     :func:`iosforge.mvp.screen_filter.filter_screens` — then re-validates against
     the App Spec v3 contract.
     """
@@ -277,6 +277,12 @@ def apply_scope(paths: RunPaths, scope: ScopeDecision | None = None) -> None:
             edge
             for edge in navigation["map"]
             if isinstance(edge, dict) and _edge_ok(edge, included)
+        ]
+    if isinstance(navigation, dict) and isinstance(navigation.get("tabs"), list):
+        navigation["tabs"] = [
+            tab
+            for tab in navigation["tabs"]
+            if isinstance(tab, dict) and str(tab.get("screen_id")) in included
         ]
 
     for req in spec.get("requirements", []):

@@ -149,6 +149,28 @@ def test_apply_scope_drops_navigation_edges_to_dropped(tmp_path: Path) -> None:
     assert edges == [{"from": "0000", "to": "0001", "via": "Add"}]
 
 
+def test_apply_scope_drops_tabs_of_dropped_screens(tmp_path: Path) -> None:
+    paths = RunPaths.create(tmp_path)
+    spec = _spec_three_screens()
+    spec["navigation"]["tabs"] = [
+        {"screen_id": "0000", "title": "Home"},
+        {"screen_id": "0002", "title": "Intro"},
+        {"screen_id": "0001", "title": "Add"},
+    ]
+    _write_spec(paths, spec)
+    feasibility.apply_scope(paths, _scope())
+    tabs = _read_spec(paths)["navigation"]["tabs"]
+    assert tabs == [{"screen_id": "0000", "title": "Home"}, {"screen_id": "0001", "title": "Add"}]
+    spec_contract.validate_spec(_read_spec(paths))
+
+
+def test_apply_scope_leaves_tabless_spec_without_tabs(tmp_path: Path) -> None:
+    paths = RunPaths.create(tmp_path)
+    _write_spec(paths, _spec_three_screens())
+    feasibility.apply_scope(paths, _scope())
+    assert "tabs" not in _read_spec(paths)["navigation"]
+
+
 def test_apply_scope_cleans_requirement_screens(tmp_path: Path) -> None:
     paths = RunPaths.create(tmp_path)
     _write_spec(paths, _spec_three_screens())

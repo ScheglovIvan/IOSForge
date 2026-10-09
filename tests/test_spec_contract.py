@@ -171,3 +171,44 @@ def test_rejects_bad_ad_format() -> None:
     bad["monetization"] = {"model": "ads", "ad_placements": [{"format": "popup"}]}
     with pytest.raises(SpecValidationError, match="schema violation"):
         validate_spec(bad)
+
+
+def _with_tabs(tabs: list[dict[str, Any]]) -> dict[str, Any]:
+    spec = _valid_spec()
+    spec["navigation"]["type"] = "tab_bar_with_stack"
+    spec["navigation"]["tabs"] = tabs
+    return spec
+
+
+def test_navigation_tabs_validate() -> None:
+    spec = _with_tabs(
+        [{"screen_id": "0000", "title": "Home"}, {"screen_id": "0001", "title": "Add"}]
+    )
+    tabs = validate_spec(spec)["navigation"]["tabs"]
+    assert [t["screen_id"] for t in tabs] == ["0000", "0001"]
+
+
+def test_spec_without_navigation_tabs_still_validates() -> None:
+    spec = _valid_spec()
+    assert "tabs" not in spec["navigation"]
+    validate_spec(spec)
+
+
+def test_rejects_navigation_tab_to_unknown_screen() -> None:
+    bad = _with_tabs([{"screen_id": "9999", "title": "Ghost"}])
+    with pytest.raises(SpecValidationError, match="navigation.tabs references unknown screen"):
+        validate_spec(bad)
+
+
+def test_rejects_duplicate_navigation_tab() -> None:
+    bad = _with_tabs(
+        [{"screen_id": "0000", "title": "Home"}, {"screen_id": "0000", "title": "Again"}]
+    )
+    with pytest.raises(SpecValidationError, match="more than once"):
+        validate_spec(bad)
+
+
+def test_rejects_navigation_tab_missing_title() -> None:
+    bad = _with_tabs([{"screen_id": "0000"}])
+    with pytest.raises(SpecValidationError, match="schema violation"):
+        validate_spec(bad)
