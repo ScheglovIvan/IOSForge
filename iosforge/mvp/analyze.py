@@ -60,7 +60,7 @@ ANALYZE_TOOLS = "WebSearch WebFetch Read Write Edit Glob Grep"
 ANALYZE_PROMPT = """\
 You are a senior product analyst reverse-engineering an existing mobile app from
 its crawled screens to produce a COMPLETE, build-ready specification. The target
-is a native-feeling iOS app; it is tested as a Flutter build. The spec must be
+is a native iOS app, built in SwiftUI. The spec must be
 universal — it serves games, photo editors, social, utilities, content-
 subscription, e-commerce, productivity and other app types alike.
 
@@ -293,48 +293,6 @@ Rules:
 Output ONLY the file `app_spec.json`. Do not generate any app code or other files.
 """
 
-DECOMPOSE_PROMPT = """\
-You are turning an app specification into an ordered build plan for a Flutter
-generator.
-
-Input in this directory:
-- `app_spec.json` — the App Spec v3 (screens, requirements, design_tokens,
-  navigation, content, monetization, backend, ...).
-
-Task:
-Write a single file `tasks.json` in this directory with EXACTLY this schema:
-
-{
-  "tasks": [
-    {
-      "id": str,
-      "type": "scaffold" | "component_library" | "screen" | "flow" | "state" | "audio" | "polish",
-      "title": str,
-      "screens": [str],
-      "deps": [str]
-    }
-  ]
-}
-
-Rules:
-1. The FIRST task MUST be a single "scaffold" task (Flutter project + theme +
-   routing) with `"deps": []`.
-2. The SECOND task MUST be a single "component_library" task (shared reusable UI
-   widgets / design system that every screen composes from) depending ONLY on the
-   scaffold task.
-3. Every "screen" task MUST depend on the component_library task (which itself
-   depends on the scaffold) — screens are built ON TOP of the frozen design system.
-4. `deps` may only reference ids of tasks defined earlier in the list; the
-   dependency graph MUST be acyclic.
-5. Every task MUST have a unique non-empty `id`, a `type` from the set above,
-   and a `title`.
-6. If `content.audio` is non-empty, add exactly one `"audio"` task ("Audio wiring:
-   bundle sounds + play on triggers", depends on the scaffold and the screens that
-   trigger sound) — the app's sounds are a core feature and must be wired.
-
-Output ONLY the file `tasks.json`. Do not generate any app code.
-"""
-
 
 def _json_len(path: Path) -> int:
     try:
@@ -351,7 +309,7 @@ def stage_archive_context(paths: RunPaths, ws: Path, *, include_bytes: bool) -> 
     colors, ``asset_ref`` media joins), ``fonts.json`` and ``media.json`` so the
     generator can work from ground truth instead of eyeballing screenshots. When
     ``include_bytes`` is set, also copies the font ``.ttf`` and ``media/`` byte
-    files so codegen can embed them as Flutter assets; analysis only needs the
+    files so codegen can embed them as app resources; analysis only needs the
     metadata. A no-op for legacy (v1.0 / apk) runs where these do not exist.
     """
     summary = {"source": 0, "fonts": 0, "media": 0}
@@ -396,13 +354,6 @@ def _prepare_analysis_workspace(paths: RunPaths, prompt: str = ANALYZE_PROMPT) -
             shutil.copy2(extra, paths.claude_ws / extra.name)
     stage_archive_context(paths, paths.claude_ws, include_bytes=False)
     (paths.claude_ws / "ANALYZE_PROMPT.md").write_text(prompt)
-
-
-def _prepare_decompose_workspace(paths: RunPaths) -> None:
-    """Stage app_spec.json and the decomposition prompt into claude_ws/."""
-    paths.claude_ws.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(paths.app_spec_json, paths.claude_ws / "app_spec.json")
-    (paths.claude_ws / "DECOMPOSE_PROMPT.md").write_text(DECOMPOSE_PROMPT)
 
 
 def _run_claude(prompt: str, workdir: Path, timeout: int, tools: str | None = None) -> None:
@@ -633,59 +584,3 @@ def topo_layers(tasks: list[dict[str, object]]) -> list[list[dict[str, object]]]
         resolved.update(ready)
         remaining = [tid for tid in remaining if tid not in resolved]
     return layers
-
-
-def topo_order(tasks: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Return tasks in dependency order (deps before dependents).
-
-    Deterministic flattening of :func:`topo_layers`. Raises RuntimeError if a task
-    references an unknown dependency id or if the graph contains a cycle. Shared by
-    the tasks.json acyclic check and the task runner.
-    """
-    return [task for layer in topo_layers(tasks) for task in layer]
-
-
-def _validate_tasks(payload: object) -> list[dict[str, object]]:
-    """Validate the tasks.json structure and return the task list."""
-    if not isinstance(payload, dict):
-        raise RuntimeError("tasks.json must be a JSON object")
-    tasks = payload.get("tasks")
-    if not isinstance(tasks, list) or not tasks:
-        raise RuntimeError("tasks.json has an empty or missing 'tasks' array")
-    seen: set[str] = set()
-    for t in tasks:
-        if not isinstance(t, dict):
-            raise RuntimeError("every task must be a JSON object")
-        for field in ("id", "type", "title"):
-            value = t.get(field)
-            if not isinstance(value, str) or not value:
-                raise RuntimeError(f"task is missing a non-empty {field!r}")
-        tid = str(t["id"])
-        if tid in seen:
-            raise RuntimeError(f"duplicate task id {tid!r}")
-        seen.add(tid)
-    topo_order(tasks)
-    return tasks
-
-
-def decompose(paths: RunPaths, timeout: int = 1800) -> Path:
-    """Stage C: turn app_spec.json into an acyclic tasks.json; return its path."""
-    bound = log.bind(stage="decompose", run_dir=str(paths.run_dir))
-    if not paths.app_spec_json.exists():
-        raise RuntimeError(f"app_spec.json missing; run analyze first: {paths.app_spec_json}")
-    _prepare_decompose_workspace(paths)
-    bound.info("decompose.invoking", workdir=str(paths.claude_ws))
-    _run_claude(DECOMPOSE_PROMPT, paths.claude_ws, timeout)
-
-    produced = paths.claude_ws / "tasks.json"
-    if not produced.exists():
-        raise RuntimeError("Claude did not produce tasks.json")
-    try:
-        payload = json.loads(produced.read_text())
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"tasks.json is not valid JSON: {exc}") from exc
-    tasks = _validate_tasks(payload)
-
-    shutil.move(str(produced), str(paths.tasks_json))
-    bound.info("decompose.done", tasks_json=str(paths.tasks_json), tasks=len(tasks))
-    return paths.tasks_json

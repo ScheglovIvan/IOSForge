@@ -12,7 +12,7 @@ MVP-вертикалью (`iosforge/mvp`). Internet-facing за HTTPS reverse-pr
 - **Отслеживание**: список Jobs, карточка (этап/таймлайн/статус/ошибки) с автообновлением
   (meta-refresh поллингом, пока Job не терминальный).
 - **Артефакты** по Job: галерея скриншотов, карта экранов (`screens.json`), ссылка на
-  сгенерированный `flutter_app.zip`. Доступ к объекту проверяет принадлежность префиксу `jobs/<id>/`.
+  сгенерированные исходники (`xcode_app.zip`; у legacy-джоб — `flutter_app.zip`). Доступ к объекту проверяет принадлежность префиксу `jobs/<id>/`.
 
 ## Безопасность (порт смотрит в интернет)
 - Пароли — **argon2** (`argon2-cffi`), только хеш в БД, плейнтекст не логируется.
@@ -24,11 +24,12 @@ MVP-вертикалью (`iosforge/mvp`). Internet-facing за HTTPS reverse-pr
 - APK хранится в MinIO (вне веб-рута), веб-слой его не исполняет.
 
 ## Воркер
-`iosforge/worker/run_job.py` — Celery-таска (`queue=codegen`, `concurrency=1`): скачивает APK из
-MinIO → гоняет MVP-вертикаль (эмулятор → обход → Claude Code) → пишет стадии в `StageTimeline`,
-скриншоты/`screens.json`/`flutter_app.zip` в MinIO, `WalkthroughResult`/`GenerationResult` в БД,
-переводит `Job` в DONE/FAILED. **Требует загруженный Android-эмулятор (AVD `mvp`) на хосте** —
-без запущенного воркера Job остаётся `QUEUED` (виден в списке).
+`iosforge/worker/run_job.py` — Celery-таска (`queue=codegen`, `concurrency=1`): принимает
+Frida-архив (legacy: APK + эмулятор), запускает анализ, пишет стадии в `StageTimeline`,
+скриншоты/`screens.json`/`app_spec.json` в MinIO и `WalkthroughResult` в БД, затем передаёт
+джобу scope-гейту или SwiftUI-сборке. SwiftUI-сборка, Vision Judge, архив/IPA и rework идут
+на Mac-воркере очереди `xcode` (`swiftui_build`, `swiftui_tasks`, `swiftui_rework`); без него
+джоба остаётся в CODEGEN. Без запущенного воркера `codegen` Job остаётся `QUEUED`.
 
 ## Настройки (env, см. `.env.example`)
 `ADMIN_SESSION_SECRET`, `ADMIN_COOKIE_SECURE` (prod=true), `ADMIN_SESSION_TTL_S`,

@@ -9,20 +9,16 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class RunPaths:
-    """Layout of one MVP run: runs/<ts>/{screens/,screens.json,claude_ws/,flutter_app/}.
+    """Layout of one run: runs/<ts>/{screens/,screens.json,claude_ws/,xcode_app/}.
 
-    ``app_spec_json`` and ``tasks_json`` are the canonical outputs of the
-    analysis (Stage B) and decomposition (Stage C) steps that sit between the
-    crawl and codegen passes.
+    ``app_spec_json`` is the canonical output of the analysis (Stage B) that sits
+    between the capture and the SwiftUI codegen; ``xcode_app`` is the generated
+    XcodeGen project.
 
-    ``apk``, ``generated_screens_dir``, ``generated_screens_json``,
-    ``selftest_report_json`` and ``corrective_tasks_json`` are the Stage E
-    (compliance/refinement) artifacts: the built Flutter APK, the deep-link
-    render of each generated screen, the compliance report and the corrective
-    task list.
-
-    ``xcode_app`` is the SwiftUI codegen output (XcodeGen project), the native
-    successor of ``flutter_app`` during the SwiftUI pivot.
+    ``generated_screens_dir``, ``generated_screens_json``, ``selftest_report_json``
+    and ``corrective_tasks_json`` are the Vision-Judge artifacts: the Simulator
+    render of each generated screen, the compliance report and the corrective task
+    list.
     """
 
     run_dir: Path
@@ -43,7 +39,6 @@ class RunPaths:
     ad_analysis_json: Path
     screen_labels_json: Path
     claude_ws: Path
-    flutter_app: Path
     xcode_app: Path
     app_spec_json: Path
     spec_md: Path
@@ -86,7 +81,6 @@ class RunPaths:
             ad_analysis_json=run_dir / "ad_analysis.json",
             screen_labels_json=run_dir / "screen_labels.json",
             claude_ws=run_dir / "claude_ws",
-            flutter_app=run_dir / "flutter_app",
             xcode_app=run_dir / "xcode_app",
             app_spec_json=run_dir / "app_spec.json",
             spec_md=run_dir / "SPEC.md",

@@ -11,7 +11,7 @@ from urllib.parse import quote_plus
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from starlette.responses import PlainTextResponse, RedirectResponse, Response, StreamingResponse
+from starlette.responses import PlainTextResponse, RedirectResponse, Response
 from starlette.status import HTTP_303_SEE_OTHER
 
 from iosforge.admin import archive_validate, csrf, thumbs
@@ -143,7 +143,6 @@ def job_detail(
     if job is None:
         return Response("Not found", status_code=404)
     gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
-    can_ios_build = bool(gen and gen.codemagic and gen.codemagic.get("application_id"))
     scope_status = (job.source_app_metadata or {}).get("scope_status")
     from iosforge.worker.swiftui_tasks import latest_xcode_build
 
@@ -159,8 +158,7 @@ def job_detail(
             "codegen_tasks": _codegen_tasks(db, job_id),
             "gen": gen,
             "build": _latest_build(db, job_id),
-            "can_ios_build": can_ios_build or can_xcode_delivery,
-            "can_codemagic_build": can_ios_build,
+            "can_ios_build": can_xcode_delivery or _latest_build(db, job_id) is not None,
             "can_xcode_delivery": can_xcode_delivery,
             "xcode_build": xcode_build,
             "store_slides": _store_slides(job_id),
@@ -175,29 +173,6 @@ def job_detail(
             "scope": _load_scope(storage, job_id, scope_status),
         },
     )
-
-
-@router.post("/jobs/{job_id}/codemagic-build")
-def jobs_codemagic_build(
-    request: Request,
-    job_id: uuid.UUID,
-    csrf_token: str = Form(...),
-    user: SessionData = Depends(require_user),
-    db: Session = Depends(get_db),
-) -> Response:
-    if not csrf.verify(user.csrf_token, csrf_token):
-        return Response("Invalid request (CSRF).", status_code=400)
-    gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
-    if not (gen and gen.codemagic and gen.codemagic.get("application_id")):
-        return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
-    try:
-        from iosforge.worker.run_job import run_codemagic_build
-
-        run_codemagic_build.apply_async(args=[str(job_id)], queue="delivery")
-        log.info("jobs.codemagic_build_requested", job_id=str(job_id))
-    except Exception as exc:
-        log.error("jobs.codemagic_build_enqueue_failed", job_id=str(job_id), error=str(exc))
-    return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
 
 
 @router.post("/jobs/{job_id}/rework")
@@ -220,14 +195,8 @@ def jobs_rework(
 
     if gen.sources_key.endswith(SOURCES_NAME):
         return _enqueue_swiftui_round(db, storage, job_id, text, None)
-    try:
-        from iosforge.worker.run_job import rework_frontend
-
-        rework_frontend.apply_async(args=[str(job_id), text], queue="codegen")
-        log.info("jobs.rework_requested", job_id=str(job_id))
-    except Exception as exc:
-        log.error("jobs.rework_enqueue_failed", job_id=str(job_id), error=str(exc))
-    return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
+    log.info("jobs.rework_legacy_unsupported", job_id=str(job_id), sources=gen.sources_key)
+    return Response("Rework is not available for legacy Flutter jobs.", status_code=409)
 
 
 @router.post("/jobs/{job_id}/extend-scope")
@@ -286,12 +255,15 @@ def jobs_build_settings(
     app_name: str = Form(""),
     apphud_api_key: str = Form(""),
     tenjin_api_key: str = Form(""),
-    asc_api_key_name: str = Form(""),
     appstore_apple_id: str = Form(""),
     user: SessionData = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> Response:
-    """Save the build profile / bundle id / display name / SDK keys, then rebuild."""
+    """Save the build profile / bundle id / display name / SDK keys, then rebuild.
+
+    A job without a generated app is built; a SwiftUI app is re-archived (delivery
+    re-renders the contract with the new identity and keys, no model round needed).
+    """
     if not csrf.verify(user.csrf_token, csrf_token):
         return Response("Invalid request (CSRF).", status_code=400)
     job = db.get(Job, job_id)
@@ -300,7 +272,6 @@ def jobs_build_settings(
     profile = build_profile if build_profile in ("real", "store") else "test"
     bundle_id = (bundle_id or "").strip()
     app_name = (app_name or "").strip()
-    asc_api_key_name = (asc_api_key_name or "").strip()
     appstore_apple_id = (appstore_apple_id or "").strip()
     apphud_api_key = (apphud_api_key or "").strip()
     tenjin_api_key = (tenjin_api_key or "").strip()
@@ -315,10 +286,7 @@ def jobs_build_settings(
     # Tenjin iOS SDK key (32-char uppercase alphanumeric), also one per app.
     if tenjin_api_key and not re.fullmatch(r"[A-Za-z0-9]{16,64}", tenjin_api_key):
         return Response("Invalid Tenjin SDK key.", status_code=400)
-    # Signed store build: the App Store Connect API key NAME (as set in the CodeMagic
-    # team) + the app's numeric App Store id. Both needed for the signed workflow.
-    if asc_api_key_name and not re.fullmatch(r"[A-Za-z0-9 _\-]{1,64}", asc_api_key_name):
-        return Response("Invalid App Store Connect API key name.", status_code=400)
+    # The app's numeric App Store id (store listing, review submission).
     if appstore_apple_id and not re.fullmatch(r"[0-9]{5,15}", appstore_apple_id):
         return Response("Invalid App Store Apple ID (numbers only).", status_code=400)
 
@@ -329,21 +297,18 @@ def jobs_build_settings(
     meta["override_app_name"] = app_name
     meta["apphud_api_key"] = apphud_api_key
     meta["tenjin_api_key"] = tenjin_api_key
-    meta["asc_api_key_name"] = asc_api_key_name
     meta["appstore_apple_id"] = appstore_apple_id
     job.source_app_metadata = meta  # reassign so SQLAlchemy persists the JSONB change
     db.commit()
 
     gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
     try:
-        if gen is not None:
-            from iosforge.worker.run_job import rework_frontend
+        from iosforge.worker.swiftui_tasks import DELIVERABLE_STATES, SOURCES_NAME, queue_delivery
 
-            rework_frontend.apply_async(
-                args=[str(job_id), ""], kwargs={"augment": True}, queue="codegen"
-            )
-        else:
+        if gen is None:
             _enqueue_build(job_id)
+        elif gen.sources_key.endswith(SOURCES_NAME) and job.state in DELIVERABLE_STATES:
+            queue_delivery(db, job)
         log.info(
             "jobs.build_settings_saved",
             job_id=str(job_id),
@@ -675,8 +640,8 @@ def jobs_app_icon_delete(
 ) -> Response:
     """Discard one generated icon.
 
-    Refuses to remove the last one: an app with no icon builds with the Flutter
-    default, which is never what deleting a bad variant was meant to achieve.
+    Refuses to remove the last one: an app with no icon ships the scaffold's
+    placeholder icon, which is never what deleting a bad variant was meant to achieve.
     """
     if not csrf.verify(user.csrf_token, csrf_token):
         return Response("Invalid request (CSRF).", status_code=400)
@@ -874,25 +839,6 @@ def jobs_store_slide(
     return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
 
 
-@router.post("/jobs/{job_id}/verify-web")
-def jobs_verify_web(
-    request: Request,
-    job_id: uuid.UUID,
-    csrf_token: str = Form(...),
-    user: SessionData = Depends(require_user),
-    db: Session = Depends(get_db),
-) -> Response:
-    if not csrf.verify(user.csrf_token, csrf_token):
-        return Response("Invalid request (CSRF).", status_code=400)
-    job = db.get(Job, job_id)
-    gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
-    if job is None or gen is None or job.state not in {JobState.DONE, JobState.NEEDS_INPUT}:
-        return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
-    _enqueue_verify(job_id)
-    log.info("jobs.verify_web_requested", job_id=str(job_id))
-    return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
-
-
 @router.post("/jobs/{job_id}/scope")
 async def jobs_scope_approve(
     request: Request,
@@ -1032,37 +978,6 @@ def jobs_codemagic_logs(
     return PlainTextResponse(build.log_text or build.message or "(no logs yet)")
 
 
-@router.get("/jobs/{job_id}/codemagic-build/artifact")
-def jobs_codemagic_artifact(
-    job_id: uuid.UUID,
-    i: int,
-    user: SessionData = Depends(require_user),
-    db: Session = Depends(get_db),
-) -> Response:
-    from iosforge.common.config import get_settings
-    from iosforge.mvp import codemagic_build
-
-    build = _latest_build(db, job_id)
-    if build is None or i < 0 or i >= len(build.artifacts or []):
-        return Response("Artifact not found", status_code=404)
-    art = build.artifacts[i]
-    url = art.get("url")
-    if not url:
-        return Response("Artifact has no URL", status_code=404)
-    settings = get_settings()
-    upstream = codemagic_build.download_artifact(
-        settings, codemagic_build.resolve_token(settings), url
-    )
-    if upstream.status_code != 200:
-        return Response(f"CodeMagic returned {upstream.status_code}", status_code=502)
-    name = art.get("name") or f"artifact-{i}"
-    return StreamingResponse(
-        iter([upstream.content]),
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{name}"'},
-    )
-
-
 @router.post("/jobs/{job_id}/build")
 def jobs_build(
     request: Request,
@@ -1151,7 +1066,7 @@ def artifact_object(
         data = storage.get(key)
     except Exception:
         return Response("Not found", status_code=404)
-    filename = key.rsplit("/", 1)[-1]  # e.g. flutter_app.zip / 0000.png
+    filename = key.rsplit("/", 1)[-1]  # e.g. xcode_app.zip / 0000.png
 
     # A gallery tile shows a 1290x2796 slide at ~120px. Serving the original for
     # that pulled tens of megabytes per tab; `w` asks for a cached downscale
@@ -1228,20 +1143,11 @@ def _enqueue(job_id: uuid.UUID) -> None:
 
 def _enqueue_build(job_id: uuid.UUID) -> None:
     try:
-        from iosforge.worker.run_job import build_frontend
+        from iosforge.worker.swiftui_build import enqueue_build
 
-        build_frontend.apply_async(args=[str(job_id)], queue="codegen")
+        enqueue_build(str(job_id))
     except Exception as exc:  # broker down — surfaced in the UI, build can be retried
         log.error("jobs.build_enqueue_failed", job_id=str(job_id), error=str(exc))
-
-
-def _enqueue_verify(job_id: uuid.UUID) -> None:
-    try:
-        from iosforge.worker.run_job import reverify_web
-
-        reverify_web.apply_async(args=[str(job_id)], queue="codegen")
-    except Exception as exc:  # broker down — surfaced in the UI, verify can be retried
-        log.error("jobs.verify_web_enqueue_failed", job_id=str(job_id), error=str(exc))
 
 
 def _store_slides(job_id: uuid.UUID) -> list[str]:

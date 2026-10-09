@@ -1,35 +1,32 @@
-"""Celery worker: run the MVP vertical for an uploaded Job (SPEC §7 wiring).
+"""Celery worker: the pipeline stages of a Job up to the SwiftUI build (SPEC §7 wiring).
 
-Pulls the APK from MinIO, boots the emulator, crawls screens, generates a Flutter
-app, and writes stage timeline + artifacts back to the DB/MinIO. Reuses the
-phase-1 vertical in ``iosforge.mvp`` and the EPIC-2 infra (DB/Celery/MinIO).
-Requires a booted/bootable AVD on the worker host.
+``run_job`` ingests the App Store capture (Frida archive; the legacy APK path crawls
+an emulator), runs the analysis and either hands off to the scope gate or chains the
+SwiftUI build (:func:`iosforge.worker.swiftui_build.build_swiftui`, Mac ``xcode``
+queue). The store-side tasks (listing, slides, icon, legal pages, ASC metadata) live
+here too and work from the stored analysis, screenshots and generated sources.
 """
 
 from __future__ import annotations
 
-import datetime as dt
 import io
 import json
 import re
 import shutil
 import tempfile
 import uuid
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
-from iosforge.common.config import Settings, get_settings
+from iosforge.common.config import get_settings
 from iosforge.common.logging import get_logger
 from iosforge.common.queue import PipelineTask, celery_app
 from iosforge.common.types import JobState, Stage
 from iosforge.db.base import utcnow
 from iosforge.db.models import (
     ApkArtifact,
-    CodegenTask,
-    CodemagicBuild,
     DataArchiveArtifact,
     GenerationResult,
     Job,
@@ -41,7 +38,6 @@ from iosforge.storage.client import S3ArtifactStorage, build_key
 
 if TYPE_CHECKING:
     from iosforge.mvp.legal_pages import DataPractice
-    from iosforge.mvp.paths import RunPaths
 
 log = get_logger("worker.run_job")
 
@@ -59,142 +55,6 @@ def _finish_stage(db, row: StageTimeline) -> None:
     if row.started_at:
         row.duration_ms = int((row.finished_at - row.started_at).total_seconds() * 1000)
     db.commit()
-
-
-def _store_signing(job: Job, settings: Settings) -> Any:
-    """Signed App Store build inputs for a store-profile job, or None.
-
-    Returns a ``StoreSigning`` only when the job asks for a store build AND both the app's
-    numeric App Store id (per job) and an uploaded App Store Connect signing credential
-    (admin Signing settings page → secrets/) are present. The key itself reaches the build
-    as injected environment variables, so no name registered in the CodeMagic UI is needed.
-    Otherwise None → the unsigned sideload workflow is used.
-    """
-    from iosforge.mvp import asc_credentials
-    from iosforge.mvp.codemagic_integration import StoreSigning
-
-    meta = job.source_app_metadata or {}
-    if str(meta.get("build_profile") or "") != "store":
-        return None
-    apple_id = str(meta.get("appstore_apple_id") or "").strip()
-    if not apple_id or not asc_credentials.is_configured(settings, str(job.id)):
-        return None
-    key_name = str(
-        meta.get("asc_api_key_name") or settings.codemagic_asc_api_key_name or ""
-    ).strip()
-    return StoreSigning(asc_api_key_name=key_name, apple_id=apple_id)
-
-
-def _archive_and_upload_sources(paths: RunPaths, storage, job_id: str, tmp: Path) -> str:
-    """Zip ``paths.flutter_app`` and upload it as the canonical ``sources`` object.
-
-    Same archive+put pattern the codegen finalize uses; the key is deterministic per
-    job, so re-invoking after the VERIFY loop mutates ``flutter_app`` in place refreshes
-    the stored zip to match the corrected tree.
-    """
-    zip_base = tmp / "flutter_app"
-    shutil.make_archive(str(zip_base), "zip", str(paths.flutter_app))
-    sources_key = build_key(job_id=job_id, kind="sources", name="flutter_app.zip")
-    storage.put(sources_key, Path(f"{zip_base}.zip").read_bytes(), content_type="application/zip")
-    return sources_key
-
-
-def _structural_gap_count(report: dict[str, Any]) -> int:
-    structural = report.get("structural")
-    if not isinstance(structural, dict):
-        return 0
-    keys = ("missing_screens", "blank_screens", "dead_links", "missing_edges")
-    return sum(len(structural.get(key, [])) for key in keys)
-
-
-def _run_web_verify(
-    db,
-    job: Job,
-    paths: RunPaths,
-    settings: Settings,
-    storage,
-    job_id: str,
-    *,
-    hard_gate: bool,
-) -> tuple[dict[str, Any], bool]:
-    """Run the Stage VERIFY structural-web loop and apply the hard gate.
-
-    Emits a ``Stage.VERIFY``/``JobState.VERIFY`` timeline row, runs
-    ``compliance.refine_web_until_complete`` (structural audit + visual judge), uploads
-    the generated screenshots and structural report, then:
-    - on a clean pass (``stop_reason == "all_closed"``) finishes the stage;
-    - on exhaustion with gaps open AND ``hard_gate`` sets the row error and
-      ``Job.state = NEEDS_INPUT`` (a human decides ship vs rework);
-    - a build/render failure is non-fatal (recorded, stage finished, no gate).
-
-    Returns ``(report, gated)`` where ``gated`` tells the caller to skip DONE.
-    """
-    from iosforge.mvp import compliance
-
-    bound = log.bind(job_id=job_id, stage="verify")
-    stage_row = _start_stage(db, job, Stage.VERIFY, JobState.VERIFY)
-    try:
-        report = compliance.refine_web_until_complete(
-            paths,
-            threshold=settings.frontend_verify_threshold,
-            soft_floor=settings.compliance_soft_floor,
-            max_iterations=settings.compliance_max_iterations,
-            weights=compliance.ComplianceWeights.from_settings(settings),
-            chromium_bin=settings.chromium_bin,
-            wait_ms=settings.web_render_wait_ms,
-            window=settings.web_render_window,
-            blank_max_bytes=settings.web_blank_max_bytes,
-            structural_gate=settings.verify_web_structural,
-        )
-    except Exception as exc:  # build/render failure must not hard-gate the job
-        bound.warning("verify.render_failed", error=str(exc))
-        report = {
-            "mode": "verify",
-            "verify": "web_loop",
-            "status": "verify_failed",
-            "error": str(exc)[:500],
-        }
-        _finish_stage(db, stage_row)
-        return report, False
-
-    try:
-        for png in sorted(paths.generated_screens_dir.glob("*.png")):
-            storage.put(
-                build_key(job_id=job_id, kind="generated_screenshots", name=png.name),
-                png.read_bytes(),
-                content_type="image/png",
-            )
-        storage.put(
-            build_key(job_id=job_id, kind="selftest", name="selftest_report.json"),
-            json.dumps(report, ensure_ascii=False).encode("utf-8"),
-            content_type="application/json",
-        )
-    except Exception as exc:  # persisting artifacts must not lose the verdict
-        bound.warning("verify.upload_failed", error=str(exc))
-
-    passed = report.get("stop_reason") == "all_closed"
-    gaps = _structural_gap_count(report)
-    gated = hard_gate and not passed
-    if gated:
-        job.state = JobState.NEEDS_INPUT
-        row = db.get(StageTimeline, stage_row.id)
-        if row is not None:
-            if gaps:
-                row.error = f"structural gate not met: {gaps} gaps"
-            else:
-                score = report.get("compliance_score")
-                score_text = f"{float(score):.2f}" if isinstance(score, (int, float)) else "n/a"
-                row.error = (
-                    f"compliance gate not met (score {score_text} "
-                    f"< {settings.frontend_verify_threshold:.2f})"
-                )
-            row.finished_at = utcnow()
-        db.commit()
-        bound.warning("verify.gated", gaps=gaps, stop_reason=report.get("stop_reason"))
-    else:
-        _finish_stage(db, stage_row)
-        bound.info("verify.done", passed=passed, gaps=gaps)
-    return report, gated
 
 
 def _ingest_appstore(db, storage, job: Job, settings, appstore) -> None:
@@ -246,11 +106,8 @@ def run_job(self, job_id: str) -> str:
         admin_provision,
         analyze,
         appstore,
-        codegen,
-        compliance,
         crawl,
         emulator,
-        flutter_wiring,
         frida_ingest,
         screen_filter,
     )
@@ -351,8 +208,10 @@ def run_job(self, job_id: str) -> str:
                     job.state = JobState.CODEGEN
                     db.commit()
                     log.info("run_job.analysis_done_autochain", job_id=job_id)
-                    build_frontend.apply_async(args=[job_id], queue="codegen")
-                    return f"job {job_id} analysis done -> frontend build queued"
+                    from iosforge.worker.swiftui_build import enqueue_build
+
+                    enqueue_build(job_id)
+                    return f"job {job_id} analysis done -> SwiftUI build queued"
                 job.state = JobState.DONE
                 db.commit()
                 log.info("run_job.appstore_analysis_done", job_id=job_id)
@@ -468,29 +327,6 @@ def run_job(self, job_id: str) -> str:
                                 job_id=job_id,
                                 project=pres["project_id"],
                             )
-                            if settings.generate_wired_app and pres.get("firebase_config"):
-                                wired_dir = flutter_wiring.generate_app(
-                                    spec,
-                                    paths.run_dir / "wired_app",
-                                    project_id=pres["project_id"],
-                                    collection_prefix=prefix,
-                                    firebase_config=pres["firebase_config"],
-                                )
-                                wired_zip = shutil.make_archive(
-                                    str(tmp / "wired_app"), "zip", str(wired_dir)
-                                )
-                                storage.put(
-                                    build_key(
-                                        job_id=job_id, kind="wired_app", name="wired_app.zip"
-                                    ),
-                                    Path(wired_zip).read_bytes(),
-                                    content_type="application/zip",
-                                )
-                                log.info(
-                                    "run_job.wired_app_generated",
-                                    job_id=job_id,
-                                    project=pres["project_id"],
-                                )
                         except Exception as exc:  # provisioning must not fail the job
                             log.error(
                                 "run_job.admin_provision_failed", job_id=job_id, error=str(exc)
@@ -528,44 +364,28 @@ def run_job(self, job_id: str) -> str:
                 scope_gate.apply_async(args=[job_id], queue="codegen")
                 return f"job {job_id} analysis done -> scope gate queued"
 
-            analyze.decompose(paths)
-            codegen.generate(paths, settings)
-            report = compliance.refine_web_until_complete(
-                paths,
-                threshold=settings.frontend_verify_threshold,
-                soft_floor=settings.compliance_soft_floor,
-                max_iterations=settings.compliance_max_iterations,
-                weights=compliance.ComplianceWeights.from_settings(settings),
-                chromium_bin=settings.chromium_bin,
-                wait_ms=settings.web_render_wait_ms,
-                window=settings.web_render_window,
-                blank_max_bytes=settings.web_blank_max_bytes,
-                structural_gate=settings.verify_web_structural,
-            )
-
-            zip_base = tmp / "flutter_app"
-            shutil.make_archive(str(zip_base), "zip", str(paths.flutter_app))
-            sources_key = build_key(job_id=job_id, kind="sources", name="flutter_app.zip")
-            storage.put(
-                sources_key, Path(f"{zip_base}.zip").read_bytes(), content_type="application/zip"
-            )
-            for png in sorted(paths.generated_screens_dir.glob("*.png")):
-                key = build_key(job_id=job_id, kind="generated_screenshots", name=png.name)
-                storage.put(key, png.read_bytes(), content_type="image/png")
-            db.add(
-                GenerationResult(
-                    job_id=job.id,
-                    sources_key=sources_key,
-                    compliance_score=report["compliance_score"],
-                    selftest_report=report,
-                )
-            )
+            for kind, src in (("app_spec", paths.app_spec_json), ("spec_md", paths.spec_md)):
+                if src.exists():
+                    ctype = "application/json" if src.suffix == ".json" else "text/markdown"
+                    storage.put(
+                        build_key(job_id=job_id, kind=kind, name=src.name),
+                        src.read_bytes(),
+                        content_type=ctype,
+                    )
             _finish_stage(db, stage_row)
+            stage_row = None
+            if settings.auto_build_frontend:
+                job.state = JobState.CODEGEN
+                db.commit()
+                from iosforge.worker.swiftui_build import enqueue_build
 
+                enqueue_build(job_id)
+                log.info("run_job.analysis_done_autochain", job_id=job_id)
+                return f"job {job_id} analysis done -> SwiftUI build queued"
             job.state = JobState.DONE
             db.commit()
             log.info("run_job.done", job_id=job_id)
-            return f"job {job_id} done"
+            return f"job {job_id} done (analysis)"
         except Exception as exc:
             db.rollback()
             job2 = db.get(Job, job.id)
@@ -668,856 +488,6 @@ def scope_gate(self, job_id: str) -> str:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-@celery_app.task(base=PipelineTask, name="iosforge.build_frontend", bind=True)
-def build_frontend(self, job_id: str) -> str:
-    """Human-triggered frontend codegen from a completed analysis (SPEC §7).
-
-    Hydrates a fresh RunPaths from the stored analysis (``screens.json`` from
-    ``WalkthroughResult.screen_map``, screenshots + ``app_spec.json`` from object
-    storage), then runs decompose + codegen only — no compliance / backend /
-    Firebase (frontend-first). Reuses the selected ``codegen_orchestrator``.
-    """
-    from iosforge.mvp import (
-        analyze,
-        apphud_provision,
-        attribution,
-        build_profile,
-        claude_gen,
-        codegen,
-        codegen_checkpoint,
-        codemagic_integration,
-        compliance,
-        feasibility,
-        frida_ingest,
-        github_publish,
-    )
-    from iosforge.mvp.paths import RunPaths
-
-    settings = get_settings()
-    storage = S3ArtifactStorage()
-    maker = get_sessionmaker()
-    tmp = Path(tempfile.mkdtemp(prefix="iosforge-build-"))
-
-    try:
-        with maker() as db:
-            job = db.get(Job, uuid.UUID(job_id))
-            if job is None:
-                return f"job {job_id} not found"
-            walk = db.scalar(select(WalkthroughResult).where(WalkthroughResult.job_id == job.id))
-            if walk is None or not walk.screen_map:
-                job.state = JobState.FAILED
-                db.commit()
-                return f"job {job_id} has no analysis to build from"
-            if db.scalar(select(GenerationResult).where(GenerationResult.job_id == job.id)):
-                log.info("build_frontend.skip_existing", job_id=job_id)
-                return f"job {job_id} already built"
-
-            stage_row: StageTimeline | None = None
-            try:
-                paths = RunPaths.create(tmp / "run")
-                paths.screens_json.write_text(json.dumps(walk.screen_map, ensure_ascii=False))
-                for key in walk.screenshot_keys:
-                    (paths.screens_dir / key.rsplit("/", 1)[-1]).write_bytes(storage.get(key))
-                app_spec_key = build_key(job_id=job_id, kind="app_spec", name="app_spec.json")
-                try:
-                    paths.app_spec_json.write_bytes(storage.get(app_spec_key))
-                except Exception as exc:
-                    job.state = JobState.FAILED
-                    db.commit()
-                    log.error("build_frontend.no_app_spec", job_id=job_id, error=str(exc))
-                    return f"job {job_id} app_spec unavailable"
-
-                archive_art = db.scalar(
-                    select(DataArchiveArtifact).where(DataArchiveArtifact.job_id == job.id)
-                )
-                if archive_art is not None:
-                    try:
-                        archive_path = tmp / "data_archive"
-                        archive_path.write_bytes(storage.get(archive_art.storage_key))
-                        frida_ingest.ingest_archive(archive_path, paths)
-                        log.info("build_frontend.archive_context_restored", job_id=job_id)
-                    except Exception as exc:
-                        log.warning(
-                            "build_frontend.archive_reingest_failed", job_id=job_id, error=str(exc)
-                        )
-
-                # Scope gate: prune app_spec to the operator-approved screens before
-                # decompose (deterministic, no model). No-op unless the gate is on and
-                # an approved scope exists; a missing/invalid scope never blocks the build.
-                if settings.pipeline_scope_gate:
-                    meta = job.source_app_metadata or {}
-                    if meta.get("scope_status") == "approved":
-                        try:
-                            scope = feasibility.load_scope(
-                                storage, job_id, version_id=meta.get("scope_version_id")
-                            )
-                            paths.scope_json.write_text(scope.model_dump_json(indent=2))
-                            feasibility.apply_scope(paths, scope)
-                            log.info(
-                                "build_frontend.scope_pruned",
-                                job_id=job_id,
-                                mode=scope.scope_mode,
-                                included=scope.counts.included,
-                            )
-                        except Exception as exc:
-                            log.warning(
-                                "build_frontend.scope_prune_failed", job_id=job_id, error=str(exc)
-                            )
-
-                # Build profile (test/real) → bundle id + display name + store mode.
-                spec_data = json.loads(paths.app_spec_json.read_text())
-                ident = build_profile.resolve_identity(job.source_app_metadata, spec_data, settings)
-                log.info(
-                    "build_frontend.identity",
-                    job_id=job_id,
-                    profile=ident.profile,
-                    bundle_id=ident.bundle_id,
-                    app_name=ident.app_name,
-                )
-
-                # Apphud: derive the product ids + placement for this clone and inject
-                # the public SDK key into codegen (Apphud has no provisioning API — the
-                # dashboard owns app/products). Best-effort — never blocks the build.
-                apphud_config = apphud_provision.provision(
-                    spec_data,
-                    settings=settings,
-                    bundle_id=ident.bundle_id,
-                    app_name=ident.app_name,
-                    sandbox=ident.sandbox,
-                    api_key=(job.source_app_metadata or {}).get("apphud_api_key"),
-                )
-                if apphud_config:
-                    paths.apphud_config_json.write_text(json.dumps(apphud_config, indent=2))
-                    log.info(
-                        "build_frontend.apphud_configured",
-                        job_id=job_id,
-                        bundle_id=apphud_config.get("bundle_id"),
-                        mode=apphud_config.get("mode"),
-                        products=len(apphud_config.get("products", [])),
-                    )
-
-                # Attribution (Tenjin): only the SDK key is injected — traffic sources are
-                # connected in the Tenjin dashboard, so a new source needs no rebuild.
-                attribution_config = attribution.provision(
-                    settings=settings,
-                    api_key=(job.source_app_metadata or {}).get("tenjin_api_key"),
-                )
-                if attribution_config:
-                    paths.attribution_config_json.write_text(
-                        json.dumps(attribution_config, indent=2)
-                    )
-                    log.info(
-                        "build_frontend.attribution_configured",
-                        job_id=job_id,
-                        provider=attribution_config.get("provider"),
-                    )
-
-                stage_row = _start_stage(db, job, Stage.CODEGEN, JobState.CODEGEN)
-
-                # Resumable codegen (claude task runner only): restore the last
-                # checkpoint and skip finished tasks, else decompose fresh. A crash /
-                # rate-limit resumes from the last finished task on the next attempt.
-                completed: set[str] = set()
-                on_task_done: Callable[[str], None] | None = None
-                resumable = settings.codegen_orchestrator == "claude"
-                if resumable:
-                    loaded = codegen_checkpoint.load(storage, job_id, paths, work_dir=tmp)
-                    if loaded is None:
-                        analyze.decompose(paths)
-                    else:
-                        completed = loaded  # tasks.json + workspace restored; skip decompose
-
-                    def _checkpoint(tid: str) -> None:
-                        completed.add(tid)
-                        codegen_checkpoint.save(storage, job_id, paths, completed, work_dir=tmp)
-
-                    on_task_done = _checkpoint
-                    codegen_checkpoint.save(storage, job_id, paths, completed, work_dir=tmp)
-                else:
-                    analyze.decompose(paths)
-
-                jid = job.id
-
-                def _on_plan(total: int) -> None:
-                    with maker() as pdb:
-                        pdb.execute(delete(CodegenTask).where(CodegenTask.job_id == jid))
-                        pdb.commit()
-                    log.info("build_frontend.plan", job_id=job_id, total=total)
-
-                def _on_task(
-                    idx: int, total: int, key: str, title: str, status: str, attempts: int
-                ) -> None:
-                    with maker() as pdb:
-                        row = pdb.scalar(
-                            select(CodegenTask).where(
-                                CodegenTask.job_id == jid, CodegenTask.idx == idx
-                            )
-                        )
-                        if row is None:
-                            pdb.add(
-                                CodegenTask(
-                                    job_id=jid,
-                                    idx=idx,
-                                    total=total,
-                                    task_key=key,
-                                    title=title,
-                                    status=status,
-                                    attempts=attempts,
-                                )
-                            )
-                        else:
-                            row.total, row.task_key, row.title = total, key, title
-                            row.status, row.attempts = status, attempts
-                        pdb.commit()
-
-                codegen.generate(
-                    paths,
-                    settings,
-                    completed=completed,
-                    on_task_done=on_task_done,
-                    on_plan=_on_plan,
-                    on_task=_on_task,
-                )
-                if resumable:
-                    codegen_checkpoint.clear(storage, job_id)
-
-                # Compile gate: `flutter analyze` + bounded fix loop so non-compiling code
-                # never reaches GitHub / the CodeMagic iOS build.
-                if settings.codegen_compile_gate:
-                    remaining = claude_gen.ensure_compiles(
-                        paths, attempts=settings.codegen_compile_gate_attempts
-                    )
-                    if remaining:
-                        log.warning(
-                            "build_frontend.compile_gate_unresolved",
-                            job_id=job_id,
-                            count=len(remaining),
-                            sample=remaining[:5],
-                        )
-
-                # Web screen-similarity verification (non-fatal: never loses the
-                # generated frontend if the build/render/judge fails). The single-pass
-                # check runs inline here; the opt-in structural VERIFY loop runs as its
-                # own stage after the GenerationResult is committed (see below).
-                compliance_score: float | None = None
-                selftest: dict[str, object] = {"mode": "frontend_only"}
-                if settings.verify_frontend_web and not settings.pipeline_web_verify_loop:
-                    try:
-                        report = compliance.verify_web(
-                            paths,
-                            weights=compliance.ComplianceWeights.from_settings(settings),
-                            threshold=settings.frontend_verify_threshold,
-                            soft_floor=settings.compliance_soft_floor,
-                            chromium_bin=settings.chromium_bin,
-                            wait_ms=settings.web_render_wait_ms,
-                            window=settings.web_render_window,
-                        )
-                        compliance_score = report.get("compliance_score")
-                        selftest = {**report, "mode": "frontend_only", "verify": "web"}
-                        for png in sorted(paths.generated_screens_dir.glob("*.png")):
-                            storage.put(
-                                build_key(
-                                    job_id=job_id, kind="generated_screenshots", name=png.name
-                                ),
-                                png.read_bytes(),
-                                content_type="image/png",
-                            )
-                    except Exception as exc:  # verification must not lose the frontend
-                        log.warning("build_frontend.verify_failed", job_id=job_id, error=str(exc))
-                        selftest = {
-                            "mode": "frontend_only",
-                            "verify": "web",
-                            "status": "verify_failed",
-                            "error": str(exc)[:500],
-                        }
-
-                sources_key = _archive_and_upload_sources(paths, storage, job_id, tmp)
-                gen = GenerationResult(
-                    job_id=job.id,
-                    sources_key=sources_key,
-                    compliance_score=compliance_score,
-                    selftest_report=selftest,
-                )
-                db.add(gen)
-                _finish_stage(db, stage_row)
-                stage_row = None
-
-                # --- Stage VERIFY: opt-in structural-web loop (own stage + hard gate) ---
-                verify_gated = False
-                if settings.pipeline_web_verify_loop:
-                    report, verify_gated = _run_web_verify(
-                        db,
-                        job,
-                        paths,
-                        settings,
-                        storage,
-                        job_id,
-                        hard_gate=settings.web_verify_hard_gate,
-                    )
-                    # The loop mutated flutter_app in place; re-archive so MinIO (and the
-                    # tree GitHub pushes) matches the corrected sources — even when gated,
-                    # so a human/rework continues from the improved tree, not a stale zip.
-                    gen.sources_key = _archive_and_upload_sources(paths, storage, job_id, tmp)
-                    gen.compliance_score = report.get("compliance_score")
-                    gen.selftest_report = {**report, "mode": "frontend_only", "verify": "web_loop"}
-                    db.commit()
-
-                # ATT copy + the SKAdNetwork list must ride along into the repo so the
-                # build merges them into Info.plist (a missing network id = no SKAN).
-                if attribution_config:
-                    attribution.stage_ios_assets(settings, paths.flutter_app, attribution_config)
-                from iosforge.mvp import ios_compliance
-
-                ios_compliance.stage(
-                    paths.flutter_app,
-                    bool((job.source_app_metadata or {}).get("export_compliance_exempt")),
-                )
-                _stage_app_icon(job_id, storage, paths.flutter_app)
-                _stage_audio_envelopes(paths.flutter_app)
-
-                # --- GitHub Upload stage: push the project to a new public repo ---
-                gh_result: dict[str, str] | None = None
-                if (
-                    not verify_gated
-                    and settings.github_publish
-                    and github_publish.load_token(settings)
-                ):
-                    spec = json.loads(paths.app_spec_json.read_text())
-                    gh_stage = _start_stage(db, job, Stage.GITHUB_UPLOAD, JobState.GITHUB_UPLOAD)
-                    try:
-                        gh_result = github_publish.publish(
-                            settings,
-                            paths.flutter_app,
-                            app_name=str(spec.get("app_name") or ""),
-                            description=str(spec.get("one_liner") or ""),
-                            fallback_slug=job_id[:8],
-                        )
-                        gen.github_repo_url = gh_result["url"]
-                        log.info(
-                            "build_frontend.github_pushed", job_id=job_id, url=gh_result["url"]
-                        )
-                        _finish_stage(db, gh_stage)
-                    except Exception as exc:  # a failed push must not lose the built app
-                        gh_result = None
-                        log.error(
-                            "build_frontend.github_upload_failed", job_id=job_id, error=str(exc)
-                        )
-                        row = db.get(StageTimeline, gh_stage.id)
-                        if row is not None:
-                            row.error = str(exc)[:2000]
-                            row.finished_at = utcnow()
-                        db.commit()
-
-                # --- CodeMagic Integration stage: connect the repo, add codemagic.yaml ---
-                if (
-                    gh_result is not None
-                    and settings.codemagic_integration
-                    and codemagic_integration.load_token(settings)
-                ):
-                    cm_stage = _start_stage(
-                        db, job, Stage.CODEMAGIC_INTEGRATION, JobState.CODEMAGIC_INTEGRATION
-                    )
-                    last_err: str | None = None
-                    for attempt in range(2):
-                        try:
-                            cm_result = codemagic_integration.integrate(
-                                settings,
-                                repo_full_name=gh_result["full_name"],
-                                repo_html_url=gh_result["url"],
-                                bundle_id=ident.bundle_id,
-                                app_name=ident.app_name,
-                                signing=_store_signing(job, settings),
-                            )
-                            gen.codemagic = cm_result
-                            log.info(
-                                "build_frontend.codemagic_done",
-                                job_id=job_id,
-                                app_id=cm_result.get("application_id"),
-                            )
-                            _finish_stage(db, cm_stage)
-                            last_err = None
-                            break
-                        except Exception as exc:  # setup failure must not lose the built app
-                            last_err = str(exc)
-                            log.warning(
-                                "build_frontend.codemagic_attempt_failed",
-                                job_id=job_id,
-                                attempt=attempt + 1,
-                                error=last_err,
-                            )
-                    if last_err is not None:
-                        log.error("build_frontend.codemagic_failed", job_id=job_id, error=last_err)
-                        row = db.get(StageTimeline, cm_stage.id)
-                        if row is not None:
-                            row.error = last_err[:2000]
-                            row.finished_at = utcnow()
-                        db.commit()
-
-                # Auto-build: chain the CodeMagic iOS build so the pipeline runs to a
-                # downloadable artifact instead of stopping at a manual button.
-                auto_build = bool(
-                    settings.codemagic_auto_build
-                    and not verify_gated
-                    and isinstance(gen.codemagic, dict)
-                    and gen.codemagic.get("application_id")
-                )
-                if not verify_gated and not auto_build:
-                    job.state = JobState.DONE
-                db.commit()
-                if auto_build:
-                    run_codemagic_build.apply_async(args=[job_id], queue="delivery")
-                    log.info("build_frontend.auto_build_enqueued", job_id=job_id)
-                log.info(
-                    "build_frontend.done",
-                    job_id=job_id,
-                    repo=gen.github_repo_url,
-                    verify_gated=verify_gated,
-                    auto_build=auto_build,
-                )
-                return f"job {job_id} frontend built"
-            except Exception as exc:
-                db.rollback()
-                job2 = db.get(Job, job.id)
-                if job2 is not None:
-                    job2.state = JobState.FAILED
-                    if stage_row is not None:
-                        row = db.get(StageTimeline, stage_row.id)
-                        if row is not None:
-                            row.error = str(exc)[:2000]
-                            row.finished_at = utcnow()
-                    db.commit()
-                log.error("build_frontend.failed", job_id=job_id, error=str(exc))
-                raise
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-def _parse_iso(value: object) -> dt.datetime | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-@celery_app.task(base=PipelineTask, name="iosforge.run_codemagic_build", bind=True)
-def run_codemagic_build(self, job_id: str) -> str:
-    """Trigger a CodeMagic iOS build for a connected job and poll it to completion.
-
-    Uses the existing GitHub repo + CodeMagic application (no analysis/codegen).
-    Persists status, logs and artifacts to ``codemagic_builds`` as they arrive so
-    the admin can follow the build live.
-    """
-    import time
-
-    from iosforge.mvp import build_profile, codemagic_build, codemagic_integration, github_publish
-
-    settings = get_settings()
-    storage = S3ArtifactStorage()
-    maker = get_sessionmaker()
-    with maker() as db:
-        job = db.get(Job, uuid.UUID(job_id))
-        if job is None:
-            return f"job {job_id} not found"
-        gen = db.scalar(
-            select(GenerationResult)
-            .where(GenerationResult.job_id == job.id)
-            .order_by(GenerationResult.created_at.desc())
-        )
-        cm_meta = (gen.codemagic if gen else None) or {}
-        app_id = str(cm_meta.get("application_id") or "")
-        if not app_id:
-            return f"job {job_id} is not connected to CodeMagic"
-        branch = str(cm_meta.get("default_branch") or "main")
-        repo_url = str(cm_meta.get("repository_url") or (gen.github_repo_url if gen else "") or "")
-        full_name = repo_url.rstrip("/").split("github.com/")[-1] if repo_url else ""
-
-        # Build profile identity (bundle id + display name) — from the current job
-        # metadata, so admin-changed settings reach the rebuild.
-        try:
-            spec_data = json.loads(
-                storage.get(build_key(job_id=job_id, kind="app_spec", name="app_spec.json"))
-            )
-        except Exception:
-            spec_data = {}
-        ident = build_profile.resolve_identity(job.source_app_metadata, spec_data, settings)
-
-        token = codemagic_build.resolve_token(settings)
-        gh_token = github_publish.load_token(settings)
-
-        # Resolve the workflow id from the EFFECTIVE codemagic.yaml template (rendered
-        # locally — reliable even right after a force-push, which the GitHub contents API
-        # lags behind). A rework/augment force-push replaces the tree with flutter_app/
-        # and drops the separately-committed codemagic.yaml, so also restore it in the
-        # repo (best-effort) for the UI / future builds.
-        signing = _store_signing(job, settings)
-        try:
-            workflow_id = codemagic_integration.resolved_workflow_id(
-                settings,
-                gh_token,
-                full_name,
-                bundle_id=ident.bundle_id,
-                app_name=ident.app_name,
-                signing=signing,
-            )
-        except Exception as exc:
-            log.warning("codemagic_build.workflow_lookup_failed", job_id=job_id, error=str(exc))
-            workflow_id = "ios-store" if signing else "ios-unsigned"
-        if gh_token and full_name:
-            try:
-                if codemagic_integration.ensure_codemagic_yaml(
-                    settings,
-                    gh_token,
-                    full_name,
-                    branch,
-                    bundle_id=ident.bundle_id,
-                    app_name=ident.app_name,
-                    signing=signing,
-                ):
-                    log.info(
-                        "codemagic_build.codemagic_yaml_updated",
-                        job_id=job_id,
-                        bundle_id=ident.bundle_id,
-                    )
-            except Exception as exc:
-                log.warning(
-                    "codemagic_build.codemagic_yaml_restore_failed",
-                    job_id=job_id,
-                    error=str(exc),
-                )
-
-        build_env: dict[str, str] | None = None
-        if signing is not None:
-            from iosforge.mvp import asc_credentials
-
-            build_env = asc_credentials.build_env(settings, job_id)
-        try:
-            build_id = codemagic_build.start_build(
-                settings,
-                token,
-                app_id=app_id,
-                workflow_id=workflow_id,
-                branch=branch,
-                env=build_env,
-            )
-        except Exception as exc:
-            log.error("codemagic_build.start_failed", job_id=job_id, error=str(exc))
-            row = CodemagicBuild(
-                job_id=job.id,
-                build_id="",
-                application_id=app_id,
-                workflow_id=workflow_id,
-                status="failed",
-                branch=branch,
-                message=str(exc)[:2000],
-                artifacts=[],
-            )
-            db.add(row)
-            db.commit()
-            return f"job {job_id} codemagic build failed to start"
-
-        row = CodemagicBuild(
-            job_id=job.id,
-            build_id=build_id,
-            application_id=app_id,
-            workflow_id=workflow_id,
-            status="queued",
-            branch=branch,
-            artifacts=[],
-        )
-        db.add(row)
-        db.commit()
-        log.info("codemagic_build.started", job_id=job_id, build_id=build_id, workflow=workflow_id)
-
-    # Poll to completion, persisting status/logs/artifacts on every tick.
-    deadline = 2700
-    waited = 0
-    while waited <= deadline:
-        try:
-            build = codemagic_build.get_build(settings, token, build_id)
-            summary = codemagic_build.summarize(build)
-            with maker() as db:
-                r = db.scalar(select(CodemagicBuild).where(CodemagicBuild.build_id == build_id))
-                if r is not None:
-                    r.status = summary["status"] or r.status
-                    r.build_number = summary["build_number"]
-                    r.started_at = summary["started_at"]
-                    r.finished_at = summary["finished_at"]
-                    r.message = (summary["message"] or "")[:4000] or None
-                    r.artifacts = summary["artifacts"]
-                    r.log_text = codemagic_build.build_logs(build)[:200000] or None
-                    started = _parse_iso(summary["started_at"])
-                    finished = _parse_iso(summary["finished_at"])
-                    if started and finished:
-                        r.duration_ms = int((finished - started).total_seconds() * 1000)
-                    db.commit()
-            if summary["status"] in codemagic_build.TERMINAL:
-                log.info(
-                    "codemagic_build.done",
-                    job_id=job_id,
-                    build_id=build_id,
-                    status=summary["status"],
-                    artifacts=len(summary["artifacts"]),
-                )
-                return f"job {job_id} codemagic build {summary['status']}"
-        except Exception as exc:
-            log.warning("codemagic_build.poll_failed", job_id=job_id, error=str(exc))
-        time.sleep(8)
-        waited += 8
-    log.warning("codemagic_build.poll_timeout", job_id=job_id, build_id=build_id)
-    return f"job {job_id} codemagic build poll timed out"
-
-
-@celery_app.task(base=PipelineTask, name="iosforge.rework_frontend", bind=True)
-def rework_frontend(self, job_id: str, instructions: str = "", augment: bool = False) -> str:
-    """Re-run over an already-built app: edit in place, re-push, re-build.
-
-    Hydrates the existing ``flutter_app`` (+ archive context, app_spec, screens) from
-    storage, then either applies ``instructions`` (user rework) or, when ``augment``,
-    emits the Apphud config and runs an incremental gap-analysis pass that ADDS what is
-    missing vs the spec (NOT a from-scratch rebuild). Saves a new version, force-pushes
-    a fresh commit to the SAME GitHub repo and re-triggers the CodeMagic build.
-    """
-    import zipfile
-
-    from iosforge.mvp import (
-        apphud_provision,
-        attribution,
-        build_profile,
-        claude_gen,
-        compliance,
-        frida_ingest,
-        github_publish,
-    )
-    from iosforge.mvp.paths import RunPaths
-
-    settings = get_settings()
-    storage = S3ArtifactStorage()
-    maker = get_sessionmaker()
-    tmp = Path(tempfile.mkdtemp(prefix="iosforge-rework-"))
-    try:
-        with maker() as db:
-            job = db.get(Job, uuid.UUID(job_id))
-            if job is None:
-                return f"job {job_id} not found"
-            walk = db.scalar(select(WalkthroughResult).where(WalkthroughResult.job_id == job.id))
-            gen = db.scalar(
-                select(GenerationResult)
-                .where(GenerationResult.job_id == job.id)
-                .order_by(GenerationResult.created_at.desc())
-            )
-            if walk is None or gen is None:
-                return f"job {job_id} has nothing to rework"
-            repo_url = gen.github_repo_url or ""
-            full_name = repo_url.rstrip("/").split("github.com/")[-1] if repo_url else ""
-            prior_codemagic = dict(gen.codemagic or {})
-
-            stage_row: StageTimeline | None = None
-            try:
-                stage_row = _start_stage(db, job, Stage.CODEGEN, JobState.CODEGEN)
-                paths = RunPaths.create(tmp / "run")
-                paths.screens_json.write_text(json.dumps(walk.screen_map, ensure_ascii=False))
-                for key in walk.screenshot_keys:
-                    (paths.screens_dir / key.rsplit("/", 1)[-1]).write_bytes(storage.get(key))
-                paths.app_spec_json.write_bytes(
-                    storage.get(build_key(job_id=job_id, kind="app_spec", name="app_spec.json"))
-                )
-                archive_art = db.scalar(
-                    select(DataArchiveArtifact).where(DataArchiveArtifact.job_id == job.id)
-                )
-                if archive_art is not None:
-                    try:
-                        ap = tmp / "data_archive"
-                        ap.write_bytes(storage.get(archive_art.storage_key))
-                        frida_ingest.ingest_archive(ap, paths)
-                    except Exception as exc:
-                        log.warning("rework.archive_reingest_failed", job_id=job_id, error=str(exc))
-
-                paths.flutter_app.parent.mkdir(parents=True, exist_ok=True)
-                with zipfile.ZipFile(io.BytesIO(storage.get(gen.sources_key))) as z:
-                    z.extractall(paths.flutter_app)
-
-                mode = "augment" if augment else "rework"
-                # Emit apphud_config.json for BOTH modes: without it in the workspace the
-                # codegen agent skips Apphud (the _RC_NOTE is gated on that file) and
-                # reverts the paywall to a local stand-in, so real sandbox purchases stop
-                # working after a plain rework.
-                spec_data = json.loads(paths.app_spec_json.read_text())
-                ident = build_profile.resolve_identity(job.source_app_metadata, spec_data, settings)
-                apphud_config = apphud_provision.provision(
-                    spec_data,
-                    settings=settings,
-                    bundle_id=ident.bundle_id,
-                    app_name=ident.app_name,
-                    sandbox=ident.sandbox,
-                    api_key=(job.source_app_metadata or {}).get("apphud_api_key"),
-                )
-                if apphud_config:
-                    paths.apphud_config_json.write_text(json.dumps(apphud_config, indent=2))
-                    log.info(
-                        "rework.apphud_configured",
-                        job_id=job_id,
-                        mode=mode,
-                        bundle_id=apphud_config.get("bundle_id"),
-                        store_mode=apphud_config.get("mode"),
-                    )
-
-                attribution_config = attribution.provision(
-                    settings=settings,
-                    api_key=(job.source_app_metadata or {}).get("tenjin_api_key"),
-                )
-                if attribution_config:
-                    paths.attribution_config_json.write_text(
-                        json.dumps(attribution_config, indent=2)
-                    )
-                    log.info(
-                        "rework.attribution_configured",
-                        job_id=job_id,
-                        mode=mode,
-                        provider=attribution_config.get("provider"),
-                    )
-                if augment:
-                    claude_gen.augment(paths, timeout=settings.codegen_rework_timeout_s)
-                else:
-                    claude_gen.rework(
-                        paths, instructions, timeout=settings.codegen_rework_timeout_s
-                    )
-
-                if settings.codegen_compile_gate:
-                    remaining = claude_gen.ensure_compiles(
-                        paths,
-                        attempts=settings.codegen_compile_gate_attempts,
-                        timeout=settings.codegen_rework_timeout_s,
-                    )
-                    if remaining:
-                        log.warning(
-                            "rework_frontend.compile_gate_unresolved",
-                            job_id=job_id,
-                            count=len(remaining),
-                            sample=remaining[:5],
-                        )
-
-                # Single-pass verify_web (not the Stage VERIFY loop) by design.
-                selftest: dict[str, object] = {"mode": mode}
-                compliance_score: float | None = None
-                if settings.verify_frontend_web:
-                    try:
-                        report = compliance.verify_web(
-                            paths,
-                            weights=compliance.ComplianceWeights.from_settings(settings),
-                            threshold=settings.frontend_verify_threshold,
-                            soft_floor=settings.compliance_soft_floor,
-                            chromium_bin=settings.chromium_bin,
-                            wait_ms=settings.web_render_wait_ms,
-                            window=settings.web_render_window,
-                        )
-                        compliance_score = report.get("compliance_score")
-                        selftest = {**report, "mode": mode, "verify": "web"}
-                    except Exception as exc:
-                        log.warning("rework.verify_failed", job_id=job_id, error=str(exc))
-
-                # Staged before the archive so the snapshot (and every later rework that
-                # hydrates from it) keeps the ATT copy + SKAdNetwork list.
-                if attribution_config:
-                    attribution.stage_ios_assets(settings, paths.flutter_app, attribution_config)
-                from iosforge.mvp import ios_compliance
-
-                ios_compliance.stage(
-                    paths.flutter_app,
-                    bool((job.source_app_metadata or {}).get("export_compliance_exempt")),
-                )
-                _stage_app_icon(job_id, storage, paths.flutter_app)
-                _stage_audio_envelopes(paths.flutter_app)
-
-                zip_base = tmp / "flutter_app"
-                shutil.make_archive(str(zip_base), "zip", str(paths.flutter_app))
-                sources_key = build_key(job_id=job_id, kind="sources", name="flutter_app.zip")
-                storage.put(
-                    sources_key,
-                    Path(f"{zip_base}.zip").read_bytes(),
-                    content_type="application/zip",
-                )
-                job.result_version = (job.result_version or 1) + 1
-                final_version = job.result_version
-                new_gen = GenerationResult(
-                    job_id=job.id,
-                    sources_key=sources_key,
-                    compliance_score=compliance_score,
-                    selftest_report=selftest,
-                    github_repo_url=repo_url or None,
-                    codemagic=prior_codemagic,
-                )
-                db.add(new_gen)
-                _finish_stage(db, stage_row)
-                stage_row = None
-
-                published = False
-                if full_name and github_publish.load_token(settings):
-                    gh_stage = _start_stage(db, job, Stage.GITHUB_UPLOAD, JobState.GITHUB_UPLOAD)
-                    try:
-                        github_publish.push_existing(
-                            settings,
-                            paths.flutter_app,
-                            full_name=full_name,
-                            message=f"{mode.capitalize()} v{job.result_version}",
-                        )
-                        _finish_stage(db, gh_stage)
-                        published = True
-                    except Exception as exc:
-                        log.error("rework.github_push_failed", job_id=job_id, error=str(exc))
-                        row = db.get(StageTimeline, gh_stage.id)
-                        if row is not None:
-                            row.error = str(exc)[:2000]
-                            row.finished_at = utcnow()
-                        db.commit()
-
-                job.state = JobState.DONE
-                db.commit()
-                log.info("rework.done", job_id=job_id, version=job.result_version)
-            except Exception as exc:
-                db.rollback()
-                job2 = db.get(Job, job.id)
-                if job2 is not None:
-                    job2.state = JobState.FAILED
-                    if stage_row is not None:
-                        row = db.get(StageTimeline, stage_row.id)
-                        if row is not None:
-                            row.error = str(exc)[:2000]
-                            row.finished_at = utcnow()
-                    db.commit()
-                log.error("rework.failed", job_id=job_id, error=str(exc))
-                raise
-
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-    if published and prior_codemagic.get("application_id"):
-        run_codemagic_build.apply_async(args=[job_id], queue="delivery")
-    return f"job {job_id} reworked (v{final_version})"
-
-
-def _stage_audio_envelopes(flutter_app: Path) -> bool:
-    """Measure the app's audio and write the envelopes it draws its waveform from.
-
-    Done at build time from the actual clips: a hand-written envelope looks varied
-    but repeats, which shows up on screen as identical clumps of bars.
-    """
-    from iosforge.mvp import audio_envelope
-
-    audio_dir = flutter_app / "assets" / "audio"
-    if not audio_dir.is_dir():
-        return False
-    envelopes = audio_envelope.measure_directory(audio_dir)
-    if not envelopes:
-        return False
-    target = flutter_app / "lib" / "core" / "audio" / "sound_envelopes.g.dart"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(audio_envelope.to_dart(envelopes), encoding="utf-8")
-    log.info("audio_envelope.staged", clips=len(envelopes))
-    return True
-
-
 def _slide_contract(storage, job_id: str, index: int, spec: dict[str, Any]) -> dict[str, Any]:
     """The analysed contract for one slide, or a minimal stand-in.
 
@@ -1543,25 +513,6 @@ def _slide_contract(storage, job_id: str, index: int, spec: dict[str, Any]) -> d
         "sells": sells[:220] or "what this app does, as the source slide presents it",
         "device": {"treatment": "as_shown"},
     }
-
-
-def _stage_app_icon(job_id: str, storage, flutter_app: Path) -> bool:
-    """Carry the chosen icon into the project being built, when one exists.
-
-    The icon is generated and re-rolled independently of the app, so the build
-    reads whichever version is current at the time it runs. Absence is normal —
-    a job whose icon was never generated builds with the Flutter default.
-    """
-    from iosforge.mvp import app_icon, icon_stage
-
-    key = build_key(job_id=job_id, kind="app_icon", name=app_icon.ICON_NAME)
-    try:
-        if not storage.exists(key):
-            return False
-        return icon_stage.stage(flutter_app, storage.get(key))
-    except Exception as exc:
-        log.warning("icon_stage.failed", job_id=job_id, error=str(exc))
-        return False
 
 
 def _app_palette(job_id: str, storage) -> dict[str, str]:
@@ -1608,63 +559,58 @@ def publish_legal_pages(
 
     App Store Connect will not accept a submission without a Privacy Policy URL, and
     review rejects a paywall whose Terms/Privacy links do nothing. The page is built
-    from what this build actually declares — the SDKs in its pubspec and the usage
-    descriptions in ``ios_permissions.json`` — and pushed to a ``gh-pages`` branch
-    the code push never touches, so re-generating the app cannot delete it.
+    from what the stored SwiftUI app actually declares — its SDKs
+    (``Config/integrations.json``) and the usage descriptions in ``project.yml`` — and
+    pushed to the ``gh-pages`` branch of a pages-only repository, created on first use
+    (``legal_repo_url``); a legacy job keeps publishing to its code repository.
     """
-    import zipfile
-
     from iosforge.mvp import github_publish, legal_pages
+    from iosforge.worker.swiftui_tasks import hydrate_sources
 
     settings = get_settings()
     storage = S3ArtifactStorage()
     maker = get_sessionmaker()
     tmp = Path(tempfile.mkdtemp(prefix="iosforge-legal-"))
     try:
+        spec = json.loads(
+            storage.get(build_key(job_id=job_id, kind="app_spec", name="app_spec.json"))
+        )
+        app_name = app_name_override or str(spec.get("app_name") or spec.get("name") or "This app")
+        token = github_publish.load_token(settings)
         with maker() as db:
             job = db.get(Job, uuid.UUID(job_id))
             if job is None:
                 return f"job {job_id} not found"
             gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job.id))
-            repo_url = (gen.github_repo_url if gen else "") or ""
-        if not repo_url:
-            return f"job {job_id}: no GitHub repo to publish to"
+            meta = dict(job.source_app_metadata or {})
+            repo_url = str(meta.get("legal_repo_url") or (gen.github_repo_url if gen else "") or "")
+            if not repo_url:
+                if not token:
+                    return f"job {job_id}: no GitHub token to host the legal pages"
+                repo = github_publish.create_repo(
+                    settings,
+                    token,
+                    f"{github_publish.slugify_repo(app_name)}-legal",
+                    f"Privacy Policy and Support for {app_name}",
+                )
+                repo_url = str(repo["html_url"])
+                meta["legal_repo_url"] = repo_url
+                job.source_app_metadata = meta
+                db.commit()
 
-        spec = json.loads(
-            storage.get(build_key(job_id=job_id, kind="app_spec", name="app_spec.json"))
-        )
-        app_name = app_name_override or str(spec.get("app_name") or spec.get("name") or "This app")
-        bundle_id = str(spec.get("bundle_id") or "")
-
-        sources = tmp / "flutter_app.zip"
-        sources.write_bytes(
-            storage.get(build_key(job_id=job_id, kind="sources", name="flutter_app.zip"))
-        )
-        pubspec = ""
-        permissions: dict[str, object] = {}
-        with zipfile.ZipFile(sources) as archive:
-            for name in archive.namelist():
-                if name == "pubspec.yaml":
-                    pubspec = archive.read(name).decode("utf-8", "replace")
-                elif name == "ios_permissions.json":
-                    try:
-                        permissions = json.loads(archive.read(name))
-                    except json.JSONDecodeError:
-                        permissions = {}
-                if not bundle_id and name == "ios_permissions.json":
-                    continue
-
+        app_dir = tmp / "xcode_app"
+        hydrate_sources(storage, job_id, app_dir)
         facts = legal_pages.facts_from_build(
             app_name=app_name,
-            bundle_id=bundle_id,
+            bundle_id=str(spec.get("bundle_id") or ""),
             contact_email=contact_email or settings.legal_contact_email,
-            pubspec=pubspec,
-            permissions=permissions,
-            remote_endpoints=_remote_endpoints(pubspec, spec),
+            sdks=_app_sdks(app_dir),
+            permissions=_usage_descriptions(app_dir),
+            remote_endpoints=_remote_endpoints(spec),
         )
         url = legal_pages.publish_pages(
             settings=settings,
-            token=github_publish.load_token(settings),
+            token=token,
             repo_full_name=legal_pages.repo_full_name(repo_url),
             files=legal_pages.build_pages(facts),
             commit_message=f"Publish privacy policy for {app_name}",
@@ -1689,13 +635,33 @@ def publish_legal_pages(
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _remote_endpoints(pubspec: str, spec: dict[str, Any]) -> list[DataPractice]:
+def _app_sdks(app_dir: Path) -> list[str]:
+    """Third-party SDKs compiled into the app (as ``legal_pages`` processor names)."""
+    from iosforge.mvp import swiftui_integrations
+
+    integrations = swiftui_integrations.load(app_dir)
+    names = ["apphud"] if integrations.subscriptions else []
+    return [*names, "tenjin"] if integrations.attribution else names
+
+
+def _usage_descriptions(app_dir: Path) -> dict[str, str]:
+    """``NS…UsageDescription`` Info.plist keys the app declares in ``project.yml``."""
+    project = app_dir / "project.yml"
+    if not project.is_file():
+        return {}
+    found = re.findall(
+        r"^\s*(NS\w+UsageDescription):\s*(.*)$", project.read_text(encoding="utf-8"), re.M
+    )
+    return {key: value.strip().strip('"') for key, value in found}
+
+
+def _remote_endpoints(spec: dict[str, Any]) -> list[DataPractice]:
     """Third-party endpoints the app sends user input to, as policy disclosures."""
     from iosforge.mvp.legal_pages import DataPractice as _Practice
 
     out: list[DataPractice] = []
     blob = json.dumps(spec, ensure_ascii=False).lower()
-    if "vin" in blob and "http" in pubspec:
+    if re.search(r"\bvin\b", blob):
         out.append(
             _Practice(
                 "Vehicle lookup",
@@ -2601,150 +1567,3 @@ def regenerate_store_slide(self, job_id: str, index: int, instructions: str) -> 
         return f"job {job_id} slide {index:02d} regenerated"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-
-
-@celery_app.task(base=PipelineTask, name="iosforge.reverify_web", bind=True)
-def reverify_web(self, job_id: str) -> str:
-    """Re-run the Stage VERIFY structural-web loop on an already-built app.
-
-    Hydrates the run_dir from storage exactly like :func:`rework_frontend`
-    (``screens.json`` from ``WalkthroughResult.screen_map``, screenshots from
-    ``walk.screenshot_keys``, ``flutter_app`` from ``gen.sources_key`` zip), runs the
-    structural loop via :func:`_run_web_verify`, then writes a NEW ``GenerationResult``
-    (bumping ``result_version``) carrying the structural report. The final Job state is
-    ``DONE`` on a clean pass, or ``NEEDS_INPUT`` when the hard gate holds open gaps.
-    """
-    import zipfile
-
-    from iosforge.mvp import frida_ingest, github_publish
-    from iosforge.mvp.paths import RunPaths
-
-    settings = get_settings()
-    storage = S3ArtifactStorage()
-    maker = get_sessionmaker()
-    tmp = Path(tempfile.mkdtemp(prefix="iosforge-verify-"))
-    final_version = 0
-    gated = True
-    published = False
-    prior_codemagic: dict[str, Any] = {}
-    try:
-        with maker() as db:
-            job = db.get(Job, uuid.UUID(job_id))
-            if job is None:
-                return f"job {job_id} not found"
-            walk = db.scalar(select(WalkthroughResult).where(WalkthroughResult.job_id == job.id))
-            gen = db.scalar(
-                select(GenerationResult)
-                .where(GenerationResult.job_id == job.id)
-                .order_by(GenerationResult.created_at.desc())
-            )
-            if walk is None or gen is None or not walk.screen_map:
-                return f"job {job_id} has nothing to verify"
-            repo_url = gen.github_repo_url or ""
-            full_name = repo_url.rstrip("/").split("github.com/")[-1] if repo_url else ""
-            prior_codemagic = dict(gen.codemagic or {})
-
-            stage_row: StageTimeline | None = None
-            try:
-                paths = RunPaths.create(tmp / "run")
-                paths.screens_json.write_text(json.dumps(walk.screen_map, ensure_ascii=False))
-                for key in walk.screenshot_keys:
-                    (paths.screens_dir / key.rsplit("/", 1)[-1]).write_bytes(storage.get(key))
-                try:
-                    paths.app_spec_json.write_bytes(
-                        storage.get(build_key(job_id=job_id, kind="app_spec", name="app_spec.json"))
-                    )
-                except Exception as exc:
-                    log.warning("reverify.no_app_spec", job_id=job_id, error=str(exc))
-
-                archive_art = db.scalar(
-                    select(DataArchiveArtifact).where(DataArchiveArtifact.job_id == job.id)
-                )
-                if archive_art is not None:
-                    try:
-                        ap = tmp / "data_archive"
-                        ap.write_bytes(storage.get(archive_art.storage_key))
-                        frida_ingest.ingest_archive(ap, paths)
-                    except Exception as exc:
-                        log.warning(
-                            "reverify.archive_reingest_failed", job_id=job_id, error=str(exc)
-                        )
-
-                paths.flutter_app.parent.mkdir(parents=True, exist_ok=True)
-                with zipfile.ZipFile(io.BytesIO(storage.get(gen.sources_key))) as z:
-                    z.extractall(paths.flutter_app)
-
-                report, gated = _run_web_verify(
-                    db,
-                    job,
-                    paths,
-                    settings,
-                    storage,
-                    job_id,
-                    hard_gate=settings.web_verify_hard_gate,
-                )
-
-                # The loop mutated flutter_app in place; persist the corrected tree so the
-                # new version (and any later rework/reverify) continues from it, not the
-                # stale zip — done unconditionally, including when gated to NEEDS_INPUT.
-                new_sources_key = _archive_and_upload_sources(paths, storage, job_id, tmp)
-                job.result_version = (job.result_version or 1) + 1
-                final_version = job.result_version
-                new_gen = GenerationResult(
-                    job_id=job.id,
-                    sources_key=new_sources_key,
-                    compliance_score=report.get("compliance_score"),
-                    selftest_report={**report, "mode": "reverify", "verify": "web_loop"},
-                    github_repo_url=repo_url or None,
-                    codemagic=prior_codemagic,
-                )
-                db.add(new_gen)
-                db.commit()
-
-                # Publish only on a clean pass — never deliver a known-incomplete build.
-                if gated:
-                    log.info("reverify.gated_skip_publish", job_id=job_id, version=final_version)
-                else:
-                    if full_name and github_publish.load_token(settings):
-                        gh_stage = _start_stage(
-                            db, job, Stage.GITHUB_UPLOAD, JobState.GITHUB_UPLOAD
-                        )
-                        try:
-                            github_publish.push_existing(
-                                settings,
-                                paths.flutter_app,
-                                full_name=full_name,
-                                message=f"Verify v{job.result_version}",
-                            )
-                            _finish_stage(db, gh_stage)
-                            published = True
-                        except Exception as exc:  # a failed push must not lose the version
-                            log.error("reverify.github_push_failed", job_id=job_id, error=str(exc))
-                            row = db.get(StageTimeline, gh_stage.id)
-                            if row is not None:
-                                row.error = str(exc)[:2000]
-                                row.finished_at = utcnow()
-                            db.commit()
-                    job.state = JobState.DONE
-                    db.commit()
-
-                log.info("reverify.done", job_id=job_id, version=final_version, gated=gated)
-            except Exception as exc:
-                db.rollback()
-                job2 = db.get(Job, job.id)
-                if job2 is not None:
-                    job2.state = JobState.FAILED
-                    if stage_row is not None:
-                        row = db.get(StageTimeline, stage_row.id)
-                        if row is not None:
-                            row.error = str(exc)[:2000]
-                            row.finished_at = utcnow()
-                    db.commit()
-                log.error("reverify.failed", job_id=job_id, error=str(exc))
-                raise
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-    if not gated and published and prior_codemagic.get("application_id"):
-        run_codemagic_build.apply_async(args=[job_id], queue="delivery")
-    return f"job {job_id} reverified (v{final_version})"

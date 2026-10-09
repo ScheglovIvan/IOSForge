@@ -261,22 +261,6 @@ def test_analyze_rejects_incomplete_spec(tmp_path: Path, monkeypatch: pytest.Mon
         analyze.analyze(rp)
 
 
-def test_decompose_validates_tasks_and_deps(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    rp = _make_paths(tmp_path)
-    rp.app_spec_json.write_text(json.dumps(_VALID_APP_SPEC))
-    monkeypatch.setattr(analyze.subprocess, "run", _fake_claude("tasks.json", _VALID_TASKS))
-
-    out = analyze.decompose(rp)
-
-    assert out == rp.tasks_json
-    tasks = json.loads(out.read_text())["tasks"]
-    assert tasks[0]["type"] == "scaffold"
-    assert tasks[0]["deps"] == []
-    assert (rp.claude_ws / "app_spec.json").exists()
-
-
 def test_topo_layers_groups_independent_tasks() -> None:
     tasks: list[dict[str, Any]] = [
         {"id": "s", "type": "scaffold", "deps": []},
@@ -288,62 +272,3 @@ def test_topo_layers_groups_independent_tasks() -> None:
     assert [t["id"] for t in layers[0]] == ["s"]
     assert [t["id"] for t in layers[1]] == ["lib"]
     assert {t["id"] for t in layers[2]} == {"a", "b"}
-    # topo_order stays a deterministic flattening
-    assert [t["id"] for t in analyze.topo_order(tasks)] == ["s", "lib", "a", "b"]
-
-
-def test_decompose_accepts_component_library(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    rp = _make_paths(tmp_path)
-    rp.app_spec_json.write_text(json.dumps(_VALID_APP_SPEC))
-    tasks = {
-        "tasks": [
-            {"id": "s", "type": "scaffold", "title": "S", "screens": [], "deps": []},
-            {"id": "lib", "type": "component_library", "title": "L", "screens": [], "deps": ["s"]},
-            {"id": "h", "type": "screen", "title": "H", "screens": ["0000"], "deps": ["lib"]},
-        ]
-    }
-    monkeypatch.setattr(analyze.subprocess, "run", _fake_claude("tasks.json", tasks))
-    out = analyze.decompose(rp)
-    saved = json.loads(out.read_text())["tasks"]
-    assert saved[1]["type"] == "component_library"
-    assert saved[2]["deps"] == ["lib"]
-
-
-def test_decompose_requires_app_spec(tmp_path: Path) -> None:
-    rp = _make_paths(tmp_path)
-    with pytest.raises(RuntimeError, match="app_spec.json missing"):
-        analyze.decompose(rp)
-
-
-def test_decompose_rejects_dependency_cycle(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    rp = _make_paths(tmp_path)
-    rp.app_spec_json.write_text(json.dumps(_VALID_APP_SPEC))
-    cyclic = {
-        "tasks": [
-            {"id": "a", "type": "scaffold", "title": "A", "screens": [], "deps": ["b"]},
-            {"id": "b", "type": "screen", "title": "B", "screens": [], "deps": ["a"]},
-        ]
-    }
-    monkeypatch.setattr(analyze.subprocess, "run", _fake_claude("tasks.json", cyclic))
-
-    with pytest.raises(RuntimeError, match="cycle"):
-        analyze.decompose(rp)
-
-
-def test_decompose_rejects_unknown_dep(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    rp = _make_paths(tmp_path)
-    rp.app_spec_json.write_text(json.dumps(_VALID_APP_SPEC))
-    bad = {
-        "tasks": [
-            {"id": "t-scaffold", "type": "scaffold", "title": "S", "screens": [], "deps": []},
-            {"id": "t-home", "type": "screen", "title": "H", "screens": [], "deps": ["nope"]},
-        ]
-    }
-    monkeypatch.setattr(analyze.subprocess, "run", _fake_claude("tasks.json", bad))
-
-    with pytest.raises(RuntimeError, match="unknown ids"):
-        analyze.decompose(rp)

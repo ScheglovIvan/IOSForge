@@ -20,9 +20,7 @@ then generated without any attribution SDK).
 
 from __future__ import annotations
 
-import json
 import os
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -77,43 +75,3 @@ def provision(
     }
     log.bind(stage="attribution").info("attribution.done", provider=_PROVIDER)
     return result
-
-
-def stage_ios_assets(
-    settings: Settings, flutter_app: Path, config: dict[str, Any]
-) -> dict[str, bool]:
-    """Stage the ATT description + SKAdNetwork list next to the generated app.
-
-    Both land inside ``flutter_app/`` so they survive the GitHub push and are applied
-    by the CodeMagic build. Returns which assets were staged.
-    """
-    staged = {"att": False, "skan_endpoint": False, "skadnetwork": False}
-
-    reason = str(config.get("att_usage_description") or "").strip()
-    endpoint = str(config.get("skan_report_endpoint") or "").strip()
-    if reason or endpoint:
-        perms_file = flutter_app / "ios_permissions.json"
-        perms: dict[str, Any] = {}
-        if perms_file.is_file():
-            try:
-                loaded = json.loads(perms_file.read_text())
-                perms = loaded if isinstance(loaded, dict) else {}
-            except ValueError:
-                perms = {}
-        if reason:
-            perms["NSUserTrackingUsageDescription"] = reason
-            staged["att"] = True
-        if endpoint:
-            perms["NSAdvertisingAttributionReportEndpoint"] = endpoint
-            staged["skan_endpoint"] = True
-        perms_file.write_text(json.dumps(perms, indent=2, ensure_ascii=False))
-
-    src = settings.skadnetwork_ids_path
-    if src and Path(src).is_file():
-        shutil.copy2(Path(src), flutter_app / "skadnetwork_ids.plist")
-        staged["skadnetwork"] = True
-    else:
-        log.warning("attribution.skadnetwork_missing", path=src)
-
-    log.info("attribution.staged", **staged)
-    return staged

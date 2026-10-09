@@ -35,7 +35,6 @@ def test_not_configured_before_upload(tmp_path: Path) -> None:
     s = _settings(tmp_path)
     assert ac.is_configured(s, _JOB) is False
     assert ac.load(s, _JOB) is None
-    assert ac.build_env(s, _JOB) is None
     assert ac.status(s, _JOB)["configured"] is False
 
 
@@ -71,15 +70,14 @@ def test_shared_fallback_when_job_has_no_own_key(tmp_path: Path) -> None:
     assert st2["own"] is True and st2["key_id"] == "OWNKEY0002"
 
 
-def test_build_env_has_the_four_signing_vars(tmp_path: Path) -> None:
+def test_loaded_credentials_carry_the_signing_material(tmp_path: Path) -> None:
     s = _settings(tmp_path)
     _store(s, _JOB, name="")
-    env = ac.build_env(s, _JOB)
-    assert env is not None
-    assert env["APP_STORE_CONNECT_ISSUER_ID"] == _ISSUER
-    assert env["APP_STORE_CONNECT_KEY_IDENTIFIER"] == _KEY_ID
-    assert "PRIVATE KEY" in env["APP_STORE_CONNECT_PRIVATE_KEY"]
-    assert "RSA PRIVATE KEY" in env["CERTIFICATE_PRIVATE_KEY"]
+    creds = ac.load(s, _JOB)
+    assert creds is not None
+    assert (creds.issuer_id, creds.key_id) == (_ISSUER, _KEY_ID)
+    assert "PRIVATE KEY" in creds.private_key_p8
+    assert "RSA PRIVATE KEY" in creds.certificate_private_key
 
 
 def test_secret_files_are_mode_600(tmp_path: Path) -> None:
@@ -94,11 +92,11 @@ def test_secret_files_are_mode_600(tmp_path: Path) -> None:
 def test_certificate_key_is_reused_not_regenerated(tmp_path: Path) -> None:
     s = _settings(tmp_path)
     _store(s, _JOB)
-    first = ac.build_env(s, _JOB)
+    first = ac.load(s, _JOB)
     _store(s, _JOB, name="changed")
-    second = ac.build_env(s, _JOB)
+    second = ac.load(s, _JOB)
     assert first is not None and second is not None
-    assert second["CERTIFICATE_PRIVATE_KEY"] == first["CERTIFICATE_PRIVATE_KEY"]
+    assert second.certificate_private_key == first.certificate_private_key
 
 
 def test_status_masks_issuer_and_hides_key_material(tmp_path: Path) -> None:

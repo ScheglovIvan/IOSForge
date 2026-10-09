@@ -1,4 +1,4 @@
-"""CodegenTarget + BuildProvider implementations (Flutter->iOS first) (SPEC §5.5, §9).
+"""CodegenTarget + BuildProvider implementations (native SwiftUI) (SPEC §5.5, §9).
 
 Interfaces and domain types are in :mod:`iosforge.providers.base`. CodegenTarget
 implementations register under

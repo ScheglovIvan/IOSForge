@@ -1,7 +1,7 @@
 """Tests for the SCOPE approval endpoint in the admin panel (Phase 2 scope-gate).
 
 Exercises the state gate (only NEEDS_INPUT + scope_status="proposed" is allowed)
-and the happy path (job flips to CODEGEN and build_frontend is enqueued) by
+and the happy path (job flips to CODEGEN and build_swiftui is enqueued) by
 calling the route function directly with fakes, no live infra.
 """
 
@@ -157,7 +157,7 @@ def test_scope_approve_happy_path(monkeypatch: Any) -> None:
 
 
 def test_scope_approve_full_mode_still_advances_to_codegen(monkeypatch: Any) -> None:
-    # Full mode: the prune becomes a no-op downstream in build_frontend, but the
+    # Full mode: the prune becomes a no-op downstream in build_swiftui, but the
     # endpoint must still approve the scope and move the job into CODEGEN.
     job = _FakeJob(JobState.NEEDS_INPUT, {"scope_status": "proposed"})
     resp, db, enqueued, saved = _call(
@@ -188,7 +188,7 @@ def test_scope_approve_commits_before_enqueue_even_if_broker_down(monkeypatch: A
     # and _enqueue_build swallows broker errors. So a broker outage leaves the job
     # APPROVED + CODEGEN with no task running — it must be re-enqueued by hand. This
     # mirrors the existing _enqueue pattern in jobs_create (not a Phase-2 regression).
-    import iosforge.worker.run_job as worker
+    import iosforge.worker.swiftui_build as worker
 
     job = _FakeJob(JobState.NEEDS_INPUT, {"scope_status": "proposed"})
     user = _user()
@@ -205,7 +205,7 @@ def test_scope_approve_commits_before_enqueue_even_if_broker_down(monkeypatch: A
     def _boom(*_a: Any, **_k: Any) -> None:
         raise RuntimeError("broker unreachable")
 
-    monkeypatch.setattr(worker.build_frontend, "apply_async", _boom)
+    monkeypatch.setattr(worker.build_swiftui, "apply_async", _boom)
 
     request = _FakeRequest(FormData([("csrf_token", user.csrf_token), ("include_home", "on")]))
     resp = asyncio.run(

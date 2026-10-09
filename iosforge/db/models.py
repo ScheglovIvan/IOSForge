@@ -274,7 +274,7 @@ class GenerationResult(Base):
         ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
     )
 
-    # Storage key/path to the generated Flutter sources.
+    # Storage key of the generated app sources (xcode_app.zip; flutter_app.zip on legacy jobs).
     sources_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     # Compliance score in [0, 1] (the ">= 95%" metric, SPEC §5.5).
     compliance_score: Mapped[float | None] = mapped_column(Float, nullable=True)

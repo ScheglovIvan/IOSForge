@@ -82,17 +82,6 @@ def test_unreadable_audio_is_reported_not_raised(tmp_path: Path) -> None:
     assert ae.measure(broken) == []
 
 
-def test_generated_dart_is_valid_and_named_by_clip() -> None:
-    source = ae.to_dart({"tone_water.mp3": [0.1, 0.5, 1.0], "chime.mp3": [0.2, 0.4]})
-    assert "kSoundEnvelopes" in source
-    assert "'tone_water.mp3': <double>[" in source
-    assert "0.100, 0.500, 1.000," in source
-    assert source.count("<double>[") == 2
-    assert source.rstrip().endswith("};")
-    # regenerated on every build, so it must announce itself as generated
-    assert "GENERATED" in source
-
-
 def test_measure_directory_skips_non_audio(tmp_path: Path) -> None:
     audio = tmp_path / "audio"
     _tone(audio / "real.mp3", "0.5*sin(2*PI*t*300)")

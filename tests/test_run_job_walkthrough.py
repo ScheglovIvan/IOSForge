@@ -21,7 +21,7 @@ import pytest
 from iosforge.common.config import Settings
 from iosforge.common.types import JobState
 from iosforge.db.models import ApkArtifact, Job, WalkthroughResult
-from iosforge.mvp import analyze, claude_gen, compliance, crawl, emulator, screen_filter
+from iosforge.mvp import analyze, crawl, emulator, screen_filter
 from iosforge.mvp.paths import RunPaths
 from iosforge.worker import run_job as run_job_module
 
@@ -99,13 +99,6 @@ def test_walkthrough_only_finishes_done_and_skips_codegen(
 
     codegen_calls: list[str] = []
     monkeypatch.setattr(analyze, "analyze", lambda *a, **k: codegen_calls.append("analyze"))
-    monkeypatch.setattr(analyze, "decompose", lambda *a, **k: codegen_calls.append("decompose"))
-    monkeypatch.setattr(
-        claude_gen, "generate_from_tasks", lambda *a, **k: codegen_calls.append("generate")
-    )
-    monkeypatch.setattr(
-        compliance, "refine_web_until_complete", lambda *a, **k: codegen_calls.append("refine")
-    )
 
     result = run_job_module.run_job.run(job_id)
 
@@ -154,11 +147,6 @@ def test_analysis_only_runs_filter_and_analyze_then_stops(
         calls.append("analyze")
 
     monkeypatch.setattr(analyze, "analyze", _fake_analyze)
-    monkeypatch.setattr(analyze, "decompose", lambda *a, **k: calls.append("decompose"))
-    monkeypatch.setattr(claude_gen, "generate_from_tasks", lambda *a, **k: calls.append("generate"))
-    monkeypatch.setattr(
-        compliance, "refine_web_until_complete", lambda *a, **k: calls.append("refine")
-    )
 
     result = run_job_module.run_job.run(job_id)
 

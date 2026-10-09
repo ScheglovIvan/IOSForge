@@ -7,7 +7,8 @@ deterministic task DAG (no LLM decomposition) through
 single ``AppTabBar``) → every screen in parallel, each in its own sandbox copy of
 the workspace from which only the screen's owned paths are harvested. The compile
 gate restores the contract, lints permissions and builds with xcodebuild, looping
-a bounded fix task. Not yet wired into ``run_job`` (future ``codegen_target``).
+a bounded fix task. The pipeline runs it from
+:func:`iosforge.worker.swiftui_build.build_swiftui` on the Mac ``xcode`` queue.
 """
 
 from __future__ import annotations

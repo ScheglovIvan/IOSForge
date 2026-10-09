@@ -106,39 +106,17 @@ class Settings(BaseSettings):
     compliance_weight_divergence: float = Field(default=0.2, ge=0.0, le=1.0)
     compliance_divergence_min: float = Field(default=0.4, ge=0.0, le=1.0)
     compliance_max_iterations: int = Field(default=3, gt=0)
-    # Web screen-similarity verification: after frontend codegen, build the app
-    # for web and render each screen in headless Chromium via the canonical preview
-    # route /#/screen/<id>, then vision-judge vs the originals. Non-fatal — a build
-    # or render failure never loses the generated frontend. chromium_bin empty =
-    # auto-discover (chromium / chromium-browser / google-chrome).
-    verify_frontend_web: bool = Field(default=True)
-    # Compile gate: after codegen (and augment/rework) run `flutter analyze`; if it reports
-    # ERROR-severity issues, run a bounded rework fix loop so non-compiling code never reaches
-    # GitHub / the CodeMagic iOS build (which would otherwise waste a full build to surface it).
-    codegen_compile_gate: bool = Field(default=True)
-    codegen_compile_gate_attempts: int = Field(default=2, ge=0, le=5)
     # Wall-clock budget for a single rework/augment `claude` codegen pass. The default
     # 1800s is too tight for a substantial rework (rebrand + several new features across a
     # large app), where the CLI hits the limit and PipelineTask retries burn hours. Tunable
     # via env so a big repositioning pass can run without a code change.
     codegen_rework_timeout_s: int = Field(default=5400, gt=0)
-    # Frontend web-verify pass bar. Distinct from the SPEC ≥0.95 iOS-compliance goal
-    # (compliance_threshold): a headless web render of a Flutter app compared to
-    # native iOS screenshots has an inherent ceiling, so the frontend MVP passes at
-    # 0.80 similarity.
+    # Vision-Judge pass bar of the generated SwiftUI app on the iOS Simulator. Distinct
+    # from the SPEC ≥0.95 iOS-compliance goal (compliance_threshold): the clone must
+    # diverge visually by design, so the MVP passes at 0.80.
     frontend_verify_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
-    web_render_wait_ms: int = Field(default=15000, gt=0)
-    web_render_window: str = Field(default="390,844")
+    # Headless Chromium for the store-slide renderer (empty = discover on PATH).
     chromium_bin: str = Field(default="")
-    # Structural web verification (Stage VERIFY): static audit of the generated
-    # flutter_app/lib against the screens.json nav graph — nav_audit (missing
-    # screens / dead links / missing edges) + blank_screens heuristic. No runtime
-    # browser, no new deps.
-    verify_web_structural: bool = Field(default=True)
-    # Auto end-of-pipeline hard-gated verify loop (build_web → render → evaluate →
-    # nav_audit → fix-tasks → codegen → re-audit) instead of a single-pass
-    # verify_web. Opt-in — the codegen host needs Flutter web + Chromium.
-    pipeline_web_verify_loop: bool = Field(default=False)
     # On loop exhaustion with structural gaps still open, end the Job in
     # NEEDS_INPUT (human decides ship/rework) instead of silently DONE.
     web_verify_hard_gate: bool = Field(default=True)
@@ -152,16 +130,16 @@ class Settings(BaseSettings):
     walkthrough_job_timeout_s: int = Field(default=1200, gt=0)
     walkthrough_action_timeout_s: int = Field(default=15, gt=0)
     # Walkthrough-only mode: finish a Job (DONE) right after the emulator crawl,
-    # skipping the codegen/compliance stage (e.g. when Flutter is unavailable).
+    # skipping analysis and the SwiftUI build (legacy APK path).
     pipeline_stop_after_walkthrough: bool = Field(default=False)
     # Analysis-only mode: run screen-filter + analyze, then finish (DONE) —
-    # skips decompose/codegen/compliance. For inspecting the App Spec cheaply.
+    # skips the SwiftUI build. For inspecting the App Spec cheaply.
     pipeline_stop_after_analyze: bool = Field(default=False)
     # Scope gate (Stage SCOPE): after analysis, propose an MVP scope + iOS
     # feasibility report, persist scope.json(proposed) and park the Job in
-    # NEEDS_INPUT for an operator to approve/edit before codegen (then build_frontend
+    # NEEDS_INPUT for an operator to approve/edit before codegen (then build_swiftui
     # prunes app_spec to the approved screens). Opt-in — default False keeps the
-    # current auto-chain (ANALYSIS -> build_frontend, decompose without prune).
+    # auto-chain (ANALYSIS -> build_swiftui over every screen).
     pipeline_scope_gate: bool = Field(default=False)
     # Admin/backend deliverable (Firebase + Rowy + Apphud + Stream): emit an
     # admin/ scaffold alongside the app when app_spec.backend.admin_panel_needed.
@@ -180,9 +158,6 @@ class Settings(BaseSettings):
     # so parentless create typically fails (logged as a warning).
     firebase_parent: str = Field(default="")
     firebase_project_prefix: str = Field(default="iosforge")
-    # Generate the backend-connected Flutter app (flutter_wiring) wired to the
-    # provisioned project's web config, alongside the static codegen output.
-    generate_wired_app: bool = Field(default=True)
     # Apphud subscriptions. Apphud has no provisioning REST API (apps/products/
     # paywalls/placements are configured once in the Apphud dashboard), so the
     # pipeline only injects the public SDK key (app_…) + the spec's product ids into
@@ -237,9 +212,6 @@ class Settings(BaseSettings):
     # SwiftUI codegen: generate divergent replacement images for decorative photos the
     # capture could not provide (Replicate, costs money). Off = local placeholders.
     codegen_generate_images: bool = Field(default=False)
-    # Which stack build_frontend generates: the legacy Flutter path or native SwiftUI
-    # (Mac worker: Xcode + iOS Simulator). Switched to swiftui at the end of the pivot.
-    codegen_target: str = Field(default="flutter", pattern="^(flutter|swiftui)$")
     # Native delivery (SwiftUI): Apple Developer team for automatic signing; empty means
     # an unsigned archive + unsigned IPA only. Uploading to App Store Connect is an
     # external action and stays off unless explicitly enabled.
@@ -262,49 +234,22 @@ class Settings(BaseSettings):
     r2_secrets_path: str = Field(default="")
     r2_bucket: str = Field(default="")
     r2_public_base: str = Field(default="")
-    # --- Fully automatic pipeline: Analysis auto-chains into Frontend Build +
-    # Code Generation, then GitHub Upload (no manual button). ---
+    # --- Fully automatic pipeline: Analysis (or the approved scope) auto-chains into
+    # the SwiftUI build on the Mac worker, then native delivery (no manual button). ---
     auto_build_frontend: bool = Field(default=True)
-    # Per-task codegen retry budget (Code Generation "Retrying…" then permanent-fail).
-    codegen_task_max_attempts: int = Field(default=2, gt=0)
-    # GitHub Upload stage: push the generated project to a new public repo. Token
-    # (scope repo/public_repo) lives in a gitignored env file (github_token_path,
-    # GITHUB_TOKEN=...). Empty token / publish off = the stage is skipped.
-    github_publish: bool = Field(default=True)
     github_token_path: str = Field(default="")
     github_api_base: str = Field(default="https://api.github.com")
     github_repo_private: bool = Field(default=False)
-    github_repo_prefix: str = Field(default="")
-    # Legal pages stage: the Privacy Policy published to the app repo's gh-pages
+    # Legal pages stage: the Privacy Policy published to a pages repo's gh-pages
     # branch needs a reachable contact address, which App Store review checks.
     legal_contact_email: str = Field(default="support@iosforge.app")
-    # CodeMagic Integration stage: import the pushed repo as a CodeMagic app and
-    # commit a codemagic.yaml (iOS). No build/sign/IPA/TestFlight here. Token
-    # (x-auth-token) lives in a gitignored env file (codemagic_token_path,
-    # CODEMAGIC_TOKEN=...). Empty token / off = the stage is skipped.
-    codemagic_integration: bool = Field(default=True)
-    codemagic_token_path: str = Field(default="")
-    codemagic_api_base: str = Field(default="https://api.codemagic.io")
-    codemagic_team_id: str = Field(default="")
-    codemagic_sync_timeout_s: int = Field(default=120, gt=0)
-    # Reference codemagic.yaml: when set to a proven project ("owner/repo") its config
-    # is fetched and reused (substituting only the per-app bundle id). Empty (default) →
-    # the built-in UNSIGNED iOS template (sideload / jailbreak, no Apple signing).
-    codemagic_template_repo: str = Field(default="")
     codemagic_bundle_prefix: str = Field(default="com.batteam")
-    # Signed App Store build: the name of the App Store Connect API key as configured in
-    # the CodeMagic team (Personal account → Integrations → Developer Portal). The .p8 /
-    # Issuer ID / Key ID live in CodeMagic, never here. Per-job override goes in
-    # Job.source_app_metadata (asc_api_key_name) since apps may ship under different
-    # Apple accounts; the numeric App Store id is per-job (appstore_apple_id). Empty +
-    # no per-job value = the signed store workflow is not used (falls back to unsigned).
-    codemagic_asc_api_key_name: str = Field(default="")
     # App Store Connect signing credential uploaded PER JOB in the admin (each app ships
     # under its own Apple account, so the .p8 / Issuer ID / Key ID are per app). Stored in
     # gitignored files under secrets/jobs/<job_id>/, never committed, never in .env, chmod
-    # 600. They let the pipeline sign + upload WITHOUT registering the key in the CodeMagic
-    # UI: the key is injected as build environment variables at trigger time, and a reusable
-    # RSA certificate key is generated once per app. A credential dropped in the shared paths
+    # 600. Native delivery passes the key to xcodebuild (-allowProvisioningUpdates) and to
+    # altool by path; a reusable RSA certificate key is generated once per app. A credential
+    # dropped in the shared paths
     # below (no UI) is an optional fallback when a job has none of its own.
     asc_jobs_secrets_dir: str = Field(default="secrets/jobs")
     asc_api_key_secrets_path: str = Field(default="secrets/asc_api_key.env")
@@ -312,15 +257,6 @@ class Settings(BaseSettings):
     asc_certificate_key_path: str = Field(default="secrets/asc_certificate_private_key.pem")
     # Upper bound on an uploaded App Store Connect .p8 (they are ~250 bytes).
     asc_api_key_max_bytes: int = Field(default=16 * 1024, gt=0)
-    # Auto-trigger the CodeMagic iOS build at the end of the pipeline (instead of the
-    # manual button). Every run spends CodeMagic minutes; the template is UNSIGNED.
-    codemagic_auto_build: bool = Field(default=True)
-    # App Store Connect API key for a future SIGNED "real" build (Apple Dev account
-    # required). Empty for now — the "real" profile still produces an unsigned but
-    # correctly-branded build (real bundle id / name) until these are provided.
-    appstore_connect_key_path: str = Field(default="")
-    appstore_connect_key_id: str = Field(default="")
-    appstore_connect_issuer_id: str = Field(default="")
     # Seed placeholder CONTENT (series/episodes + tiny dummy videos in Storage) so
     # the generated app is visually reviewable; swap for real content later.
     seed_placeholder_content: bool = Field(default=True)
@@ -335,10 +271,6 @@ class Settings(BaseSettings):
     # ad_networks/ad_placements/ads from app_spec and instructs no ad slots;
     # codegen adds no ad SDKs/widgets. Set False to reproduce the app's ads.
     no_ads: bool = Field(default=True)
-    # Stage 3 codegen orchestration: "claude" = single local Claude CLI task runner;
-    # "hermes" = Hermes Agent orchestrates, local Claude CLI executes (Variant A);
-    # "cloud" = the local Claude Code agent orchestrates AND builds directly.
-    codegen_orchestrator: str = Field(default="claude")
     # Max concurrent screen-build workers when the orchestrator parallelizes the
     # screen layer (worktree-per-task). Caps rate-limit / subscription pressure.
     codegen_max_parallel: int = Field(default=4, gt=0)
@@ -348,10 +280,6 @@ class Settings(BaseSettings):
     design_divergence: bool = Field(default=True)
     # Swap captured fonts for similar-but-different families (same typographic class).
     design_font_substitution: bool = Field(default=True)
-    # Content-level anti-clone: codegen paraphrases user-facing copy (same meaning,
-    # different wording), diverges icon style and drops the source app's brand marks
-    # (logo/wordmark). Photographic content assets are kept. False = verbatim copy.
-    design_content_divergence: bool = Field(default=True)
 
     # --- Admin panel (SPEC §7) — internet-facing behind a TLS reverse proxy ---
     # Secret for signing session ids / CSRF tokens. MUST be set via env in prod.

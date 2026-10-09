@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from iosforge.mvp import analyze, claude_gen
+from iosforge.mvp import analyze
 from iosforge.mvp.analyze import ANALYZE_PROMPT, stage_archive_context
 from iosforge.mvp.paths import RunPaths
 
@@ -153,29 +153,6 @@ def test_analyze_workspace_stages_monetization_channels(tmp_path: Path) -> None:
     cg.mkdir(parents=True, exist_ok=True)
     stage_archive_context(rp, cg, include_bytes=True)
     assert not (cg / "sdks.json").exists()
-
-
-def test_task_prompt_wires_fonts_media_and_source() -> None:
-    scaffold = claude_gen._task_prompt(
-        {"id": "t0", "type": "scaffold", "title": "x", "screens": []}
-    )
-    # divergent design: fonts come from google_fonts using the substituted families,
-    # not by bundling the original app's .ttf files
-    assert "google_fonts" in scaffold and "design_tokens.font" in scaffold
-
-    screen = claude_gen._task_prompt(
-        {"id": "t1", "type": "screen", "title": "Splash", "screens": ["0000"]}
-    )
-    assert "source/0000.json" in screen
-    assert "asset_ref.media_id" in screen
-    assert "splash_background" in screen
-
-
-def test_task_prompt_no_ads_toggle() -> None:
-    on = claude_gen._task_prompt({"id": "t", "type": "screen", "title": "x", "screens": []}, True)
-    off = claude_gen._task_prompt({"id": "t", "type": "screen", "title": "x", "screens": []}, False)
-    assert "NO ADS" in on and "google_mobile_ads" in on
-    assert "NO ADS" not in off
 
 
 def test_strip_ads_empties_monetization() -> None:

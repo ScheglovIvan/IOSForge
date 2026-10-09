@@ -1,6 +1,6 @@
 """Artifact storage abstraction over a versioned MinIO/S3 bucket (SPEC §8, §10).
 
-The pipeline produces artifacts (screenshots, APKs, Flutter sources, reports)
+The pipeline produces artifacts (screenshots, app sources, IPAs, reports)
 that must be addressable per Job and kept with full version history. This module
 exposes:
 

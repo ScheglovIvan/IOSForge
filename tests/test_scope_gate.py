@@ -7,7 +7,7 @@ infra, no ``claude`` CLI):
   ``NEEDS_INPUT`` with ``scope_status="proposed"`` + a version id, and records a
   ``Stage.SCOPE`` timeline row that it opens and closes.
 * ``run_job`` appstore branch — with ``pipeline_scope_gate=True`` the analysis run
-  hands off to ``scope_gate`` (enqueued, NOT decompose/build in the same pass);
+  hands off to ``scope_gate`` (enqueued, NOT the SwiftUI build in the same pass);
   with the flag off the prior behaviour is unchanged (covered by the existing
   ``tests/test_run_job_appstore.py`` regression suite).
 """
@@ -30,6 +30,7 @@ from iosforge.mvp.paths import RunPaths
 from iosforge.mvp.scope_models import FeasibilityReport, ScopeCounts, ScopeDecision, ScreenScope
 from iosforge.storage.client import ArtifactRef
 from iosforge.worker import run_job as run_job_module
+from iosforge.worker import swiftui_build
 
 
 def _proposed_scope() -> ScopeDecision:
@@ -251,7 +252,6 @@ def _wire_appstore(
         return paths.app_spec_json
 
     monkeypatch.setattr(analyze, "analyze", _fake_analyze)
-    monkeypatch.setattr(analyze, "decompose", lambda *a, **k: calls.append("decompose"))
     return session, calls
 
 
@@ -269,10 +269,10 @@ def test_run_job_scope_gate_on_routes_to_scope(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(
         run_job_module.scope_gate, "apply_async", lambda *a, **k: enqueued.append((a, k))
     )
-    # build_frontend must NOT be enqueued in this pass even though auto_build defaults on.
+    # build_swiftui must NOT be enqueued in this pass even though auto_build defaults on.
     build_enqueued: list[Any] = []
     monkeypatch.setattr(
-        run_job_module.build_frontend, "apply_async", lambda *a, **k: build_enqueued.append(k)
+        swiftui_build.build_swiftui, "apply_async", lambda *a, **k: build_enqueued.append(k)
     )
 
     result = run_job_module.run_job.run(str(job.id))
@@ -283,7 +283,6 @@ def test_run_job_scope_gate_on_routes_to_scope(monkeypatch: pytest.MonkeyPatch) 
     assert enqueued[0][1].get("args") == [str(job.id)]
     assert build_enqueued == []
     assert "analyze" in calls
-    assert "decompose" not in calls  # handed off before codegen
     assert any(isinstance(o, WalkthroughResult) for o in session.added)
 
 

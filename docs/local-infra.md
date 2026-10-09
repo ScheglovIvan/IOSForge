@@ -72,20 +72,27 @@ docker run --rm --network iosforge_default --entrypoint sh minio/mc:latest -c \
   for artifact version history (SPEC §8, §10; used later by T-2.3 storage abstraction).
 - Restart policy is `unless-stopped` for the long-running services; `minio-init` is `no`.
 
-## Mobile toolchain (Android SDK + emulator + Flutter)
+## Mac toolchain (SwiftUI build) and the legacy Android emulator
+
+The SwiftUI build, the Vision Judge and native delivery run only on a Mac worker
+(`celery ... worker -Q xcode`) with Xcode (iOS Simulator runtime) and XcodeGen
+(`brew install xcodegen`); see `docs/mvp-vertical.md`.
+
+### Legacy Android emulator (APK input path)
 
 The emulator/crawl stage (`iosforge/mvp/emulator.py`) drives a host-installed Android SDK
 via `adb`/`emulator` and expects an AVD named `mvp` (`ANDROID_SDK_ROOT`, default
 `/opt/android-sdk`; `ADMIN_AVD=mvp`). Install everything with the idempotent script:
 
 ```bash
-sudo bash scripts/install_android_toolchain.sh      # JDK17 + SDK + AVD 'mvp' + Flutter
+sudo bash scripts/install_android_toolchain.sh      # JDK17 + SDK + AVD 'mvp'
 source /etc/profile.d/android-sdk.sh                 # load ANDROID_SDK_ROOT + PATH
 ```
 
 Installs: JDK 17, Android command-line tools → `/opt/android-sdk`, `platform-tools`,
 `emulator`, `platforms;android-34`, `build-tools;34.0.0`, system image
-`android-34;google_apis;x86_64`, AVD `mvp` (pixel_6), and Flutter stable in `/opt/flutter`.
+`android-34;google_apis;x86_64` and AVD `mvp` (pixel_6). (The script may still install
+Flutter; the pipeline no longer uses it.)
 Override defaults via env vars (`API_LEVEL`, `SYSTEM_IMAGE`, `AVD_NAME`, `CMDLINE_TOOLS_VER`).
 
 Requirements: Ubuntu x86_64, `/dev/kvm` present (hardware accel). The emulator runs headless
@@ -101,5 +108,4 @@ sudo usermod -aG kvm "$USER"      # then re-login
 emulator -list-avds                                  # -> mvp
 emulator -avd mvp -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect &
 adb wait-for-device && adb shell getprop sys.boot_completed    # -> 1
-flutter doctor                                       # Android toolchain OK
 ```

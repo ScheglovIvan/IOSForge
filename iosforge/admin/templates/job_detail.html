@@ -4,7 +4,8 @@
 {% block crumbs %}<a href="/jobs">Jobs</a> / {{ job.source_app_ref }}{% endblock %}
 {% block head %}
   {% set build_running = build and build.status not in ['finished', 'failed', 'canceled', 'cancelled', 'timeout', 'skipped'] %}
-  {% if job.state.value not in ['done', 'failed', 'cancelled'] or build_running %}
+  {% set xcode_running = xcode_build and xcode_build.status in ['queued', 'archiving'] %}
+  {% if job.state.value not in ['done', 'failed', 'cancelled', 'needs_input'] or build_running or xcode_running %}
   <meta http-equiv="refresh" content="8">
   {% endif %}
 {% endblock %}
@@ -18,7 +19,7 @@
     </div>
     {{ state_pill(job.state) }}
   </div>
-  <p class="hint">Analysis → Frontend Build → Code Generation → GitHub Upload run automatically.
+  <p class="hint">Analysis → Scope → SwiftUI build on the Mac worker (codegen + Vision Judge) → native archive / IPA.
     Created {{ job.created_at.strftime('%Y-%m-%d %H:%M:%S') }}.</p>
   <div class="form-actions">
     <a class="btn btn--ghost" href="/jobs/{{ job.id }}/artifacts">View artifacts</a>
@@ -220,7 +221,7 @@
         <h3>App Store signing key <span class="muted" style="font-weight:400;">— this app</span></h3>
         <p class="hint">This app ships under its own Apple account, so upload <em>its</em> App Store
           Connect API key here. Stored only in a gitignored file (mode&nbsp;600), injected into the
-          signed build at trigger time — never committed, and no CodeMagic-UI setup needed. Needed for
+          native archive at export time (Xcode automatic signing) — never committed. Needed for
           the <strong>Store</strong> profile.</p>
         {% if signed_ok %}<div class="alert alert--success">Signing key saved for this app.</div>{% endif %}
         {% if sign_error %}<div class="alert alert--danger">{{ sign_error }}</div>{% endif %}
@@ -294,17 +295,10 @@
         {% endif %}
       </div>
       {% endif %}
-      {% if (can_codemagic_build if can_codemagic_build is defined else can_ios_build) %}
+      {% if build %}
       <div class="card">
-        <h3>iOS build <span class="muted" style="font-weight:400;">— CodeMagic</span></h3>
+        <h3>iOS build <span class="muted" style="font-weight:400;">— CodeMagic (history)</span></h3>
         {% set running = build and build.status not in ['finished', 'failed', 'canceled', 'cancelled', 'timeout', 'skipped'] %}
-        <form method="post" action="/jobs/{{ job.id }}/codemagic-build">
-          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-          <div class="form-actions" style="margin-top:0;margin-bottom:12px;">
-            <button class="btn" type="submit" {{ 'disabled' if running else '' }}>Run iOS build</button>
-            {% if running %}<span class="hint">A build is in progress…</span>{% endif %}
-          </div>
-        </form>
         {% if build %}
         <div class="table-wrap" style="margin-bottom:12px;">
           <table class="kv">
@@ -319,22 +313,9 @@
         {% if build.status in ['failed', 'timeout'] and build.message %}
         <div class="alert alert--danger">Reason: {{ build.message }}</div>
         {% endif %}
-        <h4>Artifacts</h4>
-        {% if build.artifacts %}
-        <ul style="margin:6px 0;padding-left:18px;">
-          {% for a in build.artifacts %}
-          <li style="margin-bottom:6px;">{{ a.get('name') }} {% if a.get('size') %}<span class="muted">({{ (a.get('size') // 1024) }} KB)</span>{% endif %}
-            &nbsp;<a class="btn btn--ghost btn--sm" href="/jobs/{{ job.id }}/codemagic-build/artifact?i={{ loop.index0 }}">Download</a></li>
-          {% endfor %}
-        </ul>
-        {% else %}
-        <p class="hint">{{ 'No artifacts produced.' if not running else 'Waiting for artifacts…' }}</p>
-        {% endif %}
         <div class="form-actions">
           <a class="btn btn--ghost" href="/jobs/{{ job.id }}/codemagic-build/logs" target="_blank">View / download logs</a>
         </div>
-        {% else %}
-        <p class="hint">No build yet — press "Run iOS build".</p>
         {% endif %}
       </div>
       {% endif %}
@@ -655,11 +636,9 @@
       </div>
 
       <div class="card">
-        <h3>Re-verify <span class="muted" style="font-weight:400;">— structural web</span></h3>
-        <p class="hint">Static audit of the generated Flutter app against the navigation graph —
-          missing screens, dead links, missing edges and blank renders — with a fix loop. Runs only
-          when the pipeline is idle.</p>
-        {% set busy = job.state.value not in ['done', 'failed', 'cancelled', 'needs_input'] %}
+        <h3>Structural audit <span class="muted" style="font-weight:400;">— last Vision-Judge run</span></h3>
+        <p class="hint">Static audit of the generated app against the navigation graph — missing
+          screens, dead links, missing edges and blank renders. A rework round runs it again.</p>
         {% if gen.selftest_report and gen.selftest_report.structural %}
         {% set s = gen.selftest_report.structural %}
         <p class="hint">Last structural audit:
@@ -669,13 +648,6 @@
           &nbsp;·&nbsp; dead links {{ (s.dead_links or []) | length }}
           &nbsp;·&nbsp; missing edges {{ (s.missing_edges or []) | length }}</p>
         {% endif %}
-        <form method="post" action="/jobs/{{ job.id }}/verify-web">
-          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-          <div class="form-actions">
-            <button class="btn btn--ghost" type="submit" {{ 'disabled' if busy else '' }}>Re-verify (structural web)</button>
-            {% if busy %}<span class="hint">Pipeline is busy…</span>{% endif %}
-          </div>
-        </form>
       </div>
     </section>
     {% endif %}

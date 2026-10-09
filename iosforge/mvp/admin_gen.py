@@ -1,6 +1,6 @@
 """Generate the admin/backend deliverable (Firebase + Rowy + Apphud + Stream).
 
-Emitted alongside the Flutter client when ``app_spec.backend.admin_panel_needed``
+Emitted alongside the generated app when ``app_spec.backend.admin_panel_needed``
 is true. Deterministic (no secrets, no network): derives a Firestore schema from
 ``content.data_model``, Apphud products from ``monetization.packages``, a Rowy
 table config, security-rules and seed skeletons, and a PROVISION runbook. Actually
@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from iosforge.common.logging import get_logger
-from iosforge.mvp import ad_scaffold, backend_gen
+from iosforge.mvp import backend_gen
 
 log = get_logger("mvp.admin_gen")
 
@@ -310,9 +310,7 @@ def generate_admin(
             "(`ads_disabled_for_pro`).\n"
             "- `mediation.detected_networks` is best-effort from screen creatives; the exact "
             "mediation SDK requires APK static analysis (not performed).\n"
-            "- `flutter/` — ready google_mobile_ads client bundle (drop into the Flutter app).\n"
         )
-        ad_scaffold.build_ad_bundle(spec, out_dir / "ads" / "flutter")
 
     if has_video:
         (out_dir / "stream").mkdir(parents=True, exist_ok=True)

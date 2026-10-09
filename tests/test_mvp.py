@@ -7,14 +7,9 @@ and the staged B->C->D entry-point orchestration with the claude subprocess mock
 
 from __future__ import annotations
 
-import json
-import subprocess
 from pathlib import Path
-from typing import Any
 
-import pytest
-
-from iosforge.mvp import claude_gen, cli, crawl
+from iosforge.mvp import claude_gen, crawl
 from iosforge.mvp.paths import RunPaths
 
 _SAMPLE_UI_XML = """<?xml version='1.0' encoding='UTF-8'?>
@@ -49,145 +44,12 @@ def test_run_paths_layout(tmp_path: Path) -> None:
     assert rp.screens_dir.is_dir()
     assert rp.screens_dir == rp.run_dir / "screens"
     assert rp.screens_json == rp.run_dir / "screens.json"
-    assert rp.flutter_app == rp.run_dir / "flutter_app"
-
-
-def test_prepare_workspace_copies_inputs_and_prompt(tmp_path: Path) -> None:
-    rp = RunPaths.create(tmp_path)
-    (rp.screens_dir / "0000.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-    rp.screens_json.write_text('{"package":"com.x","screens":[]}')
-
-    claude_gen._prepare_workspace(rp)
-
-    assert (rp.claude_ws / "screens" / "0000.png").exists()
-    assert (rp.claude_ws / "screens.json").read_text().startswith('{"package"')
-    assert "Flutter app" in (rp.claude_ws / "PROMPT.md").read_text()
-
-
-_APP_SPEC = {
-    "app_name": "Todo",
-    "package": "com.example.todo",
-    "app_type": "productivity",
-    "one_liner": "A todo app",
-    "description": "Manage tasks",
-    "how_it_works": "Add and complete tasks",
-    "target_audience": "everyone",
-    "platforms": ["ios"],
-    "screens": [
-        {"id": "0000", "name": "Home", "purpose": "list", "screenshot": "screens/0000.png"}
-    ],
-    "market_research": {"similar_apps": [], "category_conventions": [], "sources": []},
-    "business_logic": {"summary": "tasks", "domain_rules": [], "workflows": []},
-    "requirements": [
-        {
-            "id": "REQ-home",
-            "type": "ubiquitous",
-            "text": "The system shall show the home screen on launch.",
-            "screens": ["0000"],
-            "source": "observed",
-        }
-    ],
-    "design_tokens": {"color": {"primary": {"$value": "#3366FF", "$type": "color"}}},
-    "navigation": {"type": "stack", "map": [], "deep_links": []},
-    "content": {"data_model": [], "content_inventory": [], "content_to_seed": []},
-    "monetization": {"model": "free", "paywalls": [], "packages": []},
-    "backend": {"backend_needed": False, "admin_panel_needed": False},
-    "permissions": [],
-    "integrations": [],
-    "cross_cutting": {"localization": ["en"], "onboarding": "none"},
-    "analysis_quality": {
-        "assumptions": [],
-        "open_questions": [],
-        "coverage_gaps": [],
-        "confidence": {"overall": "low"},
-    },
-    "acceptance_criteria": ["can add a task"],
-}
-
-_TASKS = {
-    "tasks": [
-        {"id": "t-scaffold", "type": "scaffold", "title": "Scaffold", "screens": [], "deps": []},
-        {
-            "id": "t-home",
-            "type": "screen",
-            "title": "Home",
-            "screens": ["0000"],
-            "deps": ["t-scaffold"],
-        },
-    ]
-}
-
-
-def _staged_claude() -> Any:
-    """A single claude stand-in dispatching across the analyze/decompose/task prompts."""
-
-    def _run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        cwd = Path(kwargs["cwd"])
-        prompt = cmd[2]
-        if "Current task:" in prompt:
-            app = cwd / "flutter_app"
-            if "- type: scaffold" in prompt:
-                (app / "lib").mkdir(parents=True, exist_ok=True)
-                (app / "pubspec.yaml").write_text("name: todo\n")
-                (app / "lib" / "main.dart").write_text("void main() {}\n")
-            else:
-                (app / "lib" / "screens").mkdir(parents=True, exist_ok=True)
-                (app / "lib" / "screens" / "home.dart").write_text("// screen\n")
-        elif "`tasks.json`" in prompt:
-            (cwd / "tasks.json").write_text(json.dumps(_TASKS))
-        elif "`app_spec.json`" in prompt:
-            (cwd / "app_spec.json").write_text(json.dumps(_APP_SPEC))
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-    return _run
-
-
-def test_cli_run_uses_staged_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    apk = tmp_path / "app.apk"
-    apk.write_bytes(b"PK\x03\x04")
-
-    def _fake_walk(paths: RunPaths, package: str, max_screens: int) -> dict[str, object]:
-        (paths.screens_dir / "0000.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-        result = {"package": package, "screens": [{"id": "0000"}]}
-        paths.screens_json.write_text(json.dumps(result))
-        return result
-
-    monkeypatch.setattr(cli.emulator, "start_emulator", lambda avd: None)
-    monkeypatch.setattr(cli.emulator, "wait_for_boot", lambda: None)
-    monkeypatch.setattr(cli.emulator, "install_apk", lambda apk: "com.example.todo")
-    monkeypatch.setattr(cli.emulator, "launch", lambda package: None)
-    monkeypatch.setattr(cli.crawl, "walk", _fake_walk)
-    monkeypatch.setattr(subprocess, "run", _staged_claude())
-
-    captured: dict[str, Any] = {}
-
-    def _fake_refine(paths: RunPaths, **kwargs: Any) -> dict[str, Any]:
-        captured["called"] = True
-        captured["flutter_app_exists"] = paths.flutter_app.exists()
-        return {"compliance_score": 0.97, "status": "pass", "stop_reason": "threshold_met"}
-
-    monkeypatch.setattr(cli.compliance, "refine_web_until_complete", _fake_refine)
-
-    flutter_app = cli.run(apk, tmp_path / "runs", max_screens=2, avd="mvp", do_build_check=False)
-
-    assert captured == {"called": True, "flutter_app_exists": True}
-
-    assert flutter_app.name == "flutter_app"
-    assert (flutter_app / "pubspec.yaml").exists()
-    assert (flutter_app / "lib" / "main.dart").exists()
-    assert (flutter_app / "lib" / "screens" / "home.dart").exists()
-    run_dir = flutter_app.parent
-    assert flutter_app == run_dir / "flutter_app"
-    assert (run_dir / "app_spec.json").exists()
-    assert (run_dir / "tasks.json").exists()
 
 
 def test_run_task_keeps_the_cli_transcript_for_a_silent_no_op(tmp_path, monkeypatch) -> None:
     # the CLI sometimes exits 0 writing nothing; without the transcript a refusal and a
     # crash look identical in the logs
     import subprocess as sp
-
-    from iosforge.mvp import claude_gen
 
     def fake_run(*args, **kwargs):
         return sp.CompletedProcess(args=[], returncode=0, stdout="wrote nothing", stderr="warn")
@@ -200,6 +62,5 @@ def test_run_task_keeps_the_cli_transcript_for_a_silent_no_op(tmp_path, monkeypa
 
 
 def test_task_tail_is_empty_when_nothing_ran(tmp_path) -> None:
-    from iosforge.mvp import claude_gen
 
     assert claude_gen.task_tail(tmp_path) == ""

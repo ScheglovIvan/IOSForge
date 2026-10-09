@@ -278,7 +278,7 @@ def scope_ids(
 ) -> list[str]:
     """Screens to build: the operator-approved core scope, else every app_spec screen.
 
-    Same rule as the Flutter build: only with ``pipeline_scope_gate`` on and an
+    Only with ``pipeline_scope_gate`` on and an
     ``approved`` scope (its pinned version); a missing or broken scope never blocks.
     """
     every = [str(s["id"]) for s in spec.get("screens", []) if isinstance(s, dict)]

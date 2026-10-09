@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import plistlib
 from pathlib import Path
 from typing import Any
 
@@ -47,44 +45,3 @@ def test_load_key_from_secrets_file(tmp_path: Path) -> None:
 
 def test_per_job_api_key_override_wins() -> None:
     assert at.provision(settings=_settings(), api_key="tj_perjob")["sdk_key"] == "tj_perjob"
-
-
-def test_stage_merges_att_into_existing_permissions(tmp_path: Path) -> None:
-    app = tmp_path / "flutter_app"
-    app.mkdir()
-    # the generator already wrote permissions — ATT must be added, not clobber them
-    (app / "ios_permissions.json").write_text(json.dumps({"NSCameraUsageDescription": "cam"}))
-    cfg = at.provision(settings=_settings())
-
-    staged = at.stage_ios_assets(_settings(), app, cfg)
-
-    perms = json.loads((app / "ios_permissions.json").read_text())
-    assert perms["NSCameraUsageDescription"] == "cam"  # preserved
-    assert perms["NSUserTrackingUsageDescription"]  # ATT added
-    assert perms["NSAdvertisingAttributionReportEndpoint"] == "https://tenjin-skan.com"
-    assert staged["att"] is True
-    assert staged["skan_endpoint"] is True
-    assert staged["skadnetwork"] is False  # no plist configured
-
-
-def test_stage_writes_permissions_when_file_absent(tmp_path: Path) -> None:
-    app = tmp_path / "flutter_app"
-    app.mkdir()
-    at.stage_ios_assets(_settings(), app, at.provision(settings=_settings()))
-    perms = json.loads((app / "ios_permissions.json").read_text())
-    assert "NSUserTrackingUsageDescription" in perms
-
-
-def test_stage_copies_skadnetwork_plist(tmp_path: Path) -> None:
-    src = tmp_path / "skan.plist"
-    items = [{"SKAdNetworkIdentifier": "abc123.skadnetwork"}]
-    src.write_bytes(plistlib.dumps({"SKAdNetworkItems": items}))
-    app = tmp_path / "flutter_app"
-    app.mkdir()
-    s = _settings(skadnetwork_ids_path=str(src))
-
-    staged = at.stage_ios_assets(s, app, at.provision(settings=s))
-
-    assert staged["skadnetwork"] is True
-    copied = plistlib.loads((app / "skadnetwork_ids.plist").read_bytes())
-    assert copied["SKAdNetworkItems"] == items

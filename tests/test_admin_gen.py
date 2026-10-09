@@ -111,6 +111,4 @@ def test_generate_admin_emits_ads_config(tmp_path: Path) -> None:
     rc = json.loads((out / "config" / "remote_config.template.json").read_text())
     assert rc["ads_frequency_interstitial"] == 3
     assert rc["ads_disabled_for_pro"] is True
-    # ready Flutter ad client bundle emitted alongside the config
-    assert (out / "ads" / "flutter" / "ad_service.dart").exists()
-    assert "google_mobile_ads" in (out / "ads" / "flutter" / "pubspec_snippet.yaml").read_text()
+    assert not (out / "ads" / "flutter").exists()

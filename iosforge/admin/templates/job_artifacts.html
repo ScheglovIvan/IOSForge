@@ -43,9 +43,9 @@
 </div>
 
 <div class="card">
-  <h3>Generated Flutter app</h3>
+  <h3>Generated app</h3>
   {% if gen and gen.sources_key %}
-    <p><a class="btn" href="/jobs/{{ job.id }}/artifacts/object?key={{ gen.sources_key | urlencode }}">Download flutter_app.zip</a></p>
+    <p><a class="btn" href="/jobs/{{ job.id }}/artifacts/object?key={{ gen.sources_key | urlencode }}">Download {{ gen.sources_key.rsplit('/', 1)[-1] }}</a></p>
     {% if gen.compliance_score is not none %}<p class="muted">Compliance: <strong style="color:var(--text);">{{ (gen.compliance_score * 100) | round(1) }}%</strong></p>{% endif %}
   {% else %}
     <p class="muted">Not generated yet.</p>

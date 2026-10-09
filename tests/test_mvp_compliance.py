@@ -168,12 +168,6 @@ def test_diffs_to_tasks_emits_diverge_when_below_floor() -> None:
     assert tasks[0]["type"] == "diverge"
 
 
-def test_corrective_diverge_prompt_forbids_layout_change() -> None:
-    prompt = compliance._corrective_prompt({"type": "diverge", "screens": ["0001"]})
-    assert "Do NOT change the LAYOUT" in prompt
-    assert "design system" in prompt
-
-
 def _make_paths(tmp_path: Path) -> RunPaths:
     rp = RunPaths.create(tmp_path)
     (rp.screens_dir / "0000.png").write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -206,43 +200,6 @@ def test_evaluate_uses_judge_json_and_writes_report(
     assert report["status"] == "soft_pass"
     assert rp.selftest_report_json.exists()
     assert json.loads(rp.selftest_report_json.read_text())["iteration"] == 1
-
-
-def test_snap_stage_dir_only_for_snap_binary() -> None:
-    assert compliance._snap_stage_dir("/usr/bin/chromium-real") is None
-    staged = compliance._snap_stage_dir("/snap/bin/chromium")
-    assert staged is not None and staged.exists()
-
-
-def test_render_web_moves_staged_shots_out_of_snap_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    paths = RunPaths.create(tmp_path / "run")
-    paths.screens_json.write_text('{"screens": [{"id": "0000"}, {"id": "0001"}]}')
-    web = paths.flutter_app / "build" / "web"
-    web.mkdir(parents=True)
-    (web / "index.html").write_text("<html></html>")
-
-    stage = tmp_path / "snapstage"
-    stage.mkdir()
-    monkeypatch.setattr(compliance, "_snap_stage_dir", lambda _bin: stage)
-
-    def _fake_run(cmd: list[str], **k: Any) -> Any:
-        for arg in cmd:
-            if arg.startswith("--screenshot="):
-                Path(arg.split("=", 1)[1]).write_bytes(b"\x89PNG\r\n\x1a\n")
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    monkeypatch.setattr(compliance.subprocess, "run", _fake_run)
-
-    result = compliance.render_generated_web(
-        paths, chromium_bin="/snap/bin/chromium", wait_ms=100, window="390,844"
-    )
-    assert len(result["screens"]) == 2
-    # shots were written into the snap stage dir, then moved into generated_screens_dir
-    assert (paths.generated_screens_dir / "0000.png").is_file()
-    assert (paths.generated_screens_dir / "0001.png").is_file()
-    assert not (stage / "0000.png").exists()
 
 
 def test_refine_per_screen_gate_waits_for_weakest(

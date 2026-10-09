@@ -7,8 +7,8 @@ host (an IP with a self-signed cert), so they are published to a ``gh-pages`` br
 of the app's own repository — a branch the code push never touches, so a re-generated
 app cannot delete its own legal pages.
 
-The text is built from what the app ACTUALLY does: the SDKs in its ``pubspec.yaml``,
-the usage descriptions in ``ios_permissions.json`` and the third-party endpoints it
+The text is built from what the app ACTUALLY does: the SDKs compiled into it,
+the Info.plist usage descriptions it declares and the third-party endpoints it
 calls. A policy that claims less than the app collects is worse than none at all, so
 nothing here is generic filler — every section is emitted because something in the
 build asked for it.
@@ -74,7 +74,7 @@ _SDK_PROCESSORS: dict[str, DataPractice] = {
         "identifier, device and app version, country and purchase history so your "
         "subscription can be restored on your other devices.",
     ),
-    "tenjin_plugin": DataPractice(
+    "tenjin": DataPractice(
         "Tenjin",
         "Measures which advertisement or link brought you to the app. Receives "
         "device and app identifiers, install and session events, and the country "
@@ -133,28 +133,12 @@ _ALWAYS = [
 ]
 
 
-def _read_sdk_names(pubspec: str) -> list[str]:
-    """Dependency names declared in a pubspec, in file order."""
-    names: list[str] = []
-    inside = False
-    for line in pubspec.splitlines():
-        if re.match(r"^dependencies:\s*$", line):
-            inside = True
-            continue
-        if inside and re.match(r"^[a-z_]+:\s*$", line) and not line.startswith(" "):
-            break
-        match = re.match(r"^\s{2}([a-z_0-9]+):", line)
-        if inside and match:
-            names.append(match.group(1))
-    return names
-
-
 def facts_from_build(
     *,
     app_name: str,
     bundle_id: str,
     contact_email: str,
-    pubspec: str,
+    sdks: list[str],
     permissions: dict[str, Any],
     remote_endpoints: list[DataPractice] | None = None,
 ) -> AppLegalFacts:
@@ -166,7 +150,7 @@ def facts_from_build(
             facts.practices.append(practice)
     facts.practices.extend(_ALWAYS)
     facts.practices.extend(remote_endpoints or [])
-    for sdk in _read_sdk_names(pubspec):
+    for sdk in sdks:
         processor = _SDK_PROCESSORS.get(sdk)
         if processor is not None and processor not in facts.processors:
             facts.processors.append(processor)

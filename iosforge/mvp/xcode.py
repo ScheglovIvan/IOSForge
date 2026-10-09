@@ -3,7 +3,7 @@
 Every subprocess the SwiftUI codegen and its compile gate run goes through this
 module, so Linux CI tests patch ``xcode.subprocess.run`` (or the helpers) and the
 real toolchain is only exercised on the Mac worker. A missing toolchain makes
-:func:`build_errors` a no-op, mirroring ``claude_gen.analyze_errors`` for Flutter.
+:func:`build_errors` a no-op.
 """
 
 from __future__ import annotations

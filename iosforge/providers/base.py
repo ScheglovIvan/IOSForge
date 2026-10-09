@@ -37,7 +37,7 @@ from iosforge.storage import ArtifactRef
 #:
 #: To let the Vision Judge render a single screen headlessly on the iOS
 #: Simulator, the generated app must accept a ``screen-id`` and open straight on
-#: that screen, bypassing normal navigation. This replaces the old Flutter web
+#: that screen, bypassing normal navigation. This replaced the old Flutter web
 #: route ``/#/screen/:id``. A :class:`CodegenTarget` implementation must emit an
 #: app whose ONLY mandatory headless entry point is the launch argument:
 #:

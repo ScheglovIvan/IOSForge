@@ -10,18 +10,7 @@ import pytest
 
 from iosforge.mvp import legal_pages as lp
 
-_CARPLAY_PUBSPEC = """name: carplay_sounds_clone
-dependencies:
-  flutter:
-    sdk: flutter
-  google_fonts: ^6.2.1
-  apphud: ^3.2.0
-  tenjin_plugin: ^1.2.0
-  geolocator: ^12.0.0
-dev_dependencies:
-  flutter_test:
-    sdk: flutter
-"""
+_CARPLAY_SDKS = ["apphud", "tenjin"]
 
 _CARPLAY_PERMS = {
     "NSLocationWhenInUseUsageDescription": "Show your position on the map.",
@@ -36,7 +25,7 @@ def _facts(**over: object) -> lp.AppLegalFacts:
         "app_name": "Dashboard for CarPlay",
         "bundle_id": "com.techq.dashboardforcarplay",
         "contact_email": "support@example.com",
-        "pubspec": _CARPLAY_PUBSPEC,
+        "sdks": _CARPLAY_SDKS,
         "permissions": _CARPLAY_PERMS,
     }
     kwargs.update(over)
@@ -59,20 +48,18 @@ def test_a_permission_the_app_does_not_request_is_not_claimed() -> None:
     assert "Camera" not in titles
 
 
-def test_sdks_in_the_pubspec_become_named_processors() -> None:
+def test_compiled_sdks_become_named_processors() -> None:
     names = {p.title for p in _facts().processors}
-    assert {"Apphud", "Tenjin", "Google Fonts"} <= names
+    assert {"Apphud", "Tenjin"} <= names
 
 
 def test_an_sdk_that_is_absent_is_not_listed() -> None:
-    spec = _CARPLAY_PUBSPEC.replace("  tenjin_plugin: ^1.2.0\n", "")
-    assert "Tenjin" not in {p.title for p in _facts(pubspec=spec).processors}
+    assert "Tenjin" not in {p.title for p in _facts(sdks=["apphud"]).processors}
 
 
-def test_dev_dependencies_are_not_read_as_processors() -> None:
-    spec = _CARPLAY_PUBSPEC + "  apphud: ^3.2.0\n"
-    facts = _facts(pubspec=spec)
-    assert [p.title for p in facts.processors].count("Apphud") == 1
+def test_a_repeated_sdk_is_listed_once() -> None:
+    facts = _facts(sdks=["apphud", "apphud", "unknown"])
+    assert [p.title for p in facts.processors] == ["Apphud"]
 
 
 def test_microphone_app_discloses_that_nothing_is_recorded() -> None:

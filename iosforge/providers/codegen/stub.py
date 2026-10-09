@@ -6,7 +6,7 @@ codegen stub fabricates a :class:`CodegenResult` pointing at a fixture sources
 ref (no Claude CLI call); the build stub fabricates an in-memory ``SUCCEEDED``
 :class:`BuildResult` and keeps a per-instance ``build_id -> result`` map so
 ``status``/``artifact``/``logs`` stay consistent. No real compilation, no
-Codemagic / Flutter toolchain is invoked.
+Xcode toolchain is invoked.
 
 Registered under ``(codegen, "stub")`` and ``(build, "stub")``.
 """

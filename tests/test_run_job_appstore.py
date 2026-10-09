@@ -22,6 +22,7 @@ from iosforge.mvp import analyze, appstore, frida_ingest
 from iosforge.mvp.appstore import AppStoreMetadata
 from iosforge.mvp.paths import RunPaths
 from iosforge.worker import run_job as run_job_module
+from iosforge.worker import swiftui_build
 
 
 class _FakeSession:
@@ -102,13 +103,12 @@ def test_appstore_archive_analysis_then_done(monkeypatch: pytest.MonkeyPatch) ->
         return paths.app_spec_json
 
     monkeypatch.setattr(analyze, "analyze", _fake_analyze)
-    monkeypatch.setattr(analyze, "decompose", lambda *a, **k: calls.append("decompose"))
 
     result = run_job_module.run_job.run(str(job.id))
 
     assert job.state is JobState.DONE
     assert "analysis" in result
-    assert calls == ["analyze"]  # analysis only — no decompose/codegen
+    assert calls == ["analyze"]  # analysis only — the SwiftUI build is a separate task
 
 
 def test_appstore_analysis_autochains_frontend_build(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -152,17 +152,17 @@ def test_appstore_analysis_autochains_frontend_build(monkeypatch: pytest.MonkeyP
 
     enqueued: list[tuple[Any, Any]] = []
     monkeypatch.setattr(
-        run_job_module.build_frontend,
+        swiftui_build.build_swiftui,
         "apply_async",
         lambda *a, **k: enqueued.append((a, k)),
     )
 
     result = run_job_module.run_job.run(str(job.id))
 
-    assert job.state is JobState.CODEGEN  # transitional — build_frontend picks up
-    assert enqueued and enqueued[0][1].get("queue") == "codegen"
+    assert job.state is JobState.CODEGEN  # transitional — build_swiftui picks up
+    assert enqueued and enqueued[0][1].get("queue") == "xcode"
     assert enqueued[0][1].get("args") == [str(job.id)]
-    assert "frontend build queued" in result
+    assert "SwiftUI build queued" in result
     assert job.source_app_metadata["track_name"] == "Example"  # metadata merged best-effort
     assert any(isinstance(o, WalkthroughResult) for o in session.added)
     assert any(k.endswith("app_spec.json") for k in _FakeStorage.put_keys)

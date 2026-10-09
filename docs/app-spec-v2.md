@@ -52,5 +52,6 @@ productivity / health / education / media / other) задаёт тип и акт
   (SPEC §6) — отложенный техдолг.
 
 ## Тестирование сгенерированного приложения
-Договорённость: проверяем как **Flutter-web в Chrome** (без сборки APK/iOS — быстрее). Критерии
-берутся из `acceptance_criteria`. Реализация web-прогона — отдельная задача (Stage D/E).
+Проверяем нативное SwiftUI-приложение на iOS Simulator: каждый экран открывается через
+`-screen-id <id>` и сравнивается Vision Judge с оригиналом (`compliance.refine_ios_until_complete`).
+Критерии берутся из `acceptance_criteria`.

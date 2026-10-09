@@ -1,6 +1,6 @@
 """Native distribution integrations of the SwiftUI scaffold (Phase 5).
 
-Renders, as contract code, what CodeMagic used to inject into the Flutter build:
+Renders, as contract code, the app's distribution integrations:
 Apphud subscriptions and Tenjin attribution through SwiftPM (``ApphudSDK``,
 ``TenjinSDK``), the App Store encryption declaration, SKAdNetwork identifiers and the
 attribution report endpoint. The job-specific inputs (``apphud_config.json`` /

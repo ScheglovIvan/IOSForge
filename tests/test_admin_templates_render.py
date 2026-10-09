@@ -141,7 +141,9 @@ def test_job_detail_done_full_state() -> None:
         timeline=timeline,
         codegen_tasks=codegen_tasks,
     )
-    assert 'action="/jobs/job-2/codemagic-build"' in html  # iOS build card present
+    assert "CodeMagic (history)" in html and "/jobs/job-2/codemagic-build/logs" in html
+    assert 'action="/jobs/job-2/codemagic-build"' not in html
+    assert 'action="/jobs/job-2/verify-web"' not in html and "Structural audit" in html
     assert 'action="/jobs/job-2/store-assets/slide"' in html  # per-slide refine
     assert "2X9R4HXF34" in html and "Speaker Cleaner" in html
     # all logical tabs present once the app is generated
@@ -200,7 +202,7 @@ def test_job_detail_native_build_card() -> None:
     )  # fmt: skip
     html = _render(
         "job_detail.html", user=_USER, job=job, gen=None, build=None, can_ios_build=True,
-        can_codemagic_build=False, can_xcode_delivery=True, xcode_build=xbuild,
+        can_xcode_delivery=True, xcode_build=xbuild,
         signing={"configured": False}, signed_ok=False, sign_error="", timeline=[],
         codegen_tasks=[],
     )  # fmt: skip

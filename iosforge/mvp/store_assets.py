@@ -742,10 +742,39 @@ def refine_slides(
     run_task(workspace, prompt, timeout=timeout, tlog=bound)
 
 
-def _chromium() -> str:
-    from iosforge.mvp.compliance import _discover_chromium
+def _snap_stage_dir(chromium_bin: str) -> Path | None:
+    """A screenshot staging dir a *snap-confined* Chromium can actually write to.
 
-    return _discover_chromium()
+    Snap Chromium runs under confinement and cannot write ``--screenshot`` to
+    ``/tmp`` (it silently writes into its private namespace, so the file never
+    appears at the real path). It CAN write under its own snap home. Return that
+    dir for a snap binary, or ``None`` for a normal (unconfined) Chromium.
+    """
+    if "/snap/" not in chromium_bin:
+        return None
+    stage = Path.home() / "snap" / "chromium" / "common" / "iosforge_render"
+    stage.mkdir(parents=True, exist_ok=True)
+    return stage
+
+
+_CHROMIUM_CANDIDATES = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
+
+
+def _chromium() -> str:
+    """Locate a headless-capable Chromium/Chrome binary (slide rendering), or raise."""
+    from iosforge.common.config import get_settings
+
+    preferred = get_settings().chromium_bin
+    if preferred:
+        return preferred
+    for name in _CHROMIUM_CANDIDATES:
+        found = shutil.which(name)
+        if found:
+            return found
+    for path in ("/snap/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"):
+        if Path(path).is_file():
+            return path
+    raise RuntimeError("no chromium/chrome binary found for slide rendering")
 
 
 def render_pages(
@@ -765,8 +794,6 @@ def render_pages(
         return []
     out_dir.mkdir(parents=True, exist_ok=True)
     binary = _chromium()
-
-    from iosforge.mvp.compliance import _snap_stage_dir
 
     stage = _snap_stage_dir(binary)
     render_pages_list = pages

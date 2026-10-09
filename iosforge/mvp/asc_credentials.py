@@ -211,20 +211,3 @@ def status(settings: Settings, job_id: str) -> dict[str, object]:
         "key_id": creds.key_id,
         "issuer_id": masked_issuer,
     }
-
-
-def build_env(settings: Settings, job_id: str) -> dict[str, str] | None:
-    """The CodeMagic build environment variables for env-var-driven signing, or None.
-
-    Injected into the signed workflow via the ``POST /builds`` ``environment.variables``
-    payload — the ``app-store-connect`` CLI + the publishing step read these names.
-    """
-    creds = load(settings, job_id)
-    if creds is None:
-        return None
-    return {
-        "APP_STORE_CONNECT_ISSUER_ID": creds.issuer_id,
-        "APP_STORE_CONNECT_KEY_IDENTIFIER": creds.key_id,
-        "APP_STORE_CONNECT_PRIVATE_KEY": creds.private_key_p8,
-        "CERTIFICATE_PRIVATE_KEY": creds.certificate_private_key,
-    }

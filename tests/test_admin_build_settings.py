@@ -14,7 +14,7 @@ import jinja2
 _ROOT = Path(__file__).resolve().parents[1]
 _TEMPLATE = _ROOT / "iosforge" / "admin" / "templates" / "job_detail.html"
 _ROUTES = _ROOT / "iosforge" / "admin" / "routes_jobs.py"
-_RUN_JOB = _ROOT / "iosforge" / "worker" / "run_job.py"
+_RUN_JOB = _ROOT / "iosforge" / "worker" / "swiftui_tasks.py"
 
 # the strings that must match on both sides of the DB round-trip
 _META_KEY = "apphud_api_key"
