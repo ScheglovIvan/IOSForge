@@ -31,6 +31,7 @@ from iosforge.mvp.analyze import stage_archive_context, topo_layers
 from iosforge.mvp.feasibility import apply_scope
 from iosforge.mvp.paths import RunPaths
 from iosforge.mvp.scope_models import FeasibilityReport, ScopeCounts, ScopeDecision, ScreenScope
+from iosforge.mvp.swiftui_ads import ad_violations, strip_ad_components
 from iosforge.mvp.swiftui_permissions import blank_comments_and_strings, permission_violations
 from iosforge.mvp.swiftui_prompters import PROMPTERS
 from iosforge.mvp.swiftui_prompts import (
@@ -136,7 +137,10 @@ def prepare_workspace(paths: RunPaths, *, app_name: str, bundle_id: str) -> NavP
     """Stage inputs + reference into ``claude_ws`` and render the scaffold there."""
     ws = paths.claude_ws
     ws.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(paths.app_spec_json, ws / "app_spec.json")
+    spec = json.loads(paths.app_spec_json.read_text())
+    model_spec, ad_components = strip_ad_components(spec)
+    (ws / "app_spec.json").write_text(json.dumps(model_spec, indent=2, ensure_ascii=False))
+    log.info("swiftui_gen.ads_stripped", components=ad_components)
     if paths.screens_dir.exists():
         shutil.copytree(paths.screens_dir, ws / "screens", dirs_exist_ok=True)
     stage_archive_context(paths, ws, include_bytes=True)
@@ -147,7 +151,6 @@ def prepare_workspace(paths: RunPaths, *, app_name: str, bundle_id: str) -> NavP
             dirs_exist_ok=True,
             ignore=shutil.ignore_patterns("build", "*.xcodeproj", "Info.plist", "*.png"),
         )
-    spec = json.loads(paths.app_spec_json.read_text())
     write_scaffold(
         _workspace_app(paths),
         spec,
@@ -202,6 +205,7 @@ def compile_errors(
     errors += _tab_bar_errors(app_dir)
     errors += _navigation_errors(app_dir)
     errors += permission_violations(app_dir, declared=set(prompter_names(spec)))
+    errors += ad_violations(app_dir)
     if not xcode.toolchain_available():
         log.warning("swiftui_gen.toolchain_missing", app_dir=str(app_dir))
         return GateCheck(errors, contract=report)

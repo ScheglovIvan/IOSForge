@@ -414,3 +414,35 @@ def test_own_navigation_in_screens_is_a_gate_error(
         tmp_path, SPEC, AppIdentity("Demo", "b.c"), tmp_path / "dd"
     ).errors
     assert len(errors) == 2 and all("own navigation" in e for e in errors)
+
+
+def test_model_spec_has_no_ad_components_and_gate_rejects_ad_text(
+    paths: RunPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = json.loads(json.dumps(SPEC))
+    spec["screens"][0]["components"] = [
+        {"type": "card", "role": "routine"},
+        {"type": "text", "role": "disclaimer", "data": "This action may contain Ads"},
+    ]
+    paths.app_spec_json.write_text(json.dumps(spec))
+    calls: list[tuple[str, Path]] = []
+    fake = _fake_task(calls)
+
+    def with_ad(workspace: Path, prompt: str, **kw: Any) -> int:
+        code = int(fake(workspace, prompt, **kw))
+        if _task_of(prompt) == "screen-0011":
+            view = workspace / "xcode_app/App/Features/0011/Screen0011View.swift"
+            view.write_text(view.read_text() + 'let note = Text("This action may contain Ads")\n')
+        return code
+
+    monkeypatch.setattr(swiftui_gen.claude_gen, "run_task", with_ad)
+    monkeypatch.setattr(xcode, "toolchain_available", lambda: False)
+
+    result = swiftui_gen.generate(
+        paths, app_name="Speaker Test", bundle_id="com.example.s", fix_attempts=0
+    )
+
+    model_spec = json.loads((paths.claude_ws / "app_spec.json").read_text())
+    assert model_spec["screens"][0]["components"] == [{"type": "card", "role": "routine"}]
+    assert len(result.errors) == 1 and "ad UI text" in result.errors[0]
+    assert "NO ADS, everywhere and always" in theme_prompt(app_name="A", prompters=[])

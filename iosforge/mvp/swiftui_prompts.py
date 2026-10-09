@@ -54,7 +54,12 @@ HARD RULES
   (files with `is_system: false`); system fonts otherwise. Bundled media:
   `MediaAsset.image("<file>")` / `MediaAsset.url("<file>")` where `<file>` is the file name of
   a `media.json` entry's `path` (without the `media/` prefix).
-- No ads: never add ad SDKs or ad placeholders; collapse the space ads used to take.
+- NO ADS, everywhere and always (the clone earns through subscriptions only): the screenshots
+  and view trees still show the original's ads — never reproduce any of it. No ad SDKs, no
+  banner / native / interstitial / rewarded slots, no "Loading ads…" overlays or spinners, no
+  "may contain ads" / "Sponsored" / "Ad" labels, no "watch an ad" or "remove ads" offers; delete
+  the ad and let the remaining content reflow (no empty strip, no reserved gap). Subscription
+  paywalls and "Get Pro" upsells are not ads and stay. IOSForge rejects ad code and ad text.
 - `reference/` holds a minimal working example of this architecture (read-only).
 - Code without inline `//` comments; short `///` doc comments on types are fine.
 """
