@@ -193,6 +193,8 @@ def test_rescaffold_keeps_model_owned_files(tmp_path: Path) -> None:
     assert 'Text("Hi")' in view.read_text()
     assert "0011" not in pending_screens(app, entries)
     assert PENDING_MARKER in (app / "App/Features/0013/Screen0013View.swift").read_text()
+    (app / "App/Features/0013/Screen0013View.swift").unlink()
+    assert pending_screens(app, entries) == ["0000", "0001", "0013"]
 
 
 def test_enforce_contract_is_strict(tmp_path: Path) -> None:

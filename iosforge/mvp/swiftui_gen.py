@@ -169,7 +169,8 @@ def _navigation_errors(app_dir: Path) -> list[str]:
                 errors.append(
                     f"{swift.relative_to(app_dir).as_posix()}:{line}: error: own navigation "
                     f"`{match.group(0).strip()}` — navigate only through the scaffold Router "
-                    "(router.show / router.dismiss)"
+                    "(router.show / router.dismiss); for paged carousels use ScrollView + "
+                    "`.scrollTargetBehavior(.paging)` instead of TabView"
                 )
     return errors
 

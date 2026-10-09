@@ -407,9 +407,10 @@ def write_scaffold(
 
 
 def pending_screens(app_dir: Path, entries: list[ScreenEntry]) -> list[str]:
-    """Screen ids whose view is still the scaffold placeholder."""
+    """Screen ids whose view is missing or still the scaffold placeholder."""
     return [
         e.screen_id
         for e in entries
-        if PENDING_MARKER in (app_dir / e.view_path).read_text(encoding="utf-8")
+        if not (app_dir / e.view_path).is_file()
+        or PENDING_MARKER in (app_dir / e.view_path).read_text(encoding="utf-8")
     ]

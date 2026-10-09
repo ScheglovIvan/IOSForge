@@ -34,7 +34,8 @@ HARD RULES
   then `router.show(.<case>)` for a `ScreenID` case that EXISTS in
   `{APP_DIR}/App/Navigation/ScreenID.swift`, `router.dismiss()` to go back and
   `router.finishOnboarding()` to leave onboarding. No NavigationStack, NavigationLink
-  (destination:), TabView or .sheet of your own. The tab bar is drawn by the app shell
+  (destination:), TabView or .sheet of your own (paged carousels: ScrollView +
+  `.scrollTargetBehavior(.paging)`). The tab bar is drawn by the app shell
   (`AppTabBar`), NEVER by a screen.
 - Headless screen-id mode (`Headless.isActive`): the app is launched straight onto one screen
   for a screenshot. Every screen MUST render completely on first frame from `Fixtures` data,
