@@ -23,6 +23,8 @@ def _generate(args: argparse.Namespace) -> RunPaths:
     paths = RunPaths.create(args.out)
     shutil.copy2(args.app_spec, paths.app_spec_json)
     frida_ingest.ingest_archive(args.archive, paths)
+    if not args.locale:
+        args.locale = _resolve_locale(paths, args.storefront)
     spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
     wanted = args.screens or [str(s["id"]) for s in spec.get("screens", [])]
     swiftui_gen.scope_to(paths, [sid for sid in wanted if sid not in set(args.exclude)])
@@ -45,7 +47,7 @@ def _generate(args: argparse.Namespace) -> RunPaths:
 
 def _resolve_locale(paths: RunPaths, storefront: str | None) -> str:
     spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
-    manifest_path = paths.run_dir / "_frida_raw" / "manifest.json"
+    manifest_path = paths.capture_manifest_json
     manifest = (
         json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else None
     )

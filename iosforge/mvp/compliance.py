@@ -1316,9 +1316,20 @@ def nav_audit_ios(paths: RunPaths) -> dict[str, Any]:
             and (src.presentation == "tabRoot" or src.shows_tab_bar)
         )
         back = "router.dismiss()" in code and (to, frm) in edges
+        onboarding_chain = [
+            e
+            for e in plan.entries
+            if e.presentation == "onboarding"
+            and re.search(rf"\.show\(\s*\.{re.escape(e.case_name)}\s*\)", code)
+        ]
+        finishes = "finishOnboarding()" in code or any(
+            "finishOnboarding()"
+            in sources.setdefault(e.screen_id, _feature_sources(paths, e.screen_id))
+            for e in onboarding_chain
+        )
         closes_to_home = to == home and (
             (src.presentation in ("sheet", "fullScreenCover") and "router.dismiss()" in code)
-            or (src.presentation == "onboarding" and "finishOnboarding()" in code)
+            or (src.presentation == "onboarding" and finishes)
         )
         if not (shown or via_tab or back or closes_to_home):
             missing_edges.append({"from": frm, "to": to, "via_element": via})
@@ -1390,8 +1401,15 @@ def refine_ios_until_complete(
         flagged = {b["id"]: b for b in blank_screens(paths, max_bytes=blank_max_bytes)}
         rendered = json.loads(paths.generated_screens_json.read_text()).get("screens", [])
         for screen in rendered:
-            if screen.get("blank") and str(screen["id"]) not in flagged:
-                flagged[str(screen["id"])] = {"id": str(screen["id"]), "reason": "never_drawn"}
+            reason = (
+                "never_drawn"
+                if screen.get("blank")
+                else "unstable"
+                if screen.get("unstable")
+                else ""
+            )
+            if reason and str(screen["id"]) not in flagged:
+                flagged[str(screen["id"])] = {"id": str(screen["id"]), "reason": reason}
         structural["blank_screens"] = list(flagged.values())
         structural["ok"] = bool(structural["ok"]) and not structural["blank_screens"]
         return structural

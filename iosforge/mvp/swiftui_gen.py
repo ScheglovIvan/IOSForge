@@ -407,8 +407,9 @@ def generate(
     spec = json.loads(paths.app_spec_json.read_text())
     images: dict[str, list[tuple[str, str]]] = {}
     if settings is not None:
+        model_spec = json.loads((paths.claude_ws / "app_spec.json").read_text(encoding="utf-8"))
         for image in swiftui_media.generate_images(
-            _workspace_app(paths), paths.claude_ws, spec, settings=settings
+            _workspace_app(paths), paths.claude_ws, model_spec, settings=settings
         ):
             images.setdefault(image.screen_id, []).append((image.file, image.description))
     prompters = prompter_names(spec)
@@ -635,7 +636,21 @@ def report(result: SwiftUIResult) -> dict[str, Any]:
 
 
 def scope_to(paths: RunPaths, screen_ids: list[str]) -> None:
-    """Prune ``app_spec.json`` to ``screen_ids`` through the regular scope mechanism."""
+    """Prune ``app_spec.json`` (scope mechanism) and the judge's originals to ``screen_ids``.
+
+    ``screens.json`` lists the originals the Vision Judge scores; an excluded screen left
+    there would count as "not rendered". The full crawl is kept as ``screens_full.json``.
+    """
+    if paths.screens_json.is_file():
+        crawl = json.loads(paths.screens_json.read_text(encoding="utf-8"))
+        full = paths.run_dir / "screens_full.json"
+        if not full.exists():
+            full.write_text(json.dumps(crawl, ensure_ascii=False), encoding="utf-8")
+        if isinstance(crawl, dict):
+            crawl["screens"] = [
+                s for s in crawl.get("screens", []) if str(s.get("id")) in set(screen_ids)
+            ]
+            paths.screens_json.write_text(json.dumps(crawl, ensure_ascii=False), encoding="utf-8")
     spec = json.loads(paths.app_spec_json.read_text())
     screens = [
         ScreenScope(
@@ -658,10 +673,10 @@ def scope_to(paths: RunPaths, screen_ids: list[str]) -> None:
 
 
 def verify_on_simulator(
-    result: SwiftUIResult, *, udid: str, bundle_id: str, out_dir: Path
+    result: SwiftUIResult, *, udid: str, bundle_id: str, out_dir: Path, locale: str = "en-US"
 ) -> dict[str, Path]:
     """Install the built app and screenshot every screen plus an unknown id (stable frames)."""
-    env = simulator.SimEnvironment(udid=udid, locale="en-US")
+    env = simulator.SimEnvironment(udid=udid, locale=locale)
     simulator.pin_environment(env)
     xcode.install(udid, xcode.built_app(result.derived_data, result.scheme))
     return {

@@ -191,6 +191,7 @@ def ingest_archive(archive_path: Path, paths: RunPaths) -> dict[str, Any]:
             if not required.is_file():
                 raise FridaIngestError(f"archive missing {required.name}")
         manifest = json.loads(manifest_path.read_text())
+        shutil.copy2(manifest_path, paths.capture_manifest_json)
         _verify_integrity(src, manifest)
 
         screens_raw = json.loads(screens_path.read_text())

@@ -6,8 +6,9 @@ placeholders. Copying the original pixels (e.g. cropping the screenshot) is rule
 by the anti-clone policy; instead each decorative image slot of the app_spec gets a NEW
 image generated from its text description and the clone's own palette
 (:func:`image_slides.generate_image`, Replicate). Real generation spends money and is
-gated by ``Settings.codegen_generate_images``; without it a local divergent placeholder
-(gradient + caption) keeps the pipeline shape identical (DECISIONS 2026-10-09 Phase 4).
+gated by ``Settings.codegen_generate_images``; without it (or when a prediction fails) a
+local divergent placeholder (gradient + caption) keeps the pipeline shape identical.
+Slots come from the ad-stripped spec the model sees (DECISIONS 2026-10-09 «Phase 4»).
 """
 
 from __future__ import annotations
@@ -30,9 +31,11 @@ GENERATED_DIR = "generated"
 GENERATED_MEDIA_JSON = "generated_media.json"
 PLACEHOLDER_SIZE = (1200, 900)
 
-_IMAGE_KIND = re.compile(r"\b(image|media|illustration|photo|picture|artwork|graphic)\b", re.I)
+_IMAGE_KIND = re.compile(
+    r"\b(image\w*|media|illustrations?|photos?|pictures?|artworks?|graphics?)\b", re.I
+)
 _DECORATIVE_ROLE = re.compile(r"\b(hero|header|photo|illustration|banner|cover|background)\b", re.I)
-_EXCLUDED_ROLE = re.compile(r"\b(icon|logo|avatar|flag)\b", re.I)
+_EXCLUDED_ROLE = re.compile(r"\b(icons?|logos?|avatars?|flags?|profile|brand\w*)\b", re.I)
 
 
 @dataclass(frozen=True)
@@ -148,20 +151,26 @@ def generate_images(
     for slot in image_slots(spec):
         out = target / slot.file_name
         source = "placeholder"
-        if spend:
-            data = image_slides.generate_image(
-                generation_prompt(slot, palette),
-                [],
-                token=token,
-                model=settings.replicate_model,
-                resolution=settings.replicate_resolution,
-                timeout=settings.replicate_timeout_s,
-                aspect="4:3",
-                size=PLACEHOLDER_SIZE,
-            )
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_bytes(image_slides.to_png(data))
-            source = "replicate"
+        if spend and out.exists():
+            source = "cached"
+        elif spend:
+            try:
+                data = image_slides.generate_image(
+                    generation_prompt(slot, palette),
+                    [],
+                    token=token,
+                    model=settings.replicate_model,
+                    resolution=settings.replicate_resolution,
+                    timeout=settings.replicate_timeout_s,
+                    aspect="4:3",
+                    size=PLACEHOLDER_SIZE,
+                )
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(image_slides.to_png(data))
+                source = "replicate"
+            except Exception as exc:
+                log.warning("swiftui_media.generate_failed", slot=slot.file_name, error=str(exc))
+                placeholder(slot, palette, out)
         else:
             placeholder(slot, palette, out)
         images.append(

@@ -178,12 +178,14 @@ def build_plan(spec: dict[str, Any]) -> NavPlan:
             owners[state] = base
         elif base in owners:
             owners[state] = owners[base]
-        if base_entry.presentation in ("sheet", "fullScreenCover", "onboarding"):
-            by_id[state] = dataclasses.replace(
-                by_id[state],
-                presentation=base_entry.presentation,
-                onboarding=base_entry.onboarding,
-            )
+        inherited = (
+            base_entry.presentation
+            if base_entry.presentation in ("sheet", "fullScreenCover", "onboarding")
+            else "push"
+        )
+        by_id[state] = dataclasses.replace(
+            by_id[state], presentation=inherited, onboarding=base_entry.onboarding
+        )
     entries = [by_id[e.screen_id] for e in entries]
     with_bar = {
         str(s.get("id")) for s in spec.get("screens", []) if isinstance(s, dict) and has_tab_bar(s)

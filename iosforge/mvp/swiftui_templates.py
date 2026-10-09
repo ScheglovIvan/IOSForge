@@ -375,7 +375,9 @@ MEDIA = f"""import UIKit
 /// {DO_NOT_EDIT}
 enum MediaAsset {{
     static func url(_ file: String) -> URL? {{
-        Bundle.main.url(forResource: file, withExtension: nil, subdirectory: "Media")
+        let parts = file.split(separator: "/").map(String.init)
+        let folder = (["Media"] + parts.dropLast()).joined(separator: "/")
+        return Bundle.main.url(forResource: parts.last, withExtension: nil, subdirectory: folder)
     }}
 
     static func image(_ file: String) -> UIImage? {{
