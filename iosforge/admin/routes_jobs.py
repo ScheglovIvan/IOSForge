@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from datetime import UTC, datetime
 from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
@@ -132,6 +133,7 @@ def job_detail(
     job_id: uuid.UUID,
     user: SessionData = Depends(require_user),
     db: Session = Depends(get_db),
+    storage: ArtifactStorage = Depends(get_storage),
     signed: str = "",
     sign_error: str = "",
 ) -> Response:
@@ -142,6 +144,7 @@ def job_detail(
         return Response("Not found", status_code=404)
     gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
     can_ios_build = bool(gen and gen.codemagic and gen.codemagic.get("application_id"))
+    scope_status = (job.source_app_metadata or {}).get("scope_status")
     return templates.TemplateResponse(
         request,
         "job_detail.html",
@@ -161,6 +164,8 @@ def job_detail(
             "signing": asc_credentials.status(get_settings(), str(job_id)),
             "signed_ok": signed == "1",
             "sign_error": sign_error,
+            "scope_status": scope_status,
+            "scope": _load_scope(storage, job_id, scope_status),
         },
     )
 
@@ -830,6 +835,58 @@ def jobs_verify_web(
     return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
 
 
+@router.post("/jobs/{job_id}/scope")
+async def jobs_scope_approve(
+    request: Request,
+    job_id: uuid.UUID,
+    csrf_token: str = Form(...),
+    scope_mode: str = Form("core"),
+    notes: str = Form(""),
+    user: SessionData = Depends(require_user),
+    db: Session = Depends(get_db),
+    storage: ArtifactStorage = Depends(get_storage),
+) -> Response:
+    if not csrf.verify(user.csrf_token, csrf_token):
+        return Response("Invalid request (CSRF).", status_code=400)
+    job = db.get(Job, job_id)
+    meta = dict(job.source_app_metadata or {}) if job is not None else {}
+    if job is None or job.state != JobState.NEEDS_INPUT or meta.get("scope_status") != "proposed":
+        return RedirectResponse(f"/jobs/{job_id}#t-scope", status_code=HTTP_303_SEE_OTHER)
+
+    from iosforge.mvp import feasibility
+
+    scope = feasibility.load_scope(storage, str(job_id))
+    form = await request.form()
+    for screen in scope.screens:
+        screen.include = f"include_{screen.screen_id}" in form
+    scope.scope_mode = "full" if scope_mode == "full" else "core"
+    scope.notes = notes
+    scope.status = "approved"
+    scope.approved_by = user.username
+    approved_at = datetime.now(UTC)
+    scope.approved_at = approved_at
+    scope.recount()
+    ref = feasibility.save_scope(storage, str(job_id), scope)
+
+    meta["scope_status"] = "approved"
+    meta["scope_version_id"] = ref.version_id
+    meta["scope_approved_at"] = approved_at.isoformat()
+    meta["scope_approved_by"] = user.username
+    job.source_app_metadata = meta
+    job.state = JobState.CODEGEN
+    db.commit()
+
+    _enqueue_build(job_id)
+    log.info(
+        "jobs.scope_approved",
+        job_id=str(job_id),
+        included=scope.counts.included,
+        total=scope.counts.total,
+        scope_mode=scope.scope_mode,
+    )
+    return RedirectResponse(f"/jobs/{job_id}#t-scope", status_code=HTTP_303_SEE_OTHER)
+
+
 @router.get("/jobs/{job_id}/codemagic-build/logs")
 def jobs_codemagic_logs(
     job_id: uuid.UUID,
@@ -1011,6 +1068,20 @@ def _codegen_tasks(db: Session, job_id: uuid.UUID) -> list[CodegenTask]:
             select(CodegenTask).where(CodegenTask.job_id == job_id).order_by(CodegenTask.idx.asc())
         ).all()
     )
+
+
+def _load_scope(
+    storage: ArtifactStorage, job_id: uuid.UUID, scope_status: str | None
+) -> object | None:
+    if scope_status not in {"proposed", "approved"}:
+        return None
+    try:
+        from iosforge.mvp import feasibility
+
+        return feasibility.load_scope(storage, str(job_id))
+    except Exception as exc:
+        log.warning("jobs.scope_load_failed", job_id=str(job_id), error=str(exc))
+        return None
 
 
 def _enqueue(job_id: uuid.UUID) -> None:

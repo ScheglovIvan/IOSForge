@@ -52,6 +52,7 @@ class RunPaths:
     generated_screens_json: Path
     selftest_report_json: Path
     corrective_tasks_json: Path
+    scope_json: Path
 
     @classmethod
     def create(cls, base: Path) -> RunPaths:
@@ -88,6 +89,7 @@ class RunPaths:
             generated_screens_json=run_dir / "generated_screens.json",
             selftest_report_json=run_dir / "selftest_report.json",
             corrective_tasks_json=run_dir / "corrective_tasks.json",
+            scope_json=run_dir / "scope.json",
         )
         rp.screens_dir.mkdir(parents=True, exist_ok=True)
         rp.generated_screens_dir.mkdir(parents=True, exist_ok=True)

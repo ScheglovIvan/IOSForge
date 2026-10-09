@@ -157,6 +157,12 @@ class Settings(BaseSettings):
     # Analysis-only mode: run screen-filter + analyze, then finish (DONE) —
     # skips decompose/codegen/compliance. For inspecting the App Spec cheaply.
     pipeline_stop_after_analyze: bool = Field(default=False)
+    # Scope gate (Stage SCOPE): after analysis, propose an MVP scope + iOS
+    # feasibility report, persist scope.json(proposed) and park the Job in
+    # NEEDS_INPUT for an operator to approve/edit before codegen (then build_frontend
+    # prunes app_spec to the approved screens). Opt-in — default False keeps the
+    # current auto-chain (ANALYSIS -> build_frontend, decompose without prune).
+    pipeline_scope_gate: bool = Field(default=False)
     # Admin/backend deliverable (Firebase + Rowy + Apphud + Stream): emit an
     # admin/ scaffold alongside the app when app_spec.backend.admin_panel_needed.
     # provision_admin (opt-in) would create the live Firebase project — needs creds.

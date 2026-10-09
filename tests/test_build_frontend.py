@@ -20,6 +20,7 @@ from iosforge.common.types import JobState, Stage
 from iosforge.db.models import GenerationResult, Job, StageTimeline, WalkthroughResult
 from iosforge.mvp import analyze, codegen, codemagic_integration, compliance, github_publish
 from iosforge.mvp.paths import RunPaths
+from iosforge.mvp.scope_models import ScopeDecision
 from iosforge.worker import run_job as run_job_module
 
 
@@ -418,3 +419,120 @@ def test_reverify_web_push_failure_skips_rebuild(monkeypatch: pytest.MonkeyPatch
         o for o in session.added if isinstance(o, StageTimeline) and o.stage is Stage.GITHUB_UPLOAD
     ]
     assert gh_rows and gh_rows[-1].error
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2 scope-gate prune hook — build_frontend prunes an approved scope
+# before decompose, and is a no-op when the gate is off / no approved scope
+# --------------------------------------------------------------------------- #
+
+
+def _approved_scope() -> ScopeDecision:
+    from datetime import UTC, datetime
+
+    from iosforge.mvp.scope_models import FeasibilityReport, ScopeCounts, ScreenScope
+
+    screens = [ScreenScope(screen_id="0000", name="Home", include=True, reason="core")]
+    return ScopeDecision(
+        status="approved",
+        scope_mode="core",
+        screens=screens,
+        feasibility=FeasibilityReport(overall_verdict="native", summary="ok"),
+        counts=ScopeCounts.from_screens(screens),
+        proposed_at=datetime.now(UTC),
+    )
+
+
+def test_build_frontend_prunes_approved_scope_before_decompose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from iosforge.mvp import feasibility
+
+    job = Job(source_app_ref="ios://app", state=JobState.CODEGEN, submission_kind="appstore")
+    job.id = uuid.uuid4()
+    job.source_app_metadata = {"scope_status": "approved", "scope_version_id": "ver-1"}
+    walk = WalkthroughResult(
+        job_id=job.id,
+        screenshot_keys=[],
+        screen_map={"screens": [{"id": "0000"}]},
+    )
+    settings = Settings(pipeline_scope_gate=True, codemagic_auto_build=False)
+    _session, calls = _wire(monkeypatch, job, walk, settings=settings)
+
+    applied: list[str] = []
+    monkeypatch.setattr(feasibility, "load_scope", lambda *a, **k: _approved_scope())
+
+    def _fake_apply(paths: RunPaths, scope: object = None) -> None:
+        applied.append("apply_scope")
+
+    monkeypatch.setattr(feasibility, "apply_scope", _fake_apply)
+
+    run_job_module.build_frontend.run(str(job.id))
+
+    # prune ran, and it ran BEFORE decompose (so codegen sees the trimmed spec).
+    assert applied == ["apply_scope"]
+    assert calls.index("decompose") >= 0
+    assert "decompose" in calls
+
+
+def test_build_frontend_no_prune_when_gate_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    from iosforge.mvp import feasibility
+
+    job = Job(source_app_ref="ios://app", state=JobState.CODEGEN, submission_kind="appstore")
+    job.id = uuid.uuid4()
+    job.source_app_metadata = {"scope_status": "approved", "scope_version_id": "ver-1"}
+    walk = WalkthroughResult(
+        job_id=job.id, screenshot_keys=[], screen_map={"screens": [{"id": "0000"}]}
+    )
+    settings = Settings(pipeline_scope_gate=False, codemagic_auto_build=False)
+    _wire(monkeypatch, job, walk, settings=settings)
+
+    applied: list[str] = []
+    monkeypatch.setattr(feasibility, "apply_scope", lambda *a, **k: applied.append("x"))
+
+    run_job_module.build_frontend.run(str(job.id))
+    assert applied == []  # gate off → no prune
+
+
+def test_build_frontend_no_prune_when_scope_not_approved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from iosforge.mvp import feasibility
+
+    job = Job(source_app_ref="ios://app", state=JobState.CODEGEN, submission_kind="appstore")
+    job.id = uuid.uuid4()
+    job.source_app_metadata = {"scope_status": "proposed"}
+    walk = WalkthroughResult(
+        job_id=job.id, screenshot_keys=[], screen_map={"screens": [{"id": "0000"}]}
+    )
+    settings = Settings(pipeline_scope_gate=True, codemagic_auto_build=False)
+    _wire(monkeypatch, job, walk, settings=settings)
+
+    applied: list[str] = []
+    monkeypatch.setattr(feasibility, "apply_scope", lambda *a, **k: applied.append("x"))
+
+    run_job_module.build_frontend.run(str(job.id))
+    assert applied == []  # only an APPROVED scope prunes
+
+
+def test_build_frontend_prune_failure_is_non_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    from iosforge.mvp import feasibility
+
+    job = Job(source_app_ref="ios://app", state=JobState.CODEGEN, submission_kind="appstore")
+    job.id = uuid.uuid4()
+    job.source_app_metadata = {"scope_status": "approved", "scope_version_id": "ver-1"}
+    walk = WalkthroughResult(
+        job_id=job.id, screenshot_keys=[], screen_map={"screens": [{"id": "0000"}]}
+    )
+    settings = Settings(pipeline_scope_gate=True, codemagic_auto_build=False)
+    _wire(monkeypatch, job, walk, settings=settings)
+
+    def _boom(*a: object, **k: object) -> ScopeDecision:
+        raise RuntimeError("scope corrupt")
+
+    monkeypatch.setattr(feasibility, "load_scope", _boom)
+
+    result = run_job_module.build_frontend.run(str(job.id))
+    # a broken scope never blocks the build — it still completes.
+    assert "frontend built" in result
+    assert job.state is JobState.DONE

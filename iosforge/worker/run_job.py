@@ -341,6 +341,12 @@ def run_job(self, job_id: str) -> str:
                             )
                 _finish_stage(db, stage_row)
                 stage_row = None
+                if settings.pipeline_scope_gate:
+                    job.state = JobState.SCOPE
+                    db.commit()
+                    log.info("run_job.analysis_done_scope_gate", job_id=job_id)
+                    scope_gate.apply_async(args=[job_id], queue="codegen")
+                    return f"job {job_id} analysis done -> scope gate queued"
                 if settings.auto_build_frontend:
                     job.state = JobState.CODEGEN
                     db.commit()
@@ -505,6 +511,23 @@ def run_job(self, job_id: str) -> str:
                 log.info("run_job.analysis_only_done", job_id=job_id)
                 return f"job {job_id} done (analysis only)"
 
+            if settings.pipeline_scope_gate:
+                for kind, src in (("app_spec", paths.app_spec_json), ("spec_md", paths.spec_md)):
+                    if src.exists():
+                        ctype = "application/json" if src.suffix == ".json" else "text/markdown"
+                        storage.put(
+                            build_key(job_id=job_id, kind=kind, name=src.name),
+                            src.read_bytes(),
+                            content_type=ctype,
+                        )
+                _finish_stage(db, stage_row)
+                stage_row = None
+                job.state = JobState.SCOPE
+                db.commit()
+                log.info("run_job.analysis_done_scope_gate", job_id=job_id)
+                scope_gate.apply_async(args=[job_id], queue="codegen")
+                return f"job {job_id} analysis done -> scope gate queued"
+
             analyze.decompose(paths)
             codegen.generate(paths, settings)
             report = compliance.refine_web_until_complete(
@@ -560,6 +583,91 @@ def run_job(self, job_id: str) -> str:
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+@celery_app.task(base=PipelineTask, name="iosforge.scope_gate", bind=True)
+def scope_gate(self, job_id: str) -> str:
+    """Stage SCOPE: propose an MVP scope + iOS feasibility, then park in NEEDS_INPUT.
+
+    Hydrates a fresh RunPaths from the stored analysis (``screens.json`` from
+    ``WalkthroughResult.screen_map``, screenshots + ``app_spec.json`` from object
+    storage), runs :func:`feasibility.propose`, writes ``scope.json`` (status
+    ``proposed``) to the versioned bucket, records the version id and
+    ``scope_status`` in ``Job.source_app_metadata``, then sets the Job to
+    ``NEEDS_INPUT`` so an operator approves/edits the scope before codegen
+    (symmetry with ``reverify_web``; ``PipelineTask`` supplies retry/dead-letter).
+    """
+    from iosforge.mvp import feasibility
+    from iosforge.mvp.paths import RunPaths
+
+    storage = S3ArtifactStorage()
+    maker = get_sessionmaker()
+    tmp = Path(tempfile.mkdtemp(prefix="iosforge-scope-"))
+    bound = log.bind(job_id=job_id, stage="scope")
+
+    try:
+        with maker() as db:
+            job = db.get(Job, uuid.UUID(job_id))
+            if job is None:
+                return f"job {job_id} not found"
+            walk = db.scalar(select(WalkthroughResult).where(WalkthroughResult.job_id == job.id))
+            if walk is None or not walk.screen_map:
+                job.state = JobState.FAILED
+                db.commit()
+                return f"job {job_id} has no analysis to scope"
+
+            stage_row: StageTimeline | None = None
+            try:
+                paths = RunPaths.create(tmp / "run")
+                paths.screens_json.write_text(json.dumps(walk.screen_map, ensure_ascii=False))
+                for key in walk.screenshot_keys:
+                    (paths.screens_dir / key.rsplit("/", 1)[-1]).write_bytes(storage.get(key))
+                app_spec_key = build_key(job_id=job_id, kind="app_spec", name="app_spec.json")
+                try:
+                    paths.app_spec_json.write_bytes(storage.get(app_spec_key))
+                except Exception as exc:
+                    job.state = JobState.FAILED
+                    db.commit()
+                    bound.error("scope.no_app_spec", error=str(exc))
+                    return f"job {job_id} app_spec unavailable"
+
+                stage_row = _start_stage(db, job, Stage.SCOPE, JobState.SCOPE)
+                scope = feasibility.propose(paths)
+                ref = feasibility.save_scope(storage, job_id, scope)
+
+                meta = dict(job.source_app_metadata or {})
+                meta["scope_status"] = "proposed"
+                meta["scope_version_id"] = ref.version_id
+                job.source_app_metadata = meta
+
+                job.state = JobState.NEEDS_INPUT
+                row = db.get(StageTimeline, stage_row.id)
+                if row is not None:
+                    row.error = "scope proposed — awaiting operator approval"
+                    row.finished_at = utcnow()
+                db.commit()
+                bound.info(
+                    "scope.proposed",
+                    included=scope.counts.included,
+                    total=scope.counts.total,
+                    mode=scope.scope_mode,
+                )
+                return f"job {job_id} scope proposed -> needs input"
+            except Exception as exc:
+                db.rollback()
+                job2 = db.get(Job, uuid.UUID(job_id))
+                if job2 is not None:
+                    job2.state = JobState.FAILED
+                    if stage_row is not None:
+                        row = db.get(StageTimeline, stage_row.id)
+                        if row is not None:
+                            row.error = str(exc)[:2000]
+                            row.finished_at = utcnow()
+                    db.commit()
+                bound.error("scope.failed", error=str(exc))
+                raise
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 @celery_app.task(base=PipelineTask, name="iosforge.build_frontend", bind=True)
 def build_frontend(self, job_id: str) -> str:
     """Human-triggered frontend codegen from a completed analysis (SPEC §7).
@@ -579,6 +687,7 @@ def build_frontend(self, job_id: str) -> str:
         codegen_checkpoint,
         codemagic_integration,
         compliance,
+        feasibility,
         frida_ingest,
         github_publish,
     )
@@ -631,6 +740,29 @@ def build_frontend(self, job_id: str) -> str:
                         log.warning(
                             "build_frontend.archive_reingest_failed", job_id=job_id, error=str(exc)
                         )
+
+                # Scope gate: prune app_spec to the operator-approved screens before
+                # decompose (deterministic, no model). No-op unless the gate is on and
+                # an approved scope exists; a missing/invalid scope never blocks the build.
+                if settings.pipeline_scope_gate:
+                    meta = job.source_app_metadata or {}
+                    if meta.get("scope_status") == "approved":
+                        try:
+                            scope = feasibility.load_scope(
+                                storage, job_id, version_id=meta.get("scope_version_id")
+                            )
+                            paths.scope_json.write_text(scope.model_dump_json(indent=2))
+                            feasibility.apply_scope(paths, scope)
+                            log.info(
+                                "build_frontend.scope_pruned",
+                                job_id=job_id,
+                                mode=scope.scope_mode,
+                                included=scope.counts.included,
+                            )
+                        except Exception as exc:
+                            log.warning(
+                                "build_frontend.scope_prune_failed", job_id=job_id, error=str(exc)
+                            )
 
                 # Build profile (test/real) → bundle id + display name + store mode.
                 spec_data = json.loads(paths.app_spec_json.read_text())

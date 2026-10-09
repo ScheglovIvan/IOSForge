@@ -28,9 +28,10 @@
   </div>
 </div>
 
-{% set active = 't-build' if (signed_ok or sign_error) else 't-overview' %}
+{% set active = 't-build' if (signed_ok or sign_error) else ('t-scope' if scope_status == 'proposed' else 't-overview') %}
 <div class="tabs">
   <input class="tab-radio" type="radio" name="jobtab" id="t-overview" {{ 'checked' if active == 't-overview' else '' }}>
+  {% if scope_status in ['proposed', 'approved'] %}<input class="tab-radio" type="radio" name="jobtab" id="t-scope" {{ 'checked' if active == 't-scope' else '' }}>{% endif %}
   <input class="tab-radio" type="radio" name="jobtab" id="t-build" {{ 'checked' if active == 't-build' else '' }}>
   {% if can_ios_build %}<input class="tab-radio" type="radio" name="jobtab" id="t-ios">{% endif %}
   {% if gen %}<input class="tab-radio" type="radio" name="jobtab" id="t-store">
@@ -38,6 +39,7 @@
 
   <nav class="tab-bar" role="tablist">
     <label for="t-overview">Overview</label>
+    {% if scope_status in ['proposed', 'approved'] %}<label for="t-scope">Scope{% if scope_status == 'proposed' %} <span class="tcount">!</span>{% endif %}</label>{% endif %}
     <label for="t-build">Build &amp; sign</label>
     {% if can_ios_build %}<label for="t-ios">iOS build</label>{% endif %}
     {% if gen %}<label for="t-store">Store assets{% if store_slides %} <span class="tcount">{{ store_slides|length }}</span>{% endif %}</label>
@@ -52,6 +54,106 @@
         {% include "_timeline.html" %}
       </div>
     </section>
+
+    {% if scope and scope_status in ['proposed', 'approved'] %}
+    <section class="tab-panel panel-scope" role="tabpanel" aria-label="Scope">
+      {% set editable = scope_status == 'proposed' %}
+      <div class="card">
+        <h3>Scope &amp; feasibility
+          <span class="muted" style="font-weight:400;">— {{ 'operator review' if editable else 'approved' }}</span></h3>
+        {% if editable %}
+        <p class="hint">Choose which screens make up the MVP. Unchecked screens are pruned before
+          code generation. Approving moves the job into code generation and cannot be undone.</p>
+        {% else %}
+        <p class="hint">Approved
+          {% if scope.approved_by %}by <strong style="color:var(--text);">{{ scope.approved_by }}</strong>{% endif %}
+          {% if scope.approved_at %}on {{ scope.approved_at.strftime('%Y-%m-%d %H:%M:%S') }}{% endif %}.
+          Mode <strong style="color:var(--text);">{{ scope.scope_mode }}</strong>.</p>
+        {% endif %}
+        <p class="hint">Feasibility:
+          <strong style="color:var(--text);">{{ scope.feasibility.overall_verdict }}</strong>
+          &nbsp;·&nbsp; {{ scope.counts.included }} included / {{ scope.counts.excluded }} excluded
+          of {{ scope.counts.total }}.</p>
+        {% if scope.feasibility.summary %}<p class="hint">{{ scope.feasibility.summary }}</p>{% endif %}
+      </div>
+
+      <form method="post" action="/jobs/{{ job.id }}/scope">
+        <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+        <div class="card">
+          <h3>Screens</h3>
+          <div class="table-wrap">
+            <table class="kv">
+              <thead>
+                <tr><th>Include</th><th>Name</th><th>Group</th><th>Reason</th></tr>
+              </thead>
+              <tbody>
+                {% for s in scope.screens %}
+                <tr>
+                  <td><input type="checkbox" name="include_{{ s.screen_id }}"
+                    {{ 'checked' if s.include else '' }} {{ '' if editable else 'disabled' }}></td>
+                  <td>{{ s.name }}<br><span class="mono muted" style="font-size:11px;">{{ s.screen_id }}</span></td>
+                  <td>{{ s.group or '—' }}</td>
+                  <td class="muted">{{ s.reason }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {% if scope.core_flows %}
+        <div class="card">
+          <h3>Core flows</h3>
+          <ul class="hint">{% for f in scope.core_flows %}<li>{{ f }}</li>{% endfor %}</ul>
+        </div>
+        {% endif %}
+
+        {% if scope.feasibility.findings %}
+        <div class="card">
+          <h3>Feasibility findings</h3>
+          <div class="table-wrap">
+            <table class="kv">
+              <thead><tr><th>Capability</th><th>Verdict</th><th>Note</th><th>Screens</th></tr></thead>
+              <tbody>
+                {% for f in scope.feasibility.findings %}
+                <tr>
+                  <td>{{ f.capability }}</td>
+                  <td>{{ f.verdict }}</td>
+                  <td class="muted">{{ f.note }}</td>
+                  <td class="mono" style="font-size:11px;">{{ f.screens | join(', ') }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {% endif %}
+
+        <div class="card">
+          {% if editable %}
+          <h3>Approve scope</h3>
+          <div class="field">
+            <label>Scope mode</label>
+            <select name="scope_mode">
+              <option value="core" {{ 'selected' if scope.scope_mode == 'core' else '' }}>core — lean MVP</option>
+              <option value="full" {{ 'selected' if scope.scope_mode == 'full' else '' }}>full — clone every screen</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Notes</label>
+            <textarea name="notes" rows="3" placeholder="Optional note for this decision.">{{ scope.notes }}</textarea>
+          </div>
+          <div class="form-actions">
+            <button class="btn" type="submit">Approve &amp; generate</button>
+          </div>
+          {% else %}
+          <h3>Notes</h3>
+          <p class="hint">{{ scope.notes or '—' }}</p>
+          {% endif %}
+        </div>
+      </form>
+    </section>
+    {% endif %}
 
     <section class="tab-panel panel-build" role="tabpanel" aria-label="Build and sign">
       <div class="card">
