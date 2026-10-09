@@ -23,6 +23,7 @@ cannot run on the simulator, so mirroring is built and wired but not functionall
 from __future__ import annotations
 
 import json
+import secrets
 import socket
 import subprocess
 import threading
@@ -73,6 +74,14 @@ final class CastingService {{
 
     private var browsers: [NWBrowser] = []
     private var connection: NWConnection?
+    private var pending: NWConnection?
+
+    /// In functional mode, the only device whose effects are journaled (the mock receiver).
+    private func observed(_ device: CastDevice) -> Bool {{
+        guard Functional.isActive else {{ return false }}
+        guard let expected = Functional.value("CAST_RECEIVER") else {{ return true }}
+        return device.name == expected
+    }}
 
     /// Starts browsing the local network for receivers (results arrive in `devices`).
     func startDiscovery() {{
@@ -83,6 +92,13 @@ final class CastingService {{
             let browser = NWBrowser(for: .bonjour(type: type, domain: nil), using: .tcp)
             browser.browseResultsChangedHandler = {{ [weak self] results, _ in
                 Task {{ @MainActor in self?.update(type: type, results: results) }}
+            }}
+            browser.stateUpdateHandler = {{ [weak self] state in
+                guard case let .failed(error) = state else {{ return }}
+                Task {{ @MainActor in
+                    self?.lastError = "Searching the network failed."
+                    Functional.record("cast.error", ["reason": "browse failed: \\(error)"])
+                }}
             }}
             browser.start(queue: .main)
             browsers.append(browser)
@@ -96,34 +112,59 @@ final class CastingService {{
         isSearching = false
     }}
 
-    /// Opens a connection to `device`; true when it is ready to receive a stream.
+    /// Opens a connection to `device`; true when it is ready to receive a stream within
+    /// `timeout` seconds (a refused, unreachable or stale device fails instead of hanging).
     @discardableResult
-    func connect(_ device: CastDevice) async -> Bool {{
+    func connect(_ device: CastDevice, timeout: TimeInterval = 10) async -> Bool {{
         guard !Headless.isActive else {{ return false }}
-        connection?.cancel()
+        pending?.cancel()
+        disconnect()
         let candidate = NWConnection(to: device.endpoint, using: .tcp)
+        pending = candidate
         let ready = await withCheckedContinuation {{ (continuation: CheckedContinuation<Bool, Never>) in
             var resumed = false
+            let finish: (Bool) -> Void = {{ value in
+                guard !resumed else {{ return }}
+                resumed = true
+                continuation.resume(returning: value)
+            }}
             candidate.stateUpdateHandler = {{ state in
                 switch state {{
                 case .ready:
-                    if !resumed {{ resumed = true; continuation.resume(returning: true) }}
+                    finish(true)
                 case .failed, .cancelled:
-                    if !resumed {{ resumed = true; continuation.resume(returning: false) }}
+                    finish(false)
                 default:
                     break
                 }}
             }}
             candidate.start(queue: .main)
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {{ finish(false) }}
+        }}
+        if pending === candidate {{
+            pending = nil
         }}
         guard ready else {{
+            candidate.stateUpdateHandler = nil
+            candidate.cancel()
             lastError = "Could not connect to \\(device.name)."
-            Functional.record("cast.error", ["reason": "connect failed"])
+            Functional.record("cast.error", ["reason": "connect failed", "device": device.name])
             return false
         }}
+        candidate.stateUpdateHandler = {{ [weak self] state in
+            switch state {{
+            case .failed, .cancelled:
+                Task {{ @MainActor in self?.dropped(candidate) }}
+            default:
+                break
+            }}
+        }}
+        lastError = nil
         connection = candidate
         connected = device
-        Functional.record("cast.connected", ["device": device.name])
+        if observed(device) {{
+            Functional.record("cast.connected", ["device": device.name])
+        }}
         return true
     }}
 
@@ -142,7 +183,7 @@ final class CastingService {{
                 continuation.resume(returning: error == nil)
             }})
         }}
-        if sent {{
+        if sent && observed(device) {{
             Functional.record("cast.stream_started", ["device": device.name, "title": title])
         }}
         return sent
@@ -150,9 +191,17 @@ final class CastingService {{
 
     /// Ends the session with the connected device.
     func disconnect() {{
+        connection?.stateUpdateHandler = nil
         connection?.cancel()
         connection = nil
         connected = nil
+    }}
+
+    private func dropped(_ lost: NWConnection) {{
+        guard connection === lost else {{ return }}
+        connection = nil
+        connected = nil
+        lastError = "The TV disconnected."
     }}
 
     private func update(type: String, results: Set<NWBrowser.Result>) {{
@@ -162,7 +211,7 @@ final class CastingService {{
             found.append(CastDevice(id: type + "/" + name, name: name, kind: type, endpoint: result.endpoint))
         }}
         let known = Set(devices.map(\\.id))
-        for device in found where !known.contains(device.id) {{
+        for device in found where !known.contains(device.id) && observed(device) {{
             Functional.record("cast.device_found", ["device": device.name, "kind": device.kind])
         }}
         devices = found.sorted {{ $0.name < $1.name }}
@@ -311,13 +360,18 @@ def fake_receiver(name: str = RECEIVER_NAME) -> Iterator[FakeReceiver]:
             yield receiver
         finally:
             advert.terminate()
-            advert.wait(timeout=5)
+            try:
+                advert.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                advert.kill()
+                advert.wait(timeout=5)
 
 
 @contextmanager
 def _mock(check: FunctionalCheck, context: MockContext) -> Iterator[dict[str, str]]:
-    with fake_receiver():
-        yield {}
+    name = f"{RECEIVER_NAME} {secrets.token_hex(2).upper()}"
+    with fake_receiver(name):
+        yield {"IOSFORGE_CAST_RECEIVER": name}
 
 
 def render_files(ctx: caps.CapabilityContext) -> dict[str, str]:

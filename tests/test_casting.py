@@ -43,6 +43,11 @@ struct Screen0001View: View {
 }
 """
 
+DECOY_SCREEN = CAST_SCREEN.replace(
+    "await casting.connect(device)",
+    'await casting.connect(casting.devices.first { $0.name.hasPrefix("Decoy") } ?? device)',
+)
+
 
 def _spec() -> dict[str, Any]:
     spec = _spec_three_screens()
@@ -84,6 +89,62 @@ def test_functional_check_drives_discover_connect_cast() -> None:
     assert check.expect_events == ("cast.device_found", "cast.connected", "cast.stream_started")
 
 
+def test_mock_names_a_unique_receiver_for_the_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    from contextlib import contextmanager
+
+    names: list[str] = []
+
+    @contextmanager
+    def quiet(name: str = swiftui_casting.RECEIVER_NAME) -> Any:
+        names.append(name)
+        yield None
+
+    monkeypatch.setattr(swiftui_casting, "fake_receiver", quiet)
+    check = swiftui_casting.DESCRIPTOR.functional_check(
+        caps.CapabilityContext(_spec(), caps.integ.Integrations(), _spec()["capabilities"][0])
+    )
+    assert check is not None
+    context = functional.swf.MockContext(udid="U", bundle_id="b")
+    with (
+        swiftui_casting._mock(check, context) as first,
+        swiftui_casting._mock(check, context) as again,
+    ):
+        assert first["IOSFORGE_CAST_RECEIVER"] == names[0] != names[1]
+        assert again["IOSFORGE_CAST_RECEIVER"].startswith(swiftui_casting.RECEIVER_NAME)
+
+
+def test_service_journals_only_the_mock_receiver_and_times_out() -> None:
+    swift = swiftui_casting.CASTING_SWIFT
+    assert 'Functional.value("CAST_RECEIVER")' in swift
+    assert "where !known.contains(device.id) && observed(device)" in swift
+    assert "if sent && observed(device)" in swift and "if observed(device)" in swift
+    assert "asyncAfter(deadline: .now() + timeout)" in swift and "pending?.cancel()" in swift
+    assert "private func dropped(" in swift
+
+
+def _cast_run(tmp_path: Path, screen: str) -> dict[str, Any]:
+    udid = _first_iphone()
+    assert udid is not None
+    spec = _spec()
+    paths = RunPaths.create(tmp_path / "runs")
+    paths.app_spec_json.write_text(json.dumps(spec))
+    swiftui_gen.write_scaffold(
+        paths.xcode_app, spec, app_name="Cast Demo", bundle_id="dev.iosforge.castdemo"
+    )
+    (paths.xcode_app / "App/Features/0001/Screen0001View.swift").write_text(screen)
+    return functional.run(paths, udid=udid, spec=spec, timeout=1500)
+
+
+@pytest.mark.mac
+@pytest.mark.skipif(_first_iphone() is None, reason="needs Xcode, XcodeGen and an iPhone simulator")
+def test_connecting_to_another_tv_fails_the_check(tmp_path: Path) -> None:
+    with swiftui_casting.fake_receiver("Decoy TV") as decoy:
+        check = _cast_run(tmp_path, DECOY_SCREEN)["checks"][0]
+        assert decoy.messages and decoy.messages[0]["type"] == "LOAD"
+    assert not check["passed"] and check["ui_passed"] and not check["infra_error"]
+    assert "cast.connected" in check["missing_events"]
+
+
 @pytest.mark.mac
 @pytest.mark.skipif(_first_iphone() is None, reason="needs Xcode, XcodeGen and an iPhone simulator")
 def test_app_discovers_the_fake_tv_and_starts_a_stream(
@@ -103,13 +164,6 @@ def test_app_discovers_the_fake_tv_and_starts_a_stream(
             received.extend(receiver.messages)
 
     monkeypatch.setattr(swiftui_casting, "fake_receiver", recording)
-    spec = _spec()
-    paths = RunPaths.create(tmp_path / "runs")
-    paths.app_spec_json.write_text(json.dumps(spec))
-    swiftui_gen.write_scaffold(
-        paths.xcode_app, spec, app_name="Cast Demo", bundle_id="dev.iosforge.castdemo"
-    )
-    (paths.xcode_app / "App/Features/0001/Screen0001View.swift").write_text(CAST_SCREEN)
-    report = functional.run(paths, udid=udid, spec=spec, timeout=1500)
+    report = _cast_run(tmp_path, CAST_SCREEN)
     assert report["ok"], report
     assert received and received[0]["type"] == "LOAD"
