@@ -92,6 +92,31 @@ SIMULATOR_ENV_CONTRACT: str = (
     "screenshots differ by < 0.5 % of pixels (tolerant pixel diff, no byte hash)"
 )
 
+#: Capability contract (Level 2): how a generated app gets REAL functionality.
+#:
+#: A capability declared in ``app_spec.capabilities`` and routed by the scope stage
+#: to tier 2 is implemented by a registry module
+#: (:mod:`iosforge.mvp.swiftui_capabilities`), never by screen code:
+#:
+#: * the module is contract code under its scaffold directory (``App/Capabilities``,
+#:   ``App/Monetization`` for the core modules), restored byte-for-byte; any SwiftPM
+#:   package it needs is linked by the scaffold and imported ONLY there;
+#: * screens call the module's Swift API (its screen rule is injected into every
+#:   screen prompt) and never import the SDK or the system framework it wraps;
+#: * headless screen-id mode never starts a module (screens show fixtures);
+#: * a module may ship a ``mock`` and a ``functional_check``: functional
+#:   verification proves the integration against that MOCK, not against real
+#:   hardware or a real backend.
+#:
+#: Tier 1 capabilities stay in screen code (simple system API), tier 3 is a custom
+#: core written by a human, tier 4 is not built (flagged to the operator).
+CAPABILITY_CONTRACT: str = (
+    "tier-2 capabilities are registry modules: contract code under App/Capabilities "
+    "(core: App/Monetization), SDKs linked and imported only there, screens call the "
+    "module API, headless never starts a module, functional checks run against the "
+    "module's mock"
+)
+
 # --------------------------------------------------------------------------- #
 # Shared domain types (Pydantic). Inputs/outputs of the provider interfaces.
 # --------------------------------------------------------------------------- #
@@ -406,6 +431,7 @@ __all__ = [
     "PromptSetProvider",
     "PromptSetVersion",
     "Provider",
+    "CAPABILITY_CONTRACT",
     "SCREEN_NAV_CONTRACT",
     "SIMULATOR_ENV_CONTRACT",
     "ScreenShot",

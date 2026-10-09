@@ -174,6 +174,7 @@ def job_detail(
             "sign_error": sign_error,
             "scope_status": scope_status,
             "scope": _load_scope(storage, job_id, scope_status),
+            "capability_modules": _capability_modules(),
         },
     )
 
@@ -867,6 +868,7 @@ async def jobs_scope_approve(
     form = await request.form()
     for screen in scope.screens:
         screen.include = f"include_{screen.screen_id}" in form
+    feasibility.confirm_routing(scope, {k: str(v) for k, v in form.items()})
     scope.scope_mode = "full" if scope_mode == "full" else "core"
     scope.notes = notes
     scope.status = "approved"
@@ -1120,6 +1122,12 @@ def _codegen_tasks(db: Session, job_id: uuid.UUID) -> list[CodegenTask]:
             select(CodegenTask).where(CodegenTask.job_id == job_id).order_by(CodegenTask.idx.asc())
         ).all()
     )
+
+
+def _capability_modules() -> list[str]:
+    from iosforge.mvp import capability_registry
+
+    return list(capability_registry.MODULES)
 
 
 def _load_scope(

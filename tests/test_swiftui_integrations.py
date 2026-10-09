@@ -9,6 +9,7 @@ from typing import Any
 
 from PIL import Image
 
+from iosforge.mvp import swiftui_capabilities as caps
 from iosforge.mvp import swiftui_gen
 from iosforge.mvp import swiftui_integrations as integ
 from iosforge.mvp.swiftui_scaffold import ICON_FILE, ICON_SET, AppIdentity, enforce_contract
@@ -78,12 +79,14 @@ def test_subscriptions_and_attribution_templates(tmp_path: Path) -> None:
 
 def test_project_and_plist_lines(tmp_path: Path) -> None:
     ints = _configs(tmp_path)
-    assert integ.project_packages(ints)[:2] == ["packages:", "  ApphudSDK:"]
-    assert "      - package: TenjinSDK" in integ.target_dependencies(ints)
-    info = integ.info_properties(ints)
+    selected = caps.select({}, ints)
+    assert caps.project_packages(selected)[:2] == ["packages:", "  ApphudSDK:"]
+    assert "      - package: TenjinSDK" in caps.target_dependencies(selected)
+    info = caps.info_properties(selected, ints)
     assert "        ITSAppUsesNonExemptEncryption: false" in info
     assert '          - SKAdNetworkIdentifier: "abc.skadnetwork"' in info
-    assert integ.project_packages(integ.Integrations()) == []
+    bare = integ.Integrations()
+    assert caps.project_packages(caps.select({}, bare)) == []
 
 
 def test_scaffold_freezes_integrations_and_draws_an_icon(tmp_path: Path) -> None:

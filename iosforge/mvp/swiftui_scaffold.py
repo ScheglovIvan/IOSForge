@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from iosforge.mvp import swiftui_capabilities as caps
 from iosforge.mvp import swiftui_integrations as integ
 from iosforge.mvp import swiftui_media
 from iosforge.mvp import swiftui_templates as tpl
@@ -51,7 +52,7 @@ CONTRACT_DIRS = (
     "App/Headless",
     PERMISSIONS_DIR,
     "App/Support",
-    "App/Monetization",
+    *caps.directories(),
 )
 ICON_SET = "Resources/Assets.xcassets/AppIcon.appiconset"
 ICON_FILE = "app_icon.png"
@@ -278,6 +279,7 @@ def render_project_yml(
     has_media: bool,
     has_icon: bool = False,
     integrations: integ.Integrations | None = None,
+    selected: list[caps.Selected] | None = None,
 ) -> str:
     """XcodeGen spec: one iOS app target with a scheme, signing off, Info.plist in Config/.
 
@@ -285,12 +287,13 @@ def render_project_yml(
     xcodebuild command line (:mod:`iosforge.mvp.ios_delivery`).
     """
     extras = integrations or integ.Integrations()
+    modules = selected if selected is not None else caps.select({}, extras)
     lines = [
         f"name: {target}",
         "options:",
         "  deploymentTarget:",
         f'    iOS: "{DEPLOYMENT_TARGET}"',
-        *integ.project_packages(extras),
+        *caps.project_packages(modules),
         "targets:",
         f"  {target}:",
         "    type: application",
@@ -305,7 +308,7 @@ def render_project_yml(
         lines += ["      - path: Resources/Media", "        type: folder"]
     if has_icon:
         lines.append("      - path: Resources/Assets.xcassets")
-    lines += integ.target_dependencies(extras)
+    lines += caps.target_dependencies(modules)
     lines += [
         "    settings:",
         "      base:",
@@ -334,7 +337,7 @@ def render_project_yml(
         lines.append(f"        {key}: {_yaml_str(text)}")
     lines += [
         line
-        for line in integ.info_properties(extras)
+        for line in caps.info_properties(modules, extras)
         if line.split(":")[0].strip() not in purpose_strings
     ]
     return "\n".join(lines) + "\n"
@@ -353,6 +356,7 @@ def render_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) 
     target = target_name(identity.app_name)
     media = app_dir / "Resources" / "Media"
     integrations = integ.load(app_dir)
+    selected = caps.select(spec, integrations)
     has_icon = (app_dir / ICON_SET / ICON_FILE).is_file()
     files = {
         "project.yml": render_project_yml(
@@ -364,11 +368,15 @@ def render_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) 
             has_media=media.is_dir() and any(media.iterdir()),
             has_icon=has_icon,
             integrations=integrations,
+            selected=selected,
         ),
-        "App/Monetization/Subscriptions.swift": integ.render_subscriptions(integrations),
-        "App/Monetization/Attribution.swift": integ.render_attribution(integrations),
-        "App/App.swift": tpl.render_app(target),
-        "App/Navigation/ScreenID.swift": tpl.render_screen_id(plan.entries, plan.tabs),
+        **caps.render_files(selected),
+        "App/App.swift": tpl.render_app(
+            target, caps.startup_calls(selected), launch=bool(launch_screens(spec, plan))
+        ),
+        "App/Navigation/ScreenID.swift": tpl.render_screen_id(
+            plan.entries, plan.tabs, launch_screens(spec, plan)
+        ),
         "App/Navigation/AppTab.swift": tpl.render_app_tab(plan.tabs, shows_bar=plan.shows_tab_bar),
         "App/Navigation/Router.swift": tpl.ROUTER,
         "App/Navigation/RootView.swift": tpl.ROOT_VIEW,
@@ -380,13 +388,24 @@ def render_contract(app_dir: Path, spec: dict[str, Any], identity: AppIdentity) 
         files["Resources/Assets.xcassets/Contents.json"] = _CATALOG_CONTENTS
         files[f"{ICON_SET}/Contents.json"] = _ICON_CONTENTS
     kinds = [k.case for k in declared_kinds(spec)]
-    if integrations.attribution and "tracking" not in kinds:
-        kinds.append("tracking")
+    kinds += [k for k in caps.prompter_kinds(selected) if k not in kinds]
     for case in kinds:
         if case in PROMPTERS:
             name, text = render_prompter(case)
             files[f"{PERMISSIONS_DIR}/{name}"] = text
     return files
+
+
+def launch_screens(spec: dict[str, Any], plan: NavPlan) -> list[dict[str, str]]:
+    """``navigation.launch`` entries whose screen the app builds (Q15)."""
+    built = {e.screen_id for e in plan.entries}
+    navigation = spec.get("navigation") or {}
+    entries = navigation.get("launch") if isinstance(navigation, dict) else None
+    return [
+        {k: str(v) for k, v in item.items()}
+        for item in entries or []
+        if isinstance(item, dict) and str(item.get("screen_id")) in built
+    ]
 
 
 def _rel(path: Path, app_dir: Path) -> str:

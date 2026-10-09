@@ -22,6 +22,8 @@ class FeasibilityFinding(BaseModel):
     verdict: Literal["native", "partial", "blocked"]
     note: str
     screens: list[str] = Field(default_factory=list)
+    tier: Literal[1, 2, 3, 4] | None = None
+    module: str | None = None
 
 
 class FeasibilityReport(BaseModel):

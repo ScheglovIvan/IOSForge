@@ -70,8 +70,28 @@ def clean_text(value: str) -> str:
     return _CONTROL.sub(" ", value).strip()
 
 
-def render_screen_id(entries: list[ScreenEntry], tabs: list[TabEntry]) -> str:
-    """``ScreenID`` enum: cases, presentation, owning tab, view factory."""
+_LAUNCH_CONDITIONS = {
+    "every_launch": "everyLaunch",
+    "first_launch": "firstLaunch",
+    "not_premium": "notPremium",
+}
+
+
+def render_screen_id(
+    entries: list[ScreenEntry],
+    tabs: list[TabEntry],
+    launch: list[dict[str, str]] | None = None,
+) -> str:
+    """``ScreenID`` enum: cases, presentation, owning tab, view factory, launch screens."""
+    by_id = {e.screen_id: e for e in entries}
+    launch_rows = [
+        f"        LaunchScreen(screen: .{by_id[item['screen_id']].case_name}, "
+        f"asSheet: {'true' if item.get('presentation') == 'sheet' else 'false'}, "
+        f"condition: .{_LAUNCH_CONDITIONS.get(item.get('condition', ''), 'everyLaunch')}),"
+        for item in launch or []
+        if item.get("screen_id") in by_id
+    ]
+    launch_list = "[\n" + "\n".join(launch_rows) + "\n    ]" if launch_rows else "[]"
     by_root = {t.root.screen_id: t for t in tabs}
     cases = "\n".join(
         f"    case {e.case_name} = {swift_str(e.screen_id)}  // {clean_text(e.name)}"
@@ -102,6 +122,9 @@ enum ScreenID: String, CaseIterable, Identifiable, Hashable {{
     /// First onboarding screen for a normal (non-headless) first launch.
     static let onboardingStart: ScreenID? = {first_onboarding}
 
+    /// Screens presented over the app on start (`app_spec.navigation.launch`).
+    static let launchScreens: [LaunchScreen] = {launch_list}
+
     var presentation: ScreenPresentation {{
         switch self {{
 {presentations}
@@ -131,6 +154,17 @@ enum ScreenID: String, CaseIterable, Identifiable, Hashable {{
 
 enum ScreenPresentation {{
     case onboarding, tabRoot, push, sheet, fullScreenCover
+}}
+
+/// A screen the app presents over itself on start, and when.
+struct LaunchScreen {{
+    enum Condition {{
+        case everyLaunch, firstLaunch, notPremium
+    }}
+
+    let screen: ScreenID
+    let asSheet: Bool
+    let condition: Condition
 }}
 """
 
@@ -264,6 +298,31 @@ final class Router {{
         }}
         onboarding = nil
         selectedTab = .home
+    }}
+
+    /// Presents the first `ScreenID.launchScreens` entry whose condition holds; never in
+    /// headless screen-id mode or over onboarding.
+    @MainActor
+    func presentLaunch() {{
+        guard !Headless.isActive, onboarding == nil else {{ return }}
+        for entry in ScreenID.launchScreens {{
+            let key = "iosforge.launch_shown.\\(entry.screen.rawValue)"
+            switch entry.condition {{
+            case .everyLaunch:
+                break
+            case .firstLaunch:
+                if UserDefaults.standard.bool(forKey: key) {{ continue }}
+            case .notPremium:
+                if Subscriptions.hasPremium {{ continue }}
+            }}
+            UserDefaults.standard.set(true, forKey: key)
+            if entry.asSheet {{
+                sheet = entry.screen
+            }} else {{
+                cover = entry.screen
+            }}
+            return
+        }}
     }}
 
     func handle(_ url: URL) {{
@@ -449,8 +508,17 @@ enum Permissions {{
 """
 
 
-def render_app(target: str) -> str:
-    """``@main`` entry point wiring ``Router`` into ``RootView``."""
+def render_app(target: str, startup: list[str] | None = None, *, launch: bool = False) -> str:
+    """``@main`` entry point wiring ``Router`` into ``RootView`` and starting the modules.
+
+    With ``launch`` the entry point presents the launch screens once the modules started.
+    """
+    calls = (
+        startup if startup is not None else ["Subscriptions.start()", "await Attribution.start()"]
+    )
+    if launch:
+        calls = [*calls, "router.presentLaunch()"]
+    task = "\n".join(f"                    {call}" for call in calls)
     return f"""import SwiftUI
 
 /// App entry point. {DO_NOT_EDIT}
@@ -464,8 +532,7 @@ struct {target}App: App {{
                 .environment(router)
                 .onOpenURL {{ router.handle($0) }}
                 .task {{
-                    Subscriptions.start()
-                    await Attribution.start()
+{task}
                 }}
         }}
     }}

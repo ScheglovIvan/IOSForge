@@ -9,6 +9,8 @@ carries ``reference/`` (``docs/swiftui-reference``) as the worked example.
 
 from __future__ import annotations
 
+from iosforge.mvp import swiftui_capabilities as caps
+from iosforge.mvp.swiftui_integrations import Integrations
 from iosforge.mvp.swiftui_permissions import PERMISSIONS_DIR, SERVICE_SUFFIX
 from iosforge.mvp.swiftui_scaffold import CONTRACT_DIRS, NavPlan
 from iosforge.mvp.swiftui_templates import ScreenEntry, TabEntry
@@ -17,9 +19,15 @@ APP_DIR = "xcode_app"
 COMPONENTS_MD = "COMPONENTS.md"
 
 
-def base_rules(prompters: list[str]) -> str:
-    """Rules shared by every SwiftUI task (contract, navigation, headless, permissions)."""
+def base_rules(prompters: list[str], modules: list[str] | None = None) -> str:
+    """Rules shared by every SwiftUI task (contract, navigation, headless, permissions).
+
+    ``modules`` are the screen API rules of the app's capability modules
+    (:func:`iosforge.mvp.swiftui_capabilities.screen_rules`); the core modules by default.
+    """
     contract = ", ".join(f"`{APP_DIR}/{d}/`" for d in CONTRACT_DIRS)
+    rules = modules if modules is not None else caps.screen_rules(caps.select({}, Integrations()))
+    module_rules = "".join(f"- {rule}\n" for rule in rules)
     available = ", ".join(f"`{p}`" for p in prompters) or "none (the app declares no permissions)"
     return f"""You are generating part of a native iOS app in SwiftUI. The Xcode project
 lives in `{APP_DIR}/` and is generated with XcodeGen by IOSForge.
@@ -50,11 +58,7 @@ HARD RULES
   `@Environment(\\.requestReview)`.
 - Real behaviour (tone playback, level metering, ...) uses Apple frameworks and starts from user
   actions; in headless mode screens show their fixture state instead.
-- Subscriptions only through the scaffold API (`App/Monetization/Subscriptions.swift`):
-  `await Subscriptions.products()` (`SubscriptionProduct`: id, title, price, period), buy with
-  `await Subscriptions.purchase(product.id)`, restore with `await Subscriptions.restore()`, call
-  `Subscriptions.paywallShown()` in `.onAppear` of a paywall and gate premium features with
-  `Subscriptions.hasPremium`. Never import StoreKit, ApphudSDK or TenjinSDK in screens.
+{module_rules}\
 - Bundled fonts: `Font.custom("<postscript_name>", size:)` with names from `fonts.json`
   (files with `is_system: false`); system fonts otherwise. Bundled media:
   `MediaAsset.image("<file>")` / `MediaAsset.url("<file>")` where `<file>` is the file name of
@@ -80,9 +84,15 @@ def _divergence(enabled: bool) -> str:
     return DIVERGENCE_NOTE if enabled else ""
 
 
-def theme_prompt(*, app_name: str, prompters: list[str], diverge_content: bool = True) -> str:
+def theme_prompt(
+    *,
+    app_name: str,
+    prompters: list[str],
+    modules: list[str] | None = None,
+    diverge_content: bool = True,
+) -> str:
     """Theme task: design tokens → ``App/Theme/`` Swift (colours, fonts, styles)."""
-    return f"""{base_rules(prompters)}
+    return f"""{base_rules(prompters, modules)}
 {_divergence(diverge_content)}
 TASK: theme for "{app_name}".
 Read `app_spec.json` → `design_tokens` (W3C tokens: color, font, dimension, gradient,
@@ -98,7 +108,13 @@ Keep a type named `Theme` (it may become a namespace enum). Write ONLY under
 """
 
 
-def components_prompt(plan: NavPlan, *, prompters: list[str], diverge_content: bool = True) -> str:
+def components_prompt(
+    plan: NavPlan,
+    *,
+    prompters: list[str],
+    modules: list[str] | None = None,
+    diverge_content: bool = True,
+) -> str:
     """Component-library task: shared views + the single ``AppTabBar`` + ``COMPONENTS.md``."""
     if plan.shows_tab_bar:
         tabs = "\n".join(
@@ -119,7 +135,7 @@ def components_prompt(plan: NavPlan, *, prompters: list[str], diverge_content: b
         tab_bar = (
             f"- The app has no tab bar: leave `{APP_DIR}/App/Components/AppTabBar.swift` unchanged."
         )
-    return f"""{base_rules(prompters)}
+    return f"""{base_rules(prompters, modules)}
 {_divergence(diverge_content)}
 TASK: component library (runs after the theme, before any screen).
 Read `app_spec.json` → `screens[].components` across ALL screens, the screenshots in `screens/`,
@@ -169,6 +185,7 @@ def screen_prompt(
     *,
     targets: list[ScreenEntry],
     prompters: list[str],
+    modules: list[str] | None = None,
     observed: bool = True,
     diverge_content: bool = True,
     images: list[tuple[str, str]] | None = None,
@@ -204,7 +221,7 @@ def screen_prompt(
         reference = """- There is NO screenshot and NO native view tree for this screen: the
   analysis inferred it from the rest of the app. Design it from its app_spec entry so it looks
   like a sibling of the observed screens (same theme, components, spacing, header style)."""
-    return f"""{base_rules(prompters)}
+    return f"""{base_rules(prompters, modules)}
 {_divergence(diverge_content)}
 TASK: implement screen `{entry.screen_id}` — "{entry.name}".
 {_placement(entry, tabs, plan.shows_tab_bar)}
@@ -228,10 +245,12 @@ OUTPUT (write ONLY these paths; anything else is discarded):
 """
 
 
-def compile_fix_prompt(errors: list[str], *, prompters: list[str]) -> str:
+def compile_fix_prompt(
+    errors: list[str], *, prompters: list[str], modules: list[str] | None = None
+) -> str:
     """Compile-gate fix task for the given xcodebuild / contract / permission-lint errors."""
     listed = "\n".join(errors)
-    return f"""{base_rules(prompters)}
+    return f"""{base_rules(prompters, modules)}
 TASK: the project in `{APP_DIR}/` does not build or breaks the scaffold contract. Below are the
 errors from xcodebuild, the IOSForge contract check and the permission lint. Fix ONLY these
 errors with the smallest edits: imports, types, missing members, typos, misplaced files.
@@ -273,11 +292,15 @@ def _corrective_task_text(task: dict[str, object], entry: ScreenEntry) -> str:
 
 
 def corrective_prompt(
-    tasks: list[dict[str, object]], entry: ScreenEntry, *, prompters: list[str]
+    tasks: list[dict[str, object]],
+    entry: ScreenEntry,
+    *,
+    prompters: list[str],
+    modules: list[str] | None = None,
 ) -> str:
     """Vision-Judge corrective task for one screen (all of its fix tasks combined)."""
     body = "\n\n".join(_corrective_task_text(task, entry) for task in tasks)
-    return f"""{base_rules(prompters)}
+    return f"""{base_rules(prompters, modules)}
 TASK: correct screen `{entry.screen_id}` — "{entry.name}" after the Vision Judge review.
 Compare (LOOK at both): `screens/{entry.screen_id}.png` — the ORIGINAL target, and
 `generated_screens/{entry.screen_id}.png` — the CURRENT render of this app.
@@ -290,9 +313,11 @@ is discarded. Keep the screen compiling and rendering fully on the first frame.
 """
 
 
-def rework_prompt(instructions: str, *, prompters: list[str]) -> str:
+def rework_prompt(
+    instructions: str, *, prompters: list[str], modules: list[str] | None = None
+) -> str:
     """Operator rework round over the generated app (post-MVP feature/fix iteration)."""
-    return f"""{base_rules(prompters)}
+    return f"""{base_rules(prompters, modules)}
 TASK: operator rework round on the existing app in `{APP_DIR}/`. Apply these instructions:
 
 {instructions.strip()}

@@ -1,6 +1,7 @@
 """Native distribution integrations of the SwiftUI scaffold (Phase 5).
 
-Renders, as contract code, the app's distribution integrations:
+Renders, as contract code, the app's distribution integrations (wrapped as the core
+capability modules by :mod:`iosforge.mvp.swiftui_capabilities`):
 Apphud subscriptions and Tenjin attribution through SwiftPM (``ApphudSDK``,
 ``TenjinSDK``), the App Store encryption declaration, SKAdNetwork identifiers and the
 attribution report endpoint. The job-specific inputs (``apphud_config.json`` /
@@ -312,43 +313,27 @@ enum Attribution {{
 """
 
 
-def project_packages(integrations: Integrations) -> list[str]:
-    """Top-level XcodeGen ``packages:`` lines for the configured SDKs."""
+def app_properties(integrations: Integrations) -> list[str]:
+    """App-level Info.plist properties (the App Store encryption declaration)."""
+    if integrations.export_compliance_exempt is None:
+        return []
+    uses = "false" if integrations.export_compliance_exempt else "true"
+    return [f"        ITSAppUsesNonExemptEncryption: {uses}"]
+
+
+def attribution_properties(integrations: Integrations) -> list[str]:
+    """Info.plist properties of attribution (ATT text, SKAN report endpoint and ids)."""
+    if not integrations.attribution:
+        return []
     lines: list[str] = []
-    for enabled, (name, url, version) in (
-        (integrations.subscriptions, APPHUD_PACKAGE),
-        (integrations.attribution, TENJIN_PACKAGE),
-    ):
-        if enabled:
-            lines += [f"  {name}:", f"    url: {url}", f'    from: "{version}"']
-    return ["packages:", *lines] if lines else []
-
-
-def target_dependencies(integrations: Integrations) -> list[str]:
-    """Target ``dependencies:`` lines linking the configured SDK products."""
-    lines: list[str] = []
-    if integrations.subscriptions:
-        lines += [f"      - package: {APPHUD_PACKAGE[0]}", f"        product: {APPHUD_PACKAGE[0]}"]
-    if integrations.attribution:
-        lines += [f"      - package: {TENJIN_PACKAGE[0]}", f"        product: {TENJIN_PACKAGE[0]}"]
-    return ["    dependencies:", *lines] if lines else []
-
-
-def info_properties(integrations: Integrations) -> list[str]:
-    """Extra Info.plist properties (encryption declaration, ATT, SKAdNetwork, endpoint)."""
-    lines: list[str] = []
-    if integrations.export_compliance_exempt is not None:
-        uses = "false" if integrations.export_compliance_exempt else "true"
-        lines.append(f"        ITSAppUsesNonExemptEncryption: {uses}")
-    if integrations.attribution:
-        if integrations.att_usage_description:
-            usage = _swift(integrations.att_usage_description)
-            lines.append(f"        NSUserTrackingUsageDescription: {usage}")
-        lines.append(f"        NSAdvertisingAttributionReportEndpoint: {SKAN_REPORT_ENDPOINT}")
-        if integrations.skadnetwork_ids:
-            lines.append("        SKAdNetworkItems:")
-            lines += [
-                f"          - SKAdNetworkIdentifier: {_swift(identifier)}"
-                for identifier in integrations.skadnetwork_ids
-            ]
+    if integrations.att_usage_description:
+        usage = _swift(integrations.att_usage_description)
+        lines.append(f"        NSUserTrackingUsageDescription: {usage}")
+    lines.append(f"        NSAdvertisingAttributionReportEndpoint: {SKAN_REPORT_ENDPOINT}")
+    if integrations.skadnetwork_ids:
+        lines.append("        SKAdNetworkItems:")
+        lines += [
+            f"          - SKAdNetworkIdentifier: {_swift(identifier)}"
+            for identifier in integrations.skadnetwork_ids
+        ]
     return lines

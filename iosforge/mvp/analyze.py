@@ -154,6 +154,22 @@ Method:
    - `integrations` and `backend`/`analytics` facts from `sdks.json` evidence
      (e.g. Firebase, AppsFlyer). Set each affected `source`/`analysis_quality`
      note to reflect that it came from observed SDK traffic, not inference.
+8. CAPABILITIES — list what the app must actually DO, not only show, so the clone
+   is functional rather than a shell. Detect them from `app_type`, the store
+   description, on-screen affordances (scan / clean / cast / mirror / ask AI /
+   play), `sdks.json`, `network_index.json` (an API the app calls with user input)
+   and `media.json`. One entry per capability: `name` (snake_case), `kind` (see the
+   schema), `inputs` (what the user or system provides), `expected_behavior` (the
+   OBSERVABLE effect a test can assert, e.g. "duplicate photos are grouped and the
+   selected ones are deleted", "the answer from the API is rendered under the
+   prompt", "TVs on the local network are listed and one can be connected"), and
+   `screens` (the screens that surface it). For a `remote_api` capability put the
+   observed endpoint into `config` (`base_url`, `path`, `method`, `auth`,
+   `request` / `response` field shapes). Leave `tier` / `module` out (the scope
+   stage routes them). A purely visual screen is not a capability.
+9. LAUNCH — when the original presents a screen over the app on start (a paywall or
+   onboarding cover shown right after launch), record it in `navigation.launch`
+   with its `presentation` and `condition`.
 
 Write a single file `app_spec.json` with this schema (ALL top-level keys are
 REQUIRED; use [] / {} / "" when a section does not apply, never omit a key):
@@ -224,10 +240,17 @@ REQUIRED; use [] / {} / "" when a section does not apply, never omit a key):
     "ios_adaptation": [str]
   },
   "navigation": {"type": str, "map": [ {"from": str, "to": str, "via": str} ], "deep_links": [str],
-    "tabs": [ {"screen_id": str, "title": str} ]  // ONLY if the original has a tab bar; else omit
+    "tabs": [ {"screen_id": str, "title": str} ],  // ONLY if the original has a tab bar; else omit
+    "launch": [ {"screen_id": str, "presentation": "fullScreenCover|sheet",
+                 "condition": "every_launch|first_launch|not_premium"} ]  // ONLY if shown on start
   },                                    // tabs: ordered left->right as on screen; screen_id =
                                         // the screens[].id that is the ROOT of that tab; title =
                                         // the tab label verbatim as in the original (no paraphrase)
+  "capabilities": [ {"name": str,
+                     "kind": "remote_api|photos_cleaner|contacts_cleaner|storage_scan|casting|"
+                             "screen_mirroring|content_feed|subscriptions|audio|sensor|other",
+                     "inputs": [str], "expected_behavior": str, "screens": [str],
+                     "config": {}, "source": "observed|inferred"} ],   // [] if purely visual
   "content": {
     "data_model": [ {"entity": str, "fields": [str], "relations": [str]} ],
     "content_inventory": [str],         // sticker packs / presets / filters / templates / sounds
@@ -280,6 +303,8 @@ Rules:
 - Tag every screen and requirement `source` as "observed" (directly visible in a
   screenshot) or "inferred" (a category convention you added); record inferences
   in `analysis_quality.assumptions`.
+- Every `capabilities[].screens` and `navigation.launch[].screen_id` entry MUST
+  reference an id that exists in the `screens` array; capability names are unique.
 - `design_tokens` MUST use the W3C token shape ($value / $type / $description).
 - Fill every section as completely as the evidence allows; prefer category
   conventions over leaving a section empty.
@@ -379,6 +404,7 @@ _SECTION_TITLES = {
     "business_logic": "Business & domain logic",
     "screens": "Screens",
     "requirements": "Requirements (EARS)",
+    "capabilities": "Capabilities (functional)",
     "design_tokens": "Design tokens",
     "navigation": "Navigation",
     "content": "Content & data",
@@ -402,6 +428,7 @@ _SPEC_MD_ORDER = (
     "business_logic",
     "screens",
     "requirements",
+    "capabilities",
     "design_tokens",
     "navigation",
     "content",

@@ -29,6 +29,7 @@ from typing import Any
 from iosforge.common.config import Settings
 from iosforge.common.logging import get_logger
 from iosforge.mvp import claude_gen, frida_ingest, simulator, swiftui_media, xcode
+from iosforge.mvp import swiftui_capabilities as caps
 from iosforge.mvp import swiftui_integrations as integ
 from iosforge.mvp.analyze import stage_archive_context, topo_layers
 from iosforge.mvp.feasibility import apply_scope
@@ -133,14 +134,21 @@ def _derived_data(paths: RunPaths) -> Path:
     return paths.run_dir / "DerivedData"
 
 
+def module_rules(spec: dict[str, Any], app_dir: Path | None = None) -> list[str]:
+    """Screen API rules of the app's capability modules (core + routed)."""
+    integrations = integ.load(app_dir) if app_dir is not None else integ.Integrations()
+    return caps.screen_rules(caps.select(spec, integrations))
+
+
 def prompter_names(spec: dict[str, Any], app_dir: Path | None = None) -> list[str]:
     """Type names of the prompters the scaffold generates for ``spec`` (and ``app_dir``).
 
     Attribution adds the ATT prompter even when the spec does not declare tracking.
     """
     cases = [k.case for k in declared_kinds(spec)]
-    if app_dir is not None and integ.load(app_dir).attribution and "tracking" not in cases:
-        cases.append("tracking")
+    integrations = integ.load(app_dir) if app_dir is not None else integ.Integrations()
+    selected = caps.select(spec, integrations)
+    cases += [k for k in caps.prompter_kinds(selected) if k not in cases]
     return [PROMPTERS[case].type_name for case in cases if case in PROMPTERS]
 
 
@@ -278,7 +286,9 @@ def ensure_compiles(
         )
         claude_gen.run_task(
             paths.claude_ws,
-            compile_fix_prompt(check.errors[:80], prompters=prompters),
+            compile_fix_prompt(
+                check.errors[:80], prompters=prompters, modules=module_rules(spec, app_dir)
+            ),
             timeout=timeout,
             tlog=bound,
         )
@@ -422,6 +432,7 @@ def generate(
         ):
             images.setdefault(image.screen_id, []).append((image.file, image.description))
     prompters = prompter_names(spec, _workspace_app(paths))
+    modules = module_rules(spec, _workspace_app(paths))
     by_task = {f"screen-{e.screen_id}": e for e in plan.entries}
     runs: list[TaskRun] = []
 
@@ -430,7 +441,10 @@ def generate(
         bound.info("swiftui_gen.layer.start", tasks=ids)
         if ids == [TASK_THEME]:
             prompt = theme_prompt(
-                app_name=app_name, prompters=prompters, diverge_content=diverge_content
+                app_name=app_name,
+                prompters=prompters,
+                modules=modules,
+                diverge_content=diverge_content,
             )
             runs.append(
                 _run_sandboxed(
@@ -438,7 +452,9 @@ def generate(
                 )
             )
         elif ids == [TASK_COMPONENTS]:
-            prompt = components_prompt(plan, prompters=prompters, diverge_content=diverge_content)
+            prompt = components_prompt(
+                plan, prompters=prompters, modules=modules, diverge_content=diverge_content
+            )
             runs.append(
                 _run_sandboxed(
                     paths,
@@ -461,6 +477,7 @@ def generate(
                             plan,
                             targets=_targets(by_task[tid], spec, plan),
                             prompters=prompters,
+                            modules=modules,
                             observed=_observed(paths, by_task[tid]),
                             diverge_content=diverge_content,
                             images=images.get(by_task[tid].screen_id),
@@ -582,6 +599,7 @@ def correct(
     plan = build_plan(spec)
     by_id = {e.screen_id: e for e in plan.entries}
     prompters = prompter_names(spec, paths.xcode_app)
+    modules = module_rules(spec, paths.xcode_app)
     groups: dict[str, list[dict[str, Any]]] = {}
     for task in tasks:
         sid = _task_screen(task)
@@ -601,7 +619,7 @@ def correct(
                 _run_sandboxed,
                 paths,
                 f"fix-{sid}",
-                corrective_prompt(group, by_id[sid], prompters=prompters),
+                corrective_prompt(group, by_id[sid], prompters=prompters, modules=modules),
                 _screen_owner(by_id[sid]),
                 timeout=timeout,
             )
@@ -651,11 +669,12 @@ def rework(
     plan = build_plan(spec)
     identity = identity_from_project(paths.xcode_app)
     prompters = prompter_names(spec, paths.xcode_app)
+    modules = module_rules(spec, paths.xcode_app)
     restore_workspace(paths)
     run = _run_sandboxed(
         paths,
         "rework",
-        rework_prompt(instructions, prompters=prompters),
+        rework_prompt(instructions, prompters=prompters, modules=modules),
         _model_owner,
         timeout=timeout,
         root_files=(COMPONENTS_MD,),
@@ -706,6 +725,7 @@ def extend(
     plan = build_plan(spec)
     by_id = {e.screen_id: e for e in plan.entries}
     prompters = prompter_names(spec, paths.xcode_app)
+    modules = module_rules(spec, paths.xcode_app)
     with ThreadPoolExecutor(max_workers=max(1, max_parallel)) as pool:
         futures = [
             pool.submit(
@@ -717,6 +737,7 @@ def extend(
                     plan,
                     targets=_targets(by_id[sid], spec, plan),
                     prompters=prompters,
+                    modules=modules,
                     observed=_observed(paths, by_id[sid]),
                 ),
                 _screen_owner(by_id[sid]),

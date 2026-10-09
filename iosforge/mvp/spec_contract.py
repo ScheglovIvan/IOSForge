@@ -18,7 +18,15 @@ Senior/enterprise hardening of Stage B (see ``docs/app-spec-v2.md`` and the
 * provenance + ``spec_version`` for reproducibility and audit;
 * the optional ``source_locale`` — BCP-47 tag of the language/region the
   ORIGINAL screenshots were captured in (shape-checked against
-  :data:`SOURCE_LOCALE_PATTERN`), which the Vision Judge pins the simulator to.
+  :data:`SOURCE_LOCALE_PATTERN`), which the Vision Judge pins the simulator to;
+* the optional top-level ``capabilities`` — what the app must actually DO, not just
+  show (``kind`` from :data:`CAPABILITY_KINDS`, its inputs, the observable expected
+  behaviour, the screens that surface it, and once scoped its feasibility ``tier``
+  1-4 and the registry ``module`` that implements it); every ``screens[]`` id must
+  exist;
+* the optional ``navigation.launch`` — screens presented over the app on start
+  (a paywall or onboarding cover), each with a ``presentation`` and a ``condition``
+  (:data:`LAUNCH_CONDITIONS`); the screen id must exist.
 
 Requirements use EARS types (``ubiquitous`` / ``event_driven`` / ``state_driven``
 / ``optional_feature`` / ``unwanted_behavior``) and carry stable ids so the spec
@@ -66,6 +74,28 @@ _STR = {"type": "string"}
 _STR_ARRAY = {"type": "array", "items": {"type": "string"}}
 
 _AD_FORMATS = ["banner", "interstitial", "rewarded", "native", "offerwall"]
+
+#: What a capability does, independent of how it is built (the module decides that).
+CAPABILITY_KINDS = [
+    "remote_api",
+    "photos_cleaner",
+    "contacts_cleaner",
+    "storage_scan",
+    "casting",
+    "screen_mirroring",
+    "content_feed",
+    "subscriptions",
+    "audio",
+    "sensor",
+    "other",
+]
+
+#: Feasibility tiers: 1 simple system API, 2 standard module from the registry,
+#: 3 custom core a human writes, 4 not reproducible (not built).
+CAPABILITY_TIERS = [1, 2, 3, 4]
+
+LAUNCH_PRESENTATIONS = ["fullScreenCover", "sheet"]
+LAUNCH_CONDITIONS = ["every_launch", "first_launch", "not_premium"]
 _CONFIDENCE = ["high", "medium", "low"]
 
 APP_SPEC_SCHEMA: dict[str, Any] = {
@@ -171,6 +201,36 @@ APP_SPEC_SCHEMA: dict[str, Any] = {
                         "required": ["screen_id", "title"],
                         "properties": {"screen_id": _STR, "title": _STR},
                     },
+                },
+                "launch": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["screen_id", "presentation", "condition"],
+                        "properties": {
+                            "screen_id": _STR,
+                            "presentation": {"type": "string", "enum": LAUNCH_PRESENTATIONS},
+                            "condition": {"type": "string", "enum": LAUNCH_CONDITIONS},
+                        },
+                    },
+                },
+            },
+        },
+        "capabilities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["name", "kind", "expected_behavior", "screens"],
+                "properties": {
+                    "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+                    "kind": {"type": "string", "enum": CAPABILITY_KINDS},
+                    "inputs": _STR_ARRAY,
+                    "expected_behavior": _STR,
+                    "screens": _STR_ARRAY,
+                    "tier": {"type": "integer", "enum": CAPABILITY_TIERS},
+                    "module": {"type": ["string", "null"]},
+                    "config": {"type": "object"},
+                    "source": {"type": "string", "enum": _SOURCE_KINDS},
                 },
             },
         },
@@ -290,6 +350,27 @@ def _cross_reference_errors(spec: dict[str, Any]) -> list[str]:
         for sid in req.get("screens", []):
             if sid not in ids:
                 errors.append(f"requirement {req.get('id')!r} references unknown screen {sid!r}")
+    errors.extend(_capability_errors(spec, ids))
+    return errors
+
+
+def _capability_errors(spec: dict[str, Any], ids: set[str]) -> list[str]:
+    errors: list[str] = []
+    navigation = spec.get("navigation", {})
+    for entry in navigation.get("launch", []) if isinstance(navigation, dict) else []:
+        if isinstance(entry, dict) and entry.get("screen_id") not in ids:
+            errors.append(f"navigation.launch references unknown screen {entry.get('screen_id')!r}")
+    names: set[str] = set()
+    for capability in spec.get("capabilities", []):
+        if not isinstance(capability, dict):
+            continue
+        name = capability.get("name")
+        if name in names:
+            errors.append(f"capability {name!r} is declared more than once")
+        names.add(str(name))
+        for sid in capability.get("screens", []):
+            if sid not in ids:
+                errors.append(f"capability {name!r} references unknown screen {sid!r}")
     return errors
 
 

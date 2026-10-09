@@ -28,7 +28,7 @@ from typing import Any, Literal
 
 from iosforge.common.config import Settings, get_settings
 from iosforge.common.logging import get_logger
-from iosforge.mvp import spec_contract
+from iosforge.mvp import capability_registry, spec_contract
 from iosforge.mvp.paths import RunPaths
 from iosforge.mvp.scope_models import (
     FeasibilityFinding,
@@ -67,6 +67,15 @@ Decide TWO things:
    "home-screen widgets", "live streaming") as `native` (public API exists),
    `partial` (approximate with public API) or `blocked` (no public API). This is
    ADVISORY — it informs the operator, it does not force a screen out.
+   For EVERY entry of `app_spec.capabilities` (what the app must actually DO) add a
+   finding whose `capability` is exactly that entry's `name`, and route it:
+   - `tier` 1 — a simple system API the screen code can call directly;
+   - `tier` 2 — a standard module from the registry below; set `module` to its key;
+   - `tier` 3 — a custom core a human engineer must write (no module fits);
+   - `tier` 4 — not reproducible on iOS (private API, server we cannot have);
+   `module` is a registry key for tier 2 and null otherwise.
+   Registry modules (key — what it implements):
+{modules}
 
 Output ONLY a file `scope_proposal.json` in this directory:
 
@@ -82,7 +91,8 @@ Output ONLY a file `scope_proposal.json` in this directory:
     "summary": "<one paragraph>",
     "findings": [
       {"capability": "<name>", "verdict": "native|partial|blocked",
-       "note": "<short>", "screens": ["<affected screen id>"]}
+       "note": "<short>", "screens": ["<affected screen id>"],
+       "tier": 1, "module": "<registry key or null>"}
     ]
   },
   "notes": "<optional operator-facing note>"
@@ -94,6 +104,11 @@ Rules:
 - Prefer a lean core: a smaller, coherent MVP is better than cloning everything.
 Output nothing but `scope_proposal.json`.
 """
+
+
+def scope_prompt() -> str:
+    """:data:`SCOPE_PROMPT` with the capability registry filled in."""
+    return SCOPE_PROMPT.replace("{modules}", capability_registry.prompt_lines())
 
 
 def _run_claude(prompt: str, workdir: Path, timeout: int, tools: str | None = None) -> None:
@@ -124,7 +139,7 @@ def _scope_workspace(paths: RunPaths) -> Path:
         shutil.rmtree(ws_screens)
     if paths.screens_dir.exists():
         shutil.copytree(paths.screens_dir, ws_screens)
-    (ws / "SCOPE_PROMPT.md").write_text(SCOPE_PROMPT)
+    (ws / "SCOPE_PROMPT.md").write_text(scope_prompt())
     return ws
 
 
@@ -165,6 +180,8 @@ def _parse_proposal(payload: dict[str, Any], spec: dict[str, Any]) -> ScopeDecis
                 verdict=_coerce_verdict(row.get("verdict")),
                 note=str(row.get("note", "")),
                 screens=[str(s) for s in row_screens] if isinstance(row_screens, list) else [],
+                tier=_coerce_tier(row.get("tier")),
+                module=_coerce_module(row.get("module")),
             )
         )
     feasibility = FeasibilityReport(
@@ -184,6 +201,27 @@ def _parse_proposal(payload: dict[str, Any], spec: dict[str, Any]) -> ScopeDecis
         proposed_at=datetime.now(UTC),
     )
     return decision
+
+
+def _coerce_tier(value: object) -> Literal[1, 2, 3, 4] | None:
+    try:
+        tier = int(str(value))
+    except ValueError:
+        return None
+    if tier == 1:
+        return 1
+    if tier == 2:
+        return 2
+    if tier == 3:
+        return 3
+    if tier == 4:
+        return 4
+    return None
+
+
+def _coerce_module(value: object) -> str | None:
+    key = str(value or "").strip()
+    return key if key in capability_registry.MODULES else None
 
 
 def _coerce_verdict(value: object) -> Literal["native", "partial", "blocked"]:
@@ -208,7 +246,7 @@ def propose(paths: RunPaths, settings: Settings | None = None) -> ScopeDecision:
     spec = json.loads(paths.app_spec_json.read_text())
     ws = _scope_workspace(paths)
     bound.info("feasibility.invoking", workdir=str(ws))
-    _run_claude(SCOPE_PROMPT, ws, settings.walkthrough_job_timeout_s, tools=SCOPE_TOOLS)
+    _run_claude(scope_prompt(), ws, settings.walkthrough_job_timeout_s, tools=SCOPE_TOOLS)
 
     produced = ws / "scope_proposal.json"
     if not produced.exists():
@@ -298,6 +336,14 @@ def apply_scope(paths: RunPaths, scope: ScopeDecision | None = None) -> None:
     for req in spec.get("requirements", []):
         if isinstance(req, dict) and isinstance(req.get("screens"), list):
             req["screens"] = [sid for sid in req["screens"] if str(sid) in included]
+    if isinstance(navigation, dict) and isinstance(navigation.get("launch"), list):
+        navigation["launch"] = [
+            entry
+            for entry in navigation["launch"]
+            if isinstance(entry, dict) and str(entry.get("screen_id")) in included
+        ]
+    if isinstance(spec.get("capabilities"), list):
+        spec["capabilities"] = route_capabilities(spec["capabilities"], scope, included)
 
     if isinstance(spec.get("provenance"), dict):
         spec["provenance"]["screen_count"] = len(kept)
@@ -307,6 +353,51 @@ def apply_scope(paths: RunPaths, scope: ScopeDecision | None = None) -> None:
     validated = spec_contract.validate_spec(spec)
     paths.app_spec_json.write_text(json.dumps(validated, indent=2, ensure_ascii=False))
     log.info("feasibility.apply_scope.done", kept=len(kept), dropped=len(screens) - len(kept))
+
+
+def confirm_routing(scope: ScopeDecision, form: dict[str, str]) -> None:
+    """Apply the operator's per-finding ``tier_<i>`` / ``module_<i>`` choices (in place).
+
+    Blank fields keep the proposal; an unknown module key or tier is ignored.
+    """
+    for index, finding in enumerate(scope.feasibility.findings):
+        tier = _coerce_tier(form.get(f"tier_{index}"))
+        if tier is not None:
+            finding.tier = tier
+        if f"module_{index}" in form:
+            finding.module = _coerce_module(form.get(f"module_{index}"))
+
+
+def route_capabilities(
+    capabilities: list[Any], scope: ScopeDecision, included: set[str]
+) -> list[dict[str, Any]]:
+    """Scope the spec's capabilities and stamp the operator-approved routing on them.
+
+    A capability keeps only its in-scope screens and is dropped when none remain. Its
+    ``tier`` / ``module`` come from the approved feasibility finding of the same name
+    (an unknown module key is cleared and a tier-2 capability without one becomes
+    tier 3, a custom core).
+    """
+    routing = {f.capability: f for f in scope.feasibility.findings}
+    kept: list[dict[str, Any]] = []
+    for capability in capabilities:
+        if not isinstance(capability, dict):
+            continue
+        screens = [sid for sid in capability.get("screens", []) if str(sid) in included]
+        if not screens:
+            log.info("feasibility.apply_scope.capability_dropped", name=capability.get("name"))
+            continue
+        routed = {**capability, "screens": screens}
+        finding = routing.get(str(capability.get("name")))
+        if finding is not None and finding.tier is not None:
+            routed["tier"] = finding.tier
+            routed["module"] = finding.module
+        if routed.get("module") not in capability_registry.MODULES:
+            routed["module"] = None
+        if routed.get("tier") == 2 and routed["module"] is None:
+            routed["tier"] = 3
+        kept.append(routed)
+    return kept
 
 
 def scope_key(job_id: str) -> str:

@@ -114,13 +114,30 @@
           <h3>Feasibility findings</h3>
           <div class="table-wrap">
             <table class="kv">
-              <thead><tr><th>Capability</th><th>Verdict</th><th>Note</th><th>Screens</th></tr></thead>
+              <thead><tr><th>Capability</th><th>Verdict</th><th>Tier</th><th>Module</th><th>Note</th><th>Screens</th></tr></thead>
               <tbody>
                 {% for f in scope.feasibility.findings %}
                 <tr>
                   <td>{{ f.capability }}</td>
                   <td>{{ f.verdict }}</td>
-                  <td class="muted">{{ f.note }}</td>
+                  {% if editable %}
+                  <td><select name="tier_{{ loop.index0 }}">
+                    <option value="">—</option>
+                    {% for t, label in [(1, '1 system API'), (2, '2 module'), (3, '3 custom (human)'), (4, '4 not built')] %}
+                    <option value="{{ t }}" {{ 'selected' if f.tier == t else '' }}>{{ label }}</option>
+                    {% endfor %}
+                  </select></td>
+                  <td><select name="module_{{ loop.index0 }}">
+                    <option value="">—</option>
+                    {% for m in capability_modules or [] %}
+                    <option value="{{ m }}" {{ 'selected' if f.module == m else '' }}>{{ m }}</option>
+                    {% endfor %}
+                  </select></td>
+                  {% else %}
+                  <td>{{ f.tier if f.tier else '—' }}</td>
+                  <td class="mono" style="font-size:11px;">{{ f.module or '—' }}</td>
+                  {% endif %}
+                  <td class="muted">{{ f.note }}{% if f.tier == 3 %} <strong>· core written by a human</strong>{% elif f.tier == 4 %} <strong>· not built</strong>{% endif %}</td>
                   <td class="mono" style="font-size:11px;">{{ f.screens | join(', ') }}</td>
                 </tr>
                 {% endfor %}

@@ -1,0 +1,45 @@
+"""Keys of the capability modules the SwiftUI codegen can build (feasibility router).
+
+The SCOPE stage routes every ``app_spec.capabilities`` entry to a tier and, for tier 2,
+to one of these module keys; the operator confirms the routing, :func:`apply_scope`
+stamps it on the spec and the scaffold renders the matching descriptor from
+:mod:`iosforge.mvp.swiftui_capabilities`. This module holds only the routing metadata
+(no Swift), so the scope stage stays light.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ModuleInfo:
+    """What a registry module implements and which capability kinds it serves."""
+
+    key: str
+    kinds: tuple[str, ...]
+    summary: str
+
+
+MODULES: dict[str, ModuleInfo] = {
+    info.key: info
+    for info in (
+        ModuleInfo(
+            "subscriptions_apphud",
+            ("subscriptions",),
+            "auto-renewable subscriptions and paywall products through Apphud (StoreKit)",
+        ),
+        ModuleInfo(
+            "attribution_tenjin",
+            ("other",),
+            "install attribution through Tenjin after the App Tracking Transparency prompt",
+        ),
+    )
+}
+
+
+def prompt_lines() -> str:
+    """The registry as bullet lines for the scope prompt."""
+    return "\n".join(
+        f"   - `{info.key}` ({', '.join(info.kinds)}) — {info.summary}" for info in MODULES.values()
+    )
