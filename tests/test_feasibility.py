@@ -171,6 +171,28 @@ def test_apply_scope_leaves_tabless_spec_without_tabs(tmp_path: Path) -> None:
     assert "tabs" not in _read_spec(paths)["navigation"]
 
 
+def test_apply_scope_clears_state_of_when_base_screen_dropped(tmp_path: Path) -> None:
+    paths = RunPaths.create(tmp_path)
+    spec = _spec_three_screens()
+    spec["screens"][1]["state_of"] = "0002"
+    _write_spec(paths, spec)
+    feasibility.apply_scope(paths, _scope())
+    screens = {s["id"]: s for s in _read_spec(paths)["screens"]}
+    assert set(screens) == {"0000", "0001"}
+    assert "state_of" not in screens["0001"]
+    spec_contract.validate_spec(_read_spec(paths))
+
+
+def test_apply_scope_keeps_state_of_when_base_screen_kept(tmp_path: Path) -> None:
+    paths = RunPaths.create(tmp_path)
+    spec = _spec_three_screens()
+    spec["screens"][1]["state_of"] = "0000"
+    _write_spec(paths, spec)
+    feasibility.apply_scope(paths, _scope())
+    screens = {s["id"]: s for s in _read_spec(paths)["screens"]}
+    assert screens["0001"]["state_of"] == "0000"
+
+
 def test_apply_scope_cleans_requirement_screens(tmp_path: Path) -> None:
     paths = RunPaths.create(tmp_path)
     _write_spec(paths, _spec_three_screens())

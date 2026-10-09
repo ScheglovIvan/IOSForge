@@ -9,7 +9,10 @@ Senior/enterprise hardening of Stage B (see ``docs/app-spec-v2.md`` and the
 * cross-reference integrity — navigation (``navigates_to``, ``navigation.map``,
   the optional ordered ``navigation.tabs`` roots) / requirements may only point
   at screen ids that exist, with no duplicate tab roots, mirroring the acyclic
-  check already done for ``tasks.json``;
+  check already done for ``tasks.json``; the optional ``screens[].state_of``
+  (this screen is a STATE of another — same route/view, e.g. running / done /
+  empty / pro) must name an existing screen other than itself that is not a
+  state in turn (one level, no chains);
 * screen-coverage check against the crawl, so every crawled screen is accounted
   for;
 * provenance + ``spec_version`` for reproducibility and audit;
@@ -127,6 +130,7 @@ APP_SPEC_SCHEMA: dict[str, Any] = {
                     "screenshot": _STR,
                     "source": {"type": "string", "enum": _SOURCE_KINDS},
                     "navigates_to": _STR_ARRAY,
+                    "state_of": _STR,
                 },
             },
         },
@@ -234,6 +238,23 @@ def _screen_ids(spec: dict[str, Any]) -> set[str]:
     return {str(s["id"]) for s in spec.get("screens", []) if isinstance(s, dict) and "id" in s}
 
 
+def _state_of_errors(spec: dict[str, Any], ids: set[str]) -> list[str]:
+    screens = [s for s in spec.get("screens", []) if isinstance(s, dict)]
+    states = {str(s.get("id")): s["state_of"] for s in screens if "state_of" in s}
+    errors: list[str] = []
+    for screen_id, parent in states.items():
+        if parent == screen_id:
+            errors.append(f"screen {screen_id!r} is state_of itself")
+        elif parent not in ids:
+            errors.append(f"screen {screen_id!r} state_of unknown screen {parent!r}")
+        elif parent in states:
+            errors.append(
+                f"screen {screen_id!r} state_of {parent!r}, which is itself a state "
+                f"(of {states[parent]!r}); point at the base screen"
+            )
+    return errors
+
+
 def _cross_reference_errors(spec: dict[str, Any]) -> list[str]:
     ids = _screen_ids(spec)
     errors: list[str] = []
@@ -243,6 +264,7 @@ def _cross_reference_errors(spec: dict[str, Any]) -> list[str]:
         for target in screen.get("navigates_to", []):
             if target not in ids:
                 errors.append(f"screen {screen.get('id')!r} navigates_to unknown screen {target!r}")
+    errors.extend(_state_of_errors(spec, ids))
     navigation = spec.get("navigation", {})
     if isinstance(navigation, dict):
         for edge in navigation.get("map", []):

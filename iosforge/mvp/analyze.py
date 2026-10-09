@@ -200,8 +200,12 @@ REQUIRED; use [] / {} / "" when a section does not apply, never omit a key):
       "layout_notes": str,
       "states": [str],                  // loading / empty / error / success variants
       "dynamic_content": [str],         // what is data-driven vs static
-      "navigates_to": [str]             // screen ids; MUST reference ids in this `screens` array
-    }
+      "navigates_to": [str],            // screen ids; MUST reference ids in this `screens` array
+      "state_of": str                   // ONLY if this screenshot is another STATE of an existing
+    }                                   // screen (same route/view: running / done / empty / pro /
+                                        // filled), not a separate destination: the parent
+                                        // screens[].id; parent must not itself be a state_of;
+                                        // omit for ordinary screens
   ],
   "requirements": [                     // testable, traceable; >=1 item
     {
@@ -274,6 +278,9 @@ Rules:
 - `screens` MUST be non-empty and cover every distinct crawled screen; keep ids
   consistent with screens.json. Every `navigates_to` / requirement `screens`
   entry MUST reference an id that exists in the `screens` array.
+- A screenshot that only shows the same screen in a different state (e.g. a
+  "Running" variant of a tool screen) stays its own `screens[]` item but MUST set
+  `state_of` to the base screen id instead of inventing a navigation edge to it.
 - `requirements` MUST be EARS-phrased, each with a unique `REQ-<slug>` id and at
   least one acceptance check; this is what downstream tests are generated from.
 - Tag every screen and requirement `source` as "observed" (directly visible in a

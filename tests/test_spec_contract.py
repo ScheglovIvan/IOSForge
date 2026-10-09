@@ -214,6 +214,46 @@ def test_rejects_navigation_tab_missing_title() -> None:
         validate_spec(bad)
 
 
+def _with_states(*states: tuple[str, str]) -> dict[str, Any]:
+    spec = _valid_spec()
+    spec["screens"].append({"id": "0002", "name": "Add — Saving", "purpose": "saving"})
+    by_id = {s["id"]: s for s in spec["screens"]}
+    for screen_id, parent in states:
+        by_id[screen_id]["state_of"] = parent
+    return spec
+
+
+def test_screen_state_of_validates() -> None:
+    screens = validate_spec(_with_states(("0002", "0001")))["screens"]
+    assert {s["id"]: s.get("state_of") for s in screens} == {
+        "0000": None,
+        "0001": None,
+        "0002": "0001",
+    }
+
+
+def test_rejects_state_of_unknown_screen() -> None:
+    with pytest.raises(SpecValidationError, match="state_of unknown screen '9999'"):
+        validate_spec(_with_states(("0002", "9999")))
+
+
+def test_rejects_state_of_itself() -> None:
+    with pytest.raises(SpecValidationError, match="'0002' is state_of itself"):
+        validate_spec(_with_states(("0002", "0002")))
+
+
+def test_rejects_state_of_chain() -> None:
+    with pytest.raises(SpecValidationError, match="which is itself a state"):
+        validate_spec(_with_states(("0002", "0001"), ("0001", "0000")))
+
+
+def test_rejects_non_string_state_of() -> None:
+    bad = _valid_spec()
+    bad["screens"][1]["state_of"] = ["0000"]
+    with pytest.raises(SpecValidationError, match="schema violation"):
+        validate_spec(bad)
+
+
 @pytest.mark.parametrize("tag", ["en-US", "ru-RU", "de", "zh-Hans-CN", "es-419", "fil"])
 def test_source_locale_accepts_bcp47(tag: str) -> None:
     spec = _valid_spec()

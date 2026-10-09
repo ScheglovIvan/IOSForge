@@ -122,6 +122,11 @@ def test_analyze_prompt_describes_navigation_tabs() -> None:
         assert token in ANALYZE_PROMPT
 
 
+def test_analyze_prompt_describes_screen_states() -> None:
+    for token in ('"state_of"', "STATE of an existing", "must not itself be a state_of"):
+        assert token in ANALYZE_PROMPT
+
+
 def test_analyze_prompt_describes_source_locale() -> None:
     for token in ('"source_locale"', "BCP-47", "ORIGINAL screenshots"):
         assert token in ANALYZE_PROMPT

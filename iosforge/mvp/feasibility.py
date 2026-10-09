@@ -51,7 +51,8 @@ You are planning the MVP scope for a native iOS (SwiftUI) clone of an existing a
 
 Inputs in this directory:
 - `app_spec.json` — the App Spec v3 for the app. Its `screens` array lists every
-  screen: `id`, `name`, `purpose`, and `navigates_to` (ids this screen links to).
+  screen: `id`, `name`, `purpose`, `navigates_to` (ids this screen links to) and,
+  optionally, `state_of` (the screen is only a state of that base screen).
 - `screens/` — one PNG per original screen (vision aid), named by `screenshot`.
 
 Decide TWO things:
@@ -59,7 +60,8 @@ Decide TWO things:
    Onboarding walkthroughs, help/support, FAQ, "about", legal/settings filler and
    duplicate explainer screens are usually NOT core. The real product surface
    (the screens users return to) IS core. Keep navigation coherent: do not drop a
-   screen that every core flow must pass through.
+   screen that every core flow must pass through. Decide a `state_of` screen
+   together with its base screen (a state without its base is meaningless).
 2. FEASIBILITY — how well each needed capability maps onto NATIVE iOS. Flag
    capabilities (e.g. "screen recording", "HealthKit", "background location",
    "home-screen widgets", "live streaming") as `native` (public API exists),
@@ -246,7 +248,8 @@ def apply_scope(paths: RunPaths, scope: ScopeDecision | None = None) -> None:
     :func:`load_scope`). ``scope_mode == "full"`` and a missing/empty scope are
     no-ops. Otherwise the spec keeps only ``include`` screens and drops the
     dangling references they leave behind (``navigates_to``, ``navigation.map``
-    edges, ``navigation.tabs`` roots, ``requirements[].screens``, ``screen_count``) — mirroring
+    edges, ``navigation.tabs`` roots, ``state_of`` links to a dropped base screen,
+    ``requirements[].screens``, ``screen_count``) — mirroring
     :func:`iosforge.mvp.screen_filter.filter_screens` — then re-validates against
     the App Spec v3 contract.
     """
@@ -269,6 +272,12 @@ def apply_scope(paths: RunPaths, scope: ScopeDecision | None = None) -> None:
         nav = screen.get("navigates_to")
         if isinstance(nav, list):
             screen["navigates_to"] = [n for n in nav if str(n) in included]
+        if "state_of" in screen and str(screen["state_of"]) not in included:
+            log.warning(
+                "feasibility.apply_scope.orphaned_state",
+                screen_id=screen.get("id"),
+                state_of=screen.pop("state_of"),
+            )
     spec["screens"] = kept
 
     navigation = spec.get("navigation")
