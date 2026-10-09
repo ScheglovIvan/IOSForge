@@ -332,6 +332,35 @@ def test_visual_cap_without_structural_gaps_ships(monkeypatch: pytest.MonkeyPatc
 
 
 def test_report_without_a_structural_audit_is_held(monkeypatch: pytest.MonkeyPatch) -> None:
-    job, _, seen = _wire(monkeypatch, {"compliance_score": 0.9, "stop_reason": "all_closed"})
+    job, session, seen = _wire(monkeypatch, {"compliance_score": 0.9, "stop_reason": "all_closed"})
     assert "hold delivery" in swiftui_build.build_swiftui.run(str(job.id))
     assert job.state == JobState.NEEDS_INPUT and seen["queued"] == []
+    stage = next(o for o in session.added if isinstance(o, StageTimeline))
+    assert "no structural audit" in (stage.error or "")
+
+
+def test_clone_risk_is_held_even_when_structurally_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {
+        "compliance_score": 0.9, "stop_reason": "max_iterations", "status": "clone_risk",
+        "structural": {"ok": True},
+    }  # fmt: skip
+    job, session, seen = _wire(monkeypatch, report)
+    assert "hold delivery" in swiftui_build.build_swiftui.run(str(job.id))
+    stage = next(o for o in session.added if isinstance(o, StageTimeline))
+    assert job.state == JobState.NEEDS_INPUT and seen["queued"] == []
+    assert "clone risk" in (stage.error or "")
+
+
+@pytest.mark.parametrize(
+    ("report", "gate", "held"),
+    [
+        ({"status": "below_floor", "structural": {"ok": True}}, True, False),
+        ({"status": "pass", "structural": {"ok": False}}, False, False),
+        ({"status": "clone_risk", "structural": {"ok": True}}, False, True),
+        ({"status": "pass"}, True, True),
+    ],
+)
+def test_hold_reason_matrix(report: dict[str, Any], gate: bool, held: bool) -> None:
+    assert (swiftui_build.hold_reason(report, structural_gate=gate) is not None) is held

@@ -5,8 +5,9 @@ operator approved the scope). Restores the job's inputs, prunes them to the appr
 screens (``app_spec.json`` and the judge's ``screens.json`` alike), generates the app
 in sandboxed screen tasks, refines it against the Vision Judge on the iOS Simulator
 with the unchanged ``_refine`` loop, stores the sources as a ``GenerationResult`` and
-queues the native archive/IPA. With ``web_verify_hard_gate`` a structurally incomplete
-app parks in ``NEEDS_INPUT`` for the operator (ship or rework) instead of shipping.
+queues the native archive/IPA. A clone risk, or (with ``web_verify_hard_gate``) a
+structurally incomplete app, parks in ``NEEDS_INPUT`` for the operator instead
+(:func:`hold_reason`).
 """
 
 from __future__ import annotations
@@ -96,13 +97,26 @@ def _close_stale_stages(db: Session, job: Job) -> None:
         row.error = "interrupted: the build was restarted"
 
 
-def _structurally_complete(report: dict[str, Any]) -> bool:
-    """The structural audit of the last refine pass found no gaps (visual scores aside)."""
-    return bool((report.get("structural") or {}).get("ok"))
+def hold_reason(report: dict[str, Any], *, structural_gate: bool) -> str | None:
+    """Why the built app must wait for the operator instead of shipping (None: ship).
 
-
-def _gate_reason(report: dict[str, Any]) -> str:
-    structural = report.get("structural") or {}
+    The anti-clone floor always holds (``status == "clone_risk"``: a screen looks too
+    much like the original). With the structural gate on, a missing audit or open
+    structural gaps hold too. Visual scores under the bar alone do not (``below_floor``
+    never blocks delivery).
+    """
+    if report.get("status") == "clone_risk":
+        return (
+            "held for the operator: clone risk — divergence from the original is under the "
+            "floor; rework before shipping"
+        )
+    if not structural_gate:
+        return None
+    structural = report.get("structural")
+    if not structural:
+        return "held for the operator: the refine loop recorded no structural audit"
+    if structural.get("ok"):
+        return None
     counts = ", ".join(
         f"{key.replace('_', ' ')} {len(structural.get(key) or [])}"
         for key in ("missing_screens", "blank_screens", "dead_links", "missing_edges")
@@ -110,7 +124,7 @@ def _gate_reason(report: dict[str, Any]) -> str:
     return (
         f"held for the operator: structural gaps remain after refine "
         f"({report.get('stop_reason')}; {counts}); ship or rework from the admin"
-    )[:4000]
+    )
 
 
 def _store_screens(storage: Any, job_id: str, paths: RunPaths) -> None:
@@ -181,7 +195,8 @@ def build_swiftui(self: Any, job_id: str) -> str:
                 version = job.result_version or 1
                 key = store_sources(storage, job_id, paths.xcode_app, version=version)
                 save_built_scope(storage, job_id, scope)
-            gated = settings.web_verify_hard_gate and not _structurally_complete(report)
+            reason = hold_reason(report, structural_gate=settings.web_verify_hard_gate)
+            gated = reason is not None
             db.add(
                 GenerationResult(
                     job_id=job.id,
@@ -196,8 +211,8 @@ def build_swiftui(self: Any, job_id: str) -> str:
                 )
             )
             stage.finished_at = utcnow()
-            if gated:
-                stage.error = _gate_reason(report)
+            if reason:
+                stage.error = reason[:4000]
             job.state = JobState.NEEDS_INPUT if gated else JobState.DONE
             db.commit()
         except Exception as exc:
@@ -213,7 +228,12 @@ def build_swiftui(self: Any, job_id: str) -> str:
             db.commit()
             return f"job {job_id} build failed: {exc}"
         if gated:
-            log.info("build_swiftui.gated", job_id=job_id, score=report.get("compliance_score"))
+            log.info(
+                "build_swiftui.gated",
+                job_id=job_id,
+                score=report.get("compliance_score"),
+                reason=reason,
+            )
             return f"job {job_id} built; structural gaps hold delivery"
         try:
             queue_delivery(db, job)
