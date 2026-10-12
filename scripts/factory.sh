@@ -49,18 +49,25 @@ start() {
 }
 
 stop() {
+  local pids=()
   for name in $NAMES; do
     local f=$LOGS/$name.pid
     [[ -f $f ]] || continue
-    kill $(cat $f) 2>/dev/null && echo "stopped $name"
+    local pid=$(cat $f)
+    kill $pid 2>/dev/null && echo "stopping $name ($pid)" && pids+=$pid
     rm -f $f
   done
+  # Celery warm shutdown finishes the running task first; wait so restart never doubles up.
+  for pid in $pids; do
+    while kill -0 $pid 2>/dev/null; do sleep 1; done
+  done
+  (( ${#pids} )) && echo "stopped" || true
 }
 
 case ${1:-start} in
   start) start ;;
   stop) stop ;;
-  restart) stop; sleep 3; start ;;
+  restart) stop; start ;;
   status)
     for name in $NAMES; do
       if [[ -f $LOGS/$name.pid ]] && kill -0 $(cat $LOGS/$name.pid) 2>/dev/null; then

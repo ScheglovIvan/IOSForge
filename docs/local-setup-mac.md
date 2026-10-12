@@ -108,6 +108,8 @@ docker logs iosforge-minio-init   # Bucket created successfully `local/iosforge-
 
 The MinIO images come from `cgr.dev/chainguard/` because Docker Hub no longer serves
 `minio/minio` or `minio/mc`. The first `up` pulls them, and no registry login is needed.
+`minio-init` passes `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` inside a URL. If you change
+them, use letters, digits, `-` and `_` only: `@`, `/` or `:` break the bucket step.
 
 Host ports: Postgres **5440**, Redis **6379**, MinIO S3 API **9010**, MinIO console **9001**.
 The containers use `restart: unless-stopped`, so they come back on their own whenever Docker
