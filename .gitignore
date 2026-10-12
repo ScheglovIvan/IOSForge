@@ -30,6 +30,9 @@ runs/
 samples/
 uploads/
 
+# Local factory pids and logs (scripts/factory.sh)
+var/
+
 # Local secrets (service-account keys, etc.) — never commit
 secrets/
 

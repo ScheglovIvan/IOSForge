@@ -12,9 +12,9 @@ Defined in `/opt/IOSForge/docker-compose.yml`. Task: T-1.2.
 
 | Service  | Image                | Host port(s)        | Purpose                          |
 |----------|----------------------|---------------------|----------------------------------|
-| postgres | `postgres:16`        | `5432`              | Job/state/audit DB               |
+| postgres | `postgres:16`        | `5440`              | Job/state/audit DB               |
 | redis    | `redis:7`            | `6379`              | Celery broker / result backend   |
-| minio    | `minio/minio:latest` | `9000` (S3 API), `9001` (console) | Artifact storage |
+| minio    | `minio/minio:latest` | `9010` (S3 API), `9001` (console) | Artifact storage |
 | minio-init | `minio/mc:latest`  | —                   | One-shot: creates artifacts bucket + enables versioning |
 
 Volumes (named, persistent): `postgres-data`, `redis-data`, `minio-data`.
@@ -53,14 +53,14 @@ docker compose up minio-init
 
 ## MinIO console
 Open http://localhost:9001 — log in with `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY`
-(defaults `iosforge-dev` / `iosforge-dev-secret`). S3 API endpoint: http://localhost:9000.
+(defaults `iosforge-dev` / `iosforge-dev-secret`). S3 API endpoint: http://localhost:9010.
 
 ## Health / connectivity checks
 
 ```bash
 docker compose exec -T redis redis-cli ping            # -> PONG
 docker compose exec -T postgres pg_isready -U iosforge -d iosforge   # -> accepting connections
-curl -fsS http://localhost:9000/minio/health/live      # -> HTTP 200
+curl -fsS http://localhost:9010/minio/health/live      # -> HTTP 200
 
 # Inspect buckets (mc on the compose network)
 docker run --rm --network iosforge_default --entrypoint sh minio/mc:latest -c \
