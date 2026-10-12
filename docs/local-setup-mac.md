@@ -102,8 +102,12 @@ Other optional files are `secrets/apphud.env` (shared Apphud SDK key) and
 
 ```bash
 docker compose up -d
-docker compose ps        # postgres/redis/minio "healthy"; minio-init exits 0 (bucket created)
+docker compose ps -a     # postgres/redis/minio "healthy"; minio-init exited (0)
+docker logs iosforge-minio-init   # Bucket created successfully `local/iosforge-artifacts`.
 ```
+
+The MinIO images come from `cgr.dev/chainguard/` because Docker Hub no longer serves
+`minio/minio` or `minio/mc`. The first `up` pulls them, and no registry login is needed.
 
 Host ports: Postgres **5440**, Redis **6379**, MinIO S3 API **9010**, MinIO console **9001**.
 The containers use `restart: unless-stopped`, so they come back on their own whenever Docker
