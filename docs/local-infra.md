@@ -14,8 +14,8 @@ Defined in `/opt/IOSForge/docker-compose.yml`. Task: T-1.2.
 |----------|----------------------|---------------------|----------------------------------|
 | postgres | `postgres:16`        | `5440`              | Job/state/audit DB               |
 | redis    | `redis:7`            | `6379`              | Celery broker / result backend   |
-| minio    | `minio/minio:latest` | `9010` (S3 API), `9001` (console) | Artifact storage |
-| minio-init | `minio/mc:latest`  | —                   | One-shot: creates artifacts bucket + enables versioning |
+| minio    | `cgr.dev/chainguard/minio:latest` | `9010` (S3 API), `9001` (console) | Artifact storage |
+| minio-init | `cgr.dev/chainguard/minio-client:latest` | —                   | One-shot: creates artifacts bucket + enables versioning |
 
 Volumes (named, persistent): `postgres-data`, `redis-data`, `minio-data`.
 Network: default compose bridge (`iosforge_default`).
@@ -63,8 +63,9 @@ docker compose exec -T postgres pg_isready -U iosforge -d iosforge   # -> accept
 curl -fsS http://localhost:9010/minio/health/live      # -> HTTP 200
 
 # Inspect buckets (mc on the compose network)
-docker run --rm --network iosforge_default --entrypoint sh minio/mc:latest -c \
-  'mc alias set local http://iosforge-minio:9000 iosforge-dev iosforge-dev-secret && mc ls local'
+docker run --rm --network iosforge_default \
+  -e MC_HOST_local=http://iosforge-dev:iosforge-dev-secret@iosforge-minio:9000 \
+  cgr.dev/chainguard/minio-client:latest ls local
 ```
 
 ## Notes

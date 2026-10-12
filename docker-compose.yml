@@ -46,8 +46,12 @@ services:
     restart: unless-stopped
 
   minio:
-    image: minio/minio:latest
+    # MinIO no longer publishes images on Docker Hub or quay.io (pulls are denied), so the
+    # stack uses Chainguard's free MinIO build. It runs as root so volumes created by the
+    # old minio/minio image (root-owned /data) keep working.
+    image: cgr.dev/chainguard/minio:latest
     container_name: iosforge-minio
+    user: root
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       # Root credentials reuse the app S3 keys for a single source of truth locally.
@@ -59,34 +63,30 @@ services:
     volumes:
       - minio-data:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      # The image has bash but no curl/mc: probe the liveness endpoint over /dev/tcp.
+      test:
+        - CMD
+        - bash
+        - -c
+        - exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /minio/health/live HTTP/1.0\r\n\r\n' >&3 && read -r status <&3 && [[ $$status == *" 200 "* ]]
       interval: 5s
       timeout: 5s
       retries: 15
       start_period: 10s
     restart: unless-stopped
 
-  # One-shot init: waits for MinIO, then ensures the artifacts bucket exists.
-  # Exits 0 once the bucket is present; safe to re-run (idempotent).
+  # One-shot init: waits for MinIO, then ensures the versioned artifacts bucket exists.
+  # Exits 0 once the bucket is present; safe to re-run (idempotent). The client image has
+  # no shell, so the alias comes from MC_HOST_local and the bucket is made in one command.
   minio-init:
-    image: minio/mc:latest
+    image: cgr.dev/chainguard/minio-client:latest
     container_name: iosforge-minio-init
     depends_on:
       minio:
         condition: service_healthy
     environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-iosforge-dev}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-iosforge-dev-secret}
-      S3_BUCKET: ${S3_BUCKET:-iosforge-artifacts}
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -e
-        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
-        mc mb --ignore-existing "local/$$S3_BUCKET"
-        mc version enable "local/$$S3_BUCKET"
-        echo "MinIO bucket '$$S3_BUCKET' ready (versioning enabled)."
+      MC_HOST_local: http://${S3_ACCESS_KEY_ID:-iosforge-dev}:${S3_SECRET_ACCESS_KEY:-iosforge-dev-secret}@minio:9000
+    command: ["mb", "--ignore-existing", "--with-versioning", "local/${S3_BUCKET:-iosforge-artifacts}"]
     restart: "no"
 
 volumes:
