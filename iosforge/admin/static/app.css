@@ -265,6 +265,7 @@ legend { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; co
 .tab-panel > .card:first-child { margin-top: 0; }
 
 #t-overview:checked ~ .tab-bar label[for="t-overview"],
+#t-scope:checked    ~ .tab-bar label[for="t-scope"],
 #t-build:checked    ~ .tab-bar label[for="t-build"],
 #t-ios:checked      ~ .tab-bar label[for="t-ios"],
 #t-store:checked    ~ .tab-bar label[for="t-store"],
@@ -273,12 +274,14 @@ legend { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; co
   border-color: var(--border); border-bottom-color: var(--surface);
 }
 #t-overview:checked ~ .tab-panels .panel-overview,
+#t-scope:checked    ~ .tab-panels .panel-scope,
 #t-build:checked    ~ .tab-panels .panel-build,
 #t-ios:checked      ~ .tab-panels .panel-ios,
 #t-store:checked    ~ .tab-panels .panel-store,
 #t-rework:checked   ~ .tab-panels .panel-rework { display: block; }
 
 #t-overview:focus-visible ~ .tab-bar label[for="t-overview"],
+#t-scope:focus-visible    ~ .tab-bar label[for="t-scope"],
 #t-build:focus-visible    ~ .tab-bar label[for="t-build"],
 #t-ios:focus-visible      ~ .tab-bar label[for="t-ios"],
 #t-store:focus-visible    ~ .tab-bar label[for="t-store"],
