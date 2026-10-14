@@ -22,19 +22,16 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from iosforge.common.config import Settings
 from iosforge.common.logging import get_logger
-from iosforge.mvp import claude_gen, frida_ingest, simulator, swiftui_media, xcode
+from iosforge.mvp import claude_gen, feasibility, frida_ingest, simulator, swiftui_media, xcode
 from iosforge.mvp import swiftui_capabilities as caps
 from iosforge.mvp import swiftui_integrations as integ
 from iosforge.mvp.analyze import stage_archive_context, topo_layers
-from iosforge.mvp.feasibility import apply_scope
 from iosforge.mvp.paths import RunPaths
-from iosforge.mvp.scope_models import FeasibilityReport, ScopeCounts, ScopeDecision, ScreenScope
 from iosforge.mvp.swiftui_ads import ad_violations, strip_ad_components
 from iosforge.mvp.swiftui_permissions import blank_comments_and_strings, permission_violations
 from iosforge.mvp.swiftui_prompters import PROMPTERS
@@ -799,24 +796,9 @@ def scope_to(paths: RunPaths, screen_ids: list[str]) -> None:
             ]
             paths.screens_json.write_text(json.dumps(crawl, ensure_ascii=False), encoding="utf-8")
     spec = json.loads(paths.app_spec_json.read_text())
-    screens = [
-        ScreenScope(
-            screen_id=str(s["id"]),
-            name=str(s.get("name") or s["id"]),
-            include=str(s["id"]) in screen_ids,
-            reason="codegen scope",
-        )
-        for s in spec.get("screens", [])
-    ]
-    scope = ScopeDecision(
-        status="approved",
-        scope_mode="core",
-        screens=screens,
-        feasibility=FeasibilityReport(overall_verdict="native", summary="codegen scope"),
-        counts=ScopeCounts.from_screens(screens),
-        proposed_at=datetime.now(UTC),
+    paths.app_spec_json.write_text(
+        json.dumps(feasibility.scoped_spec(spec, screen_ids), indent=2, ensure_ascii=False)
     )
-    apply_scope(paths, scope)
 
 
 def verify_on_simulator(

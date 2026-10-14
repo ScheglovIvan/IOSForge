@@ -19,6 +19,7 @@ DECISIONS 2026-07-07/2026-07-13 and the Phase 2 entry).
 
 from __future__ import annotations
 
+import copy
 import json
 import shutil
 from datetime import UTC, datetime
@@ -276,26 +277,43 @@ def apply_scope(paths: RunPaths, scope: ScopeDecision | None = None) -> None:
     caller is expected to have hydrated the approved version from MinIO via
     :func:`load_scope`). ``scope_mode == "full"`` and a missing/empty scope are
     no-ops. Otherwise the spec keeps only ``include`` screens and drops the
-    dangling references they leave behind (``navigates_to``, ``navigation.map``
-    edges, ``navigation.tabs`` roots, ``state_of`` links to a dropped base screen,
-    ``requirements[].screens``, ``screen_count``) — mirroring
-    :func:`iosforge.mvp.screen_filter.filter_screens` — then re-validates against
-    the App Spec v3 contract.
+    dangling references they leave behind (see :func:`_prune`), then re-validates
+    against the App Spec v3 contract.
     """
     if scope is None:
         if not paths.scope_json.exists():
             return
         scope = ScopeDecision.model_validate_json(paths.scope_json.read_text())
-    if scope.scope_mode == "full":
-        return
-
-    included = {s.screen_id for s in scope.screens if s.include}
     spec = json.loads(paths.app_spec_json.read_text())
-    screens = spec.get("screens", []) if isinstance(spec, dict) else []
+    pruned = _prune(spec, scope)
+    if pruned is None:
+        return
+    validated = spec_contract.validate_spec(pruned)
+    paths.app_spec_json.write_text(json.dumps(validated, indent=2, ensure_ascii=False))
+    total = len(spec.get("screens", [])) if isinstance(spec, dict) else 0
+    kept = len(validated.get("screens", []))
+    log.info("feasibility.apply_scope.done", kept=kept, dropped=total - kept)
+
+
+def _prune(source: Any, scope: ScopeDecision) -> dict[str, Any] | None:
+    """``spec`` trimmed to the scope's included screens, or ``None`` when nothing changes.
+
+    ``None`` means a no-op: ``scope_mode == "full"``, a non-object ``source`` or an include
+    set that keeps no screen. Otherwise a copy keeps only ``include`` screens and drops
+    the dangling references they leave behind (``navigates_to``, ``navigation.map``
+    edges, ``navigation.tabs`` roots, ``state_of`` links to a dropped base screen,
+    ``requirements[].screens``, ``navigation.launch``, ``screen_count``), mirroring
+    :func:`iosforge.mvp.screen_filter.filter_screens`. The result is not validated.
+    """
+    if scope.scope_mode == "full" or not isinstance(source, dict):
+        return None
+    included = {s.screen_id for s in scope.screens if s.include}
+    spec: dict[str, Any] = copy.deepcopy(source)
+    screens = spec.get("screens", [])
     kept = [s for s in screens if isinstance(s, dict) and str(s.get("id")) in included]
     if not kept:
         log.warning("feasibility.apply_scope.empty_keeping_all", total=len(screens))
-        return
+        return None
 
     for screen in kept:
         nav = screen.get("navigates_to")
@@ -340,10 +358,53 @@ def apply_scope(paths: RunPaths, scope: ScopeDecision | None = None) -> None:
         spec["provenance"]["screen_count"] = len(kept)
     if "screen_count" in spec:
         spec["screen_count"] = len(kept)
+    return spec
 
-    validated = spec_contract.validate_spec(spec)
-    paths.app_spec_json.write_text(json.dumps(validated, indent=2, ensure_ascii=False))
-    log.info("feasibility.apply_scope.done", kept=len(kept), dropped=len(screens) - len(kept))
+
+def resolve_scope_ids(spec: dict[str, Any], scope: ScopeDecision | None) -> list[str]:
+    """Screen ids the build keeps for ``scope``: its core include set, else every screen.
+
+    Every spec screen is kept when there is no scope, the mode is not ``core`` or the
+    include set is empty, exactly as the SwiftUI build resolves an approved scope.
+    """
+    every = [str(s["id"]) for s in spec.get("screens", []) if isinstance(s, dict)]
+    if scope is None or scope.scope_mode != "core":
+        return every
+    included = [s.screen_id for s in scope.screens if s.include]
+    return included or every
+
+
+def scoped_spec(full_spec: dict[str, Any], screen_ids: list[str]) -> dict[str, Any]:
+    """The app spec code generation builds for ``screen_ids`` (pruned and validated).
+
+    A synthetic approved ``core`` decision includes exactly ``screen_ids``; the spec
+    is pruned like :func:`apply_scope` and re-validated, so this may raise
+    :class:`iosforge.mvp.spec_contract.SpecValidationError`. When the prune is a
+    no-op the unpruned spec is returned as is.
+    """
+    wanted = set(screen_ids)
+    screens = [
+        ScreenScope(
+            screen_id=str(s["id"]),
+            name=str(s.get("name") or s["id"]),
+            include=str(s["id"]) in wanted,
+            reason="codegen scope",
+        )
+        for s in full_spec.get("screens", [])
+        if isinstance(s, dict) and "id" in s
+    ]
+    scope = ScopeDecision(
+        status="approved",
+        scope_mode="core",
+        screens=screens,
+        feasibility=FeasibilityReport(overall_verdict="native", summary="codegen scope"),
+        counts=ScopeCounts.from_screens(screens),
+        proposed_at=datetime.now(UTC),
+    )
+    pruned = _prune(full_spec, scope)
+    if pruned is None:
+        return copy.deepcopy(full_spec)
+    return spec_contract.validate_spec(pruned)
 
 
 def confirm_routing(scope: ScopeDecision, form: dict[str, str]) -> None:

@@ -78,6 +78,15 @@
         {% if scope.feasibility.summary %}<p class="hint">{{ scope.feasibility.summary }}</p>{% endif %}
       </div>
 
+      {% if scope_problems %}
+      {% set suggested = scope_problems | map(attribute='suggest_include') | sum(start=[]) %}
+      <div class="alert {{ 'alert--danger' if scope_blocked else 'alert--warning' }}">
+        <strong>{{ 'Scope cannot be approved: some screens would be unreachable in the generated app' if scope_blocked else 'The proposed selection would fail code generation:' }}</strong>
+        <ul>{% for p in scope_problems %}<li>{{ p.message }}</li>{% endfor %}</ul>
+      </div>
+      {% else %}
+      {% set suggested = [] %}
+      {% endif %}
       <form method="post" action="/jobs/{{ job.id }}/scope">
         <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
         <div class="card">
@@ -92,7 +101,7 @@
                 <tr>
                   <td><input type="checkbox" name="include_{{ s.screen_id }}"
                     {{ 'checked' if s.include else '' }} {{ '' if editable else 'disabled' }}></td>
-                  <td>{{ s.name }}<br><span class="mono muted" style="font-size:11px;">{{ s.screen_id }}</span></td>
+                  <td>{{ s.name }}{% if editable and s.screen_id in suggested %} <span class="pill pill--warning">suggested</span>{% endif %}<br><span class="mono muted" style="font-size:11px;">{{ s.screen_id }}</span></td>
                   <td>{{ s.group or '—' }}</td>
                   <td class="muted">{{ s.reason }}</td>
                 </tr>

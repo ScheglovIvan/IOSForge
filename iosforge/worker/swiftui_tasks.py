@@ -308,10 +308,7 @@ def scope_ids(
     except Exception as exc:
         log.warning("swiftui.scope_load_failed", job_id=str(job.id), error=str(exc))
         return every
-    if scope is None or scope.scope_mode != "core":
-        return every
-    included = [s.screen_id for s in scope.screens if s.include]
-    return included or every
+    return feasibility.resolve_scope_ids(spec, scope)
 
 
 def built_scope_key(job_id: str) -> str:

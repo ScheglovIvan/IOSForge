@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
+from types import SimpleNamespace as NS
 from typing import Any
 
 from starlette.datastructures import FormData
@@ -17,6 +19,7 @@ from starlette.datastructures import FormData
 from iosforge.admin import csrf, routes_jobs
 from iosforge.admin.session import SessionData
 from iosforge.common.types import JobState
+from iosforge.mvp.scope_check import ScopeProblem
 from iosforge.mvp.scope_models import (
     FeasibilityReport,
     ScopeCounts,
@@ -29,6 +32,7 @@ from iosforge.storage.client import ArtifactRef
 class _FakeRequest:
     def __init__(self, form: FormData) -> None:
         self._form = form
+        self.url = NS(path="/jobs/x")
 
     async def form(self) -> FormData:
         return self._form
@@ -73,6 +77,55 @@ def _user() -> SessionData:
     return SessionData(user_id="1", username="op", csrf_token=token)
 
 
+_UNREACHABLE = ScopeProblem(
+    kind="unreachable",
+    screen_ids=["0002"],
+    message="Screen 'Settings' (0002) is not reachable from any tab ('Home' 0011).",
+    suggest_include=["faq"],
+)
+
+
+def _patch_check(
+    monkeypatch: Any,
+    problems: Callable[[dict[str, Any], ScopeDecision | None], list[ScopeProblem]] | None = None,
+    *,
+    load: Callable[..., dict[str, Any]] | None = None,
+) -> None:
+    monkeypatch.setattr(
+        "iosforge.mvp.scope_check.load_full_spec", load or (lambda *_a, **_k: {"screens": []})
+    )
+    monkeypatch.setattr(
+        "iosforge.mvp.scope_check.navigation_problems", problems or (lambda *_a, **_k: [])
+    )
+
+
+def _page_context(*_a: Any, **_k: Any) -> dict[str, Any]:
+    job = NS(
+        id="job-1",
+        source_app_ref="Dogo",
+        state=NS(value="needs_input"),
+        created_at=datetime(2026, 10, 15, 9, 0, 0),
+        source_app_metadata={"scope_status": "proposed"},
+        result_version=1,
+    )
+    signing = {"configured": False, "own": False, "key_name": "", "key_id": "", "issuer_id": ""}
+    return {
+        "job": job,
+        "user": NS(username="op", csrf_token="t"),
+        "gen": None,
+        "build": None,
+        "can_ios_build": False,
+        "store_slides": [],
+        "signing": signing,
+        "signed_ok": False,
+        "sign_error": "",
+        "timeline": [],
+        "codegen_tasks": [],
+        "scope_status": "proposed",
+        "scope": _proposed_scope(),
+    }
+
+
 def _call(
     monkeypatch: Any,
     job: _FakeJob | None,
@@ -80,7 +133,11 @@ def _call(
     *,
     scope_mode: str = "core",
     notes: str = "",
+    problems: Callable[[dict[str, Any], ScopeDecision | None], list[ScopeProblem]] | None = None,
+    load: Callable[..., dict[str, Any]] | None = None,
 ) -> tuple[Any, _FakeDb, list[uuid.UUID], ScopeDecision | None]:
+    _patch_check(monkeypatch, problems, load=load)
+    monkeypatch.setattr(routes_jobs, "_detail_context", _page_context)
     user = _user()
     db = _FakeDb(job)
     saved: dict[str, ScopeDecision] = {}
@@ -194,6 +251,7 @@ def test_scope_approve_commits_before_enqueue_even_if_broker_down(monkeypatch: A
     user = _user()
     db = _FakeDb(job)
     scope = _proposed_scope()
+    _patch_check(monkeypatch)
     monkeypatch.setattr("iosforge.mvp.feasibility.load_scope", lambda *_a, **_k: scope)
     monkeypatch.setattr(
         "iosforge.mvp.feasibility.save_scope",
@@ -269,3 +327,95 @@ def test_load_scope_swallows_storage_error(monkeypatch: Any) -> None:
     monkeypatch.setattr("iosforge.mvp.feasibility.load_scope", _boom)
     # A failed load must not break job_detail — it degrades to no scope panel.
     assert routes_jobs._load_scope(object(), uuid.uuid4(), "approved") is None  # type: ignore[arg-type]
+
+
+def test_scope_approve_blocks_unreachable_screens(monkeypatch: Any) -> None:
+    job = _FakeJob(JobState.NEEDS_INPUT, {"scope_status": "proposed"})
+    resp, db, enqueued, saved = _call(
+        monkeypatch, job, [("include_home", "on")], problems=lambda *_a: [_UNREACHABLE]
+    )
+    assert resp.status_code == 422
+    assert saved is None
+    assert enqueued == []
+    assert not db.committed
+    assert job.state == JobState.NEEDS_INPUT
+    assert job.source_app_metadata == {"scope_status": "proposed"}
+    body = resp.body.decode()
+    assert "0002" in body
+    assert "Scope cannot be approved: some screens would be unreachable" in body
+    assert resp.context["scope_problems"] == [_UNREACHABLE]
+    assert resp.context["scope_blocked"] is True
+    rendered = resp.context["scope"]
+    assert rendered.status == "proposed"
+    assert {s.screen_id: s.include for s in rendered.screens} == {"home": True, "faq": False}
+
+
+def test_scope_check_receives_the_edited_scope(monkeypatch: Any) -> None:
+    seen: list[ScopeDecision | None] = []
+
+    def _check(_spec: dict[str, Any], scope: ScopeDecision | None) -> list[ScopeProblem]:
+        seen.append(scope.model_copy(deep=True) if scope is not None else None)
+        return []
+
+    job = _FakeJob(JobState.NEEDS_INPUT, {"scope_status": "proposed"})
+    _call(
+        monkeypatch,
+        job,
+        [("include_faq", "on")],
+        scope_mode="full",
+        notes="faq only",
+        problems=_check,
+    )
+    assert len(seen) == 1 and seen[0] is not None
+    checked = seen[0]
+    assert checked.status == "proposed"
+    assert checked.scope_mode == "full"
+    assert checked.notes == "faq only"
+    assert {s.screen_id: s.include for s in checked.screens} == {"home": False, "faq": True}
+    assert checked.counts.included == 1
+
+
+def test_scope_approve_blocks_when_the_spec_cannot_be_loaded(monkeypatch: Any) -> None:
+    def _missing(*_a: Any, **_k: Any) -> dict[str, Any]:
+        raise RuntimeError("NoSuchKey")
+
+    job = _FakeJob(JobState.NEEDS_INPUT, {"scope_status": "proposed"})
+    resp, db, enqueued, saved = _call(monkeypatch, job, [("include_home", "on")], load=_missing)
+    assert resp.status_code == 422
+    assert saved is None and enqueued == [] and not db.committed
+    assert job.state == JobState.NEEDS_INPUT
+    assert [p.kind for p in resp.context["scope_problems"]] == ["spec"]
+    assert "could not be loaded" in resp.body.decode()
+
+
+def _get_detail(monkeypatch: Any) -> Any:
+    monkeypatch.setattr(routes_jobs, "_detail_context", _page_context)
+    job = _FakeJob(JobState.NEEDS_INPUT, {"scope_status": "proposed"})
+    return routes_jobs.job_detail(
+        request=_FakeRequest(FormData([])),  # type: ignore[arg-type]
+        job_id=uuid.uuid4(),
+        user=_user(),
+        db=_FakeDb(job),  # type: ignore[arg-type]
+        storage=object(),  # type: ignore[arg-type]
+    )
+
+
+def test_job_detail_warns_about_a_proposal_that_would_fail(monkeypatch: Any) -> None:
+    _patch_check(monkeypatch, lambda *_a: [_UNREACHABLE])
+    resp = _get_detail(monkeypatch)
+    assert resp.status_code == 200
+    assert resp.context["scope_problems"] == [_UNREACHABLE]
+    body = resp.body.decode()
+    assert "The proposed selection would fail code generation:" in body
+    assert "0002" in body and "suggested" in body
+
+
+def test_job_detail_survives_a_failing_check(monkeypatch: Any) -> None:
+    def _boom(*_a: Any, **_k: Any) -> list[ScopeProblem]:
+        raise RuntimeError("bad spec")
+
+    _patch_check(monkeypatch, _boom)
+    resp = _get_detail(monkeypatch)
+    assert resp.status_code == 200
+    assert resp.context["scope_problems"] == []
+    assert "would fail code generation" not in resp.body.decode()

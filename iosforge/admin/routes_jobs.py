@@ -6,6 +6,7 @@ import json
 import re
 import uuid
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, cast
 from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
@@ -33,6 +34,10 @@ from iosforge.db.models import (
     WalkthroughResult,
 )
 from iosforge.storage.client import ArtifactStorage, build_key
+
+if TYPE_CHECKING:
+    from iosforge.mvp.scope_check import ScopeProblem
+    from iosforge.mvp.scope_models import ScopeDecision
 
 log = get_logger("admin.jobs")
 router = APIRouter()
@@ -137,46 +142,94 @@ def job_detail(
     signed: str = "",
     sign_error: str = "",
 ) -> Response:
-    from iosforge.mvp import asc_credentials
-
     job = db.get(Job, job_id)
     if job is None:
         return Response("Not found", status_code=404)
-    gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
-    scope_status = (job.source_app_metadata or {}).get("scope_status")
+    ctx = _detail_context(request, job, user, db, storage, signed=signed, sign_error=sign_error)
+    if ctx["scope_status"] == "proposed" and ctx["scope"] is not None:
+        proposal = cast("ScopeDecision", ctx["scope"])
+        ctx["scope_problems"] = _proposal_warnings(storage, job_id, proposal)
+    return templates.TemplateResponse(request, "job_detail.html", ctx)
+
+
+def _detail_context(
+    request: Request,
+    job: Job,
+    user: SessionData,
+    db: Session,
+    storage: ArtifactStorage,
+    *,
+    signed: str = "",
+    sign_error: str = "",
+) -> dict[str, object]:
+    """Template context of the job page (shared by the page and the blocked scope approval)."""
+    from iosforge.mvp import asc_credentials
     from iosforge.worker.swiftui_build import build_refusal
     from iosforge.worker.swiftui_tasks import latest_xcode_build
 
+    job_id = job.id
+    gen = db.scalar(select(GenerationResult).where(GenerationResult.job_id == job_id))
+    scope_status = (job.source_app_metadata or {}).get("scope_status")
     xcode_build = latest_xcode_build(db, job_id)
     can_xcode_delivery = xcode_build is not None or _has_sources(storage, job_id)
     can_build = job.state in (JobState.DONE, JobState.FAILED) and build_refusal(db, job) is None
-    return templates.TemplateResponse(
-        request,
-        "job_detail.html",
-        {
-            "job": job,
-            "user": user,
-            "timeline": _timeline(db, job_id),
-            "codegen_tasks": _codegen_tasks(db, job_id),
-            "gen": gen,
-            "build": _latest_build(db, job_id),
-            "can_ios_build": can_xcode_delivery or _latest_build(db, job_id) is not None,
-            "can_xcode_delivery": can_xcode_delivery,
-            "can_build": can_build,
-            "xcode_build": xcode_build,
-            "store_slides": _store_slides(job_id),
-            "ipad_slides": _ipad_slides(job_id),
-            "icon_versions": _icon_versions(job_id),
-            "store_listing": _store_listing(job_id),
-            "store_categories": _store_categories(),
-            "signing": asc_credentials.status(get_settings(), str(job_id)),
-            "signed_ok": signed == "1",
-            "sign_error": sign_error,
-            "scope_status": scope_status,
-            "scope": _load_scope(storage, job_id, scope_status),
-            "capability_modules": _capability_modules(),
-        },
-    )
+    return {
+        "job": job,
+        "user": user,
+        "timeline": _timeline(db, job_id),
+        "codegen_tasks": _codegen_tasks(db, job_id),
+        "gen": gen,
+        "build": _latest_build(db, job_id),
+        "can_ios_build": can_xcode_delivery or _latest_build(db, job_id) is not None,
+        "can_xcode_delivery": can_xcode_delivery,
+        "can_build": can_build,
+        "xcode_build": xcode_build,
+        "store_slides": _store_slides(job_id),
+        "ipad_slides": _ipad_slides(job_id),
+        "icon_versions": _icon_versions(job_id),
+        "store_listing": _store_listing(job_id),
+        "store_categories": _store_categories(),
+        "signing": asc_credentials.status(get_settings(), str(job_id)),
+        "signed_ok": signed == "1",
+        "sign_error": sign_error,
+        "scope_status": scope_status,
+        "scope": _load_scope(storage, job_id, scope_status),
+        "capability_modules": _capability_modules(),
+    }
+
+
+def _proposal_warnings(
+    storage: ArtifactStorage, job_id: uuid.UUID, scope: ScopeDecision
+) -> list[ScopeProblem]:
+    """Problems the stored proposal would hit in codegen; any failure yields no warning."""
+    from iosforge.mvp import scope_check
+
+    try:
+        full = scope_check.load_full_spec(storage, str(job_id))
+        return scope_check.navigation_problems(full, scope)
+    except Exception as exc:
+        log.warning("jobs.scope_check_failed", job_id=str(job_id), error=str(exc))
+        return []
+
+
+def _approval_problems(
+    storage: ArtifactStorage, job_id: uuid.UUID, scope: ScopeDecision
+) -> list[ScopeProblem]:
+    """Problems that block approving ``scope``; an unloadable spec or failed check blocks too."""
+    from iosforge.mvp import scope_check
+
+    try:
+        full = scope_check.load_full_spec(storage, str(job_id))
+    except Exception as exc:
+        log.warning("jobs.scope_spec_load_failed", job_id=str(job_id), error=str(exc))
+        message = f"The app spec could not be loaded, so the selection cannot be checked: {exc}"
+        return [scope_check.ScopeProblem("spec", [], message[:500], [])]
+    try:
+        return scope_check.navigation_problems(full, scope)
+    except Exception as exc:
+        log.exception("jobs.scope_check_failed", job_id=str(job_id), error=str(exc))
+        message = f"The selection could not be checked: {exc}"
+        return [scope_check.ScopeProblem("spec", [], message[:500], [])]
 
 
 @router.post("/jobs/{job_id}/rework")
@@ -881,6 +934,19 @@ async def jobs_scope_approve(
     feasibility.confirm_routing(scope, {k: str(v) for k, v in form.items()})
     scope.scope_mode = "full" if scope_mode == "full" else "core"
     scope.notes = notes
+    scope.recount()
+    problems = _approval_problems(storage, job_id, scope)
+    if problems:
+        log.info(
+            "jobs.scope_blocked",
+            job_id=str(job_id),
+            problems=[p.kind for p in problems],
+            screens=[sid for p in problems for sid in p.screen_ids],
+        )
+        ctx = _detail_context(request, job, user, db, storage)
+        ctx.update(scope=scope, scope_status="proposed", scope_problems=problems)
+        ctx["scope_blocked"] = True
+        return templates.TemplateResponse(request, "job_detail.html", ctx, status_code=422)
     scope.status = "approved"
     scope.approved_by = user.username
     approved_at = datetime.now(UTC)

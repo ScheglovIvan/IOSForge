@@ -9,6 +9,7 @@ import pytest
 from iosforge.mvp.swiftui_navigation import (
     NavigationSpecError,
     Tab,
+    UnreachableScreensError,
     _parse_tab_bar,
     derive_tabs,
     tab_owners,
@@ -149,6 +150,16 @@ def test_orphan_screen_fails_loud() -> None:
     spec = _tab_spec()
     with pytest.raises(NavigationSpecError, match="0099"):
         tab_owners(spec, derive_tabs(spec), stack_screens=["0099"])
+
+
+def test_orphans_raise_a_typed_error_with_orphans_and_roots() -> None:
+    spec = _tab_spec()
+    with pytest.raises(UnreachableScreensError) as caught:
+        tab_owners(spec, derive_tabs(spec), stack_screens=["0099", "0008", "0098"])
+    assert isinstance(caught.value, NavigationSpecError)
+    assert caught.value.orphans == ["0098", "0099"]
+    assert caught.value.roots == ["0011", "0012", "0002"]
+    assert "screens reachable from no tab: ['0098', '0099']" in str(caught.value)
 
 
 def test_empty_explicit_tabs_on_tab_app_fall_back_to_heuristic() -> None:

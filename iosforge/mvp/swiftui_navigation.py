@@ -26,6 +26,15 @@ class NavigationSpecError(ValueError):
     """The app_spec does not describe its navigation unambiguously."""
 
 
+class UnreachableScreensError(NavigationSpecError):
+    """Pushed screens that no tab root reaches (``orphans``), with the ``roots`` searched."""
+
+    def __init__(self, message: str, *, orphans: list[str], roots: list[str]) -> None:
+        super().__init__(message)
+        self.orphans = orphans
+        self.roots = roots
+
+
 @dataclass(frozen=True)
 class Tab:
     """One root tab: the screen at its root and its label."""
@@ -179,7 +188,7 @@ def tab_owners(
     onboarding, not modal, not a tab root). Breadth-first from each tab root in
     tab order; traversal never passes through other tab roots, modal or onboarding
     screens, so a screen only reachable via another tab belongs to that tab. Raises
-    :class:`NavigationSpecError` listing screens reachable from no tab.
+    :class:`UnreachableScreensError` listing screens reachable from no tab.
     """
     pending = set(stack_screens)
     roots = [t.screen_id for t in tabs]
@@ -198,8 +207,10 @@ def tab_owners(
                 queue.append(nxt)
     orphans = sorted(pending - owners.keys())
     if orphans:
-        raise NavigationSpecError(
+        raise UnreachableScreensError(
             f"screens reachable from no tab: {orphans}; exclude them via scope or fix "
-            "navigation.map"
+            "navigation.map",
+            orphans=orphans,
+            roots=roots,
         )
     return {sid: owners[sid] for sid in pending}
