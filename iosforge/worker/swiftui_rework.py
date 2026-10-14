@@ -38,6 +38,7 @@ from iosforge.worker.swiftui_tasks import (
     active_build,
     claim_job,
     effective_scope_ids,
+    functional_recorder,
     hydrate_inputs,
     hydrate_sources,
     job_locale,
@@ -183,6 +184,7 @@ def rework_swiftui(
                     weights=compliance.ComplianceWeights.from_settings(settings),
                     threshold=settings.frontend_verify_threshold,
                     soft_floor=settings.compliance_soft_floor,
+                    on_functional=functional_recorder(job.id),
                 )
                 if _discarded(db, job, epoch):
                     return f"job {job_id} rework discarded: superseded (epoch {epoch})"

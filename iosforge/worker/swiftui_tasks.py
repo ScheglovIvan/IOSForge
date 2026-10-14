@@ -19,6 +19,7 @@ import shutil
 import tempfile
 import uuid
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,7 @@ from iosforge.mvp import (
     build_profile,
     feasibility,
     frida_ingest,
+    functional,
     ios_delivery,
     swiftui_gen,
     swiftui_integrations,
@@ -363,6 +365,31 @@ def effective_scope_ids(
     except (OSError, ValueError, AttributeError) as exc:
         log.warning("swiftui.built_scope_unreadable", job_id=str(job.id), error=str(exc))
     return scope_ids(job, storage, spec, settings)
+
+
+def functional_recorder(job_id: uuid.UUID) -> functional.FunctionalHook:
+    """Hook that writes a finished functional run as a VERIFY timeline row of the job.
+
+    The row is committed in its own session at once, so the job page (refreshed every
+    few seconds) shows the run while the build or rework round is still going.
+    """
+
+    def record(report: dict[str, Any], started_at: datetime) -> None:
+        finished_at = utcnow()
+        with get_sessionmaker()() as db:
+            db.add(
+                StageTimeline(
+                    job_id=job_id,
+                    stage=Stage.VERIFY,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    duration_ms=max(0, int((finished_at - started_at).total_seconds() * 1000)),
+                    error=f"{functional.EVENT_PREFIX}{functional.summary(report)}",
+                )
+            )
+            db.commit()
+
+    return record
 
 
 def claim_job(

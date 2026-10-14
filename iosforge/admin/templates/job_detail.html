@@ -94,6 +94,21 @@
           &nbsp;·&nbsp; {{ scope.counts.included }} included / {{ scope.counts.excluded }} excluded
           of {{ scope.counts.total }}.</p>
         {% if scope.feasibility.summary %}<p class="hint">{{ scope.feasibility.summary }}</p>{% endif %}
+        {% if scope_view %}
+        {% if scope_view.built is not none %}
+        <p class="hint">In the app now: <strong style="color:var(--text);">{{ scope_view.built | length }}</strong> screens{% if scope_view.added %},
+          <strong style="color:var(--text);">{{ scope_view.added | length }}</strong> added in rework
+          (<span class="mono">{{ scope_view.added | join(', ') }}</span>){% endif %}.</p>
+        {% endif %}
+        {% if scope_view.pending %}
+        <p class="hint">Requested, not built yet: <span class="mono">{{ scope_view.pending | join(', ') }}</span>
+          {% if job.state.value == 'codegen' %}— the rework round is running.{% else %}— no round has built them; see the timeline for the last round.{% endif %}</p>
+        {% endif %}
+        {% for e in scope_view.extensions %}
+        <p class="hint">Screens added{% if e.by %} by <strong style="color:var(--text);">{{ e.by }}</strong>{% endif %}{% if e.at %} on {{ e.at[:19].replace('T', ' ') }}{% endif %}:
+          <span class="mono">{{ e.screens | join(', ') }}</span></p>
+        {% endfor %}
+        {% endif %}
       </div>
 
       {% if scope_problems %}
@@ -112,7 +127,7 @@
           <div class="table-wrap">
             <table class="kv">
               <thead>
-                <tr><th>Include</th><th>Name</th><th>Group</th><th>Reason</th></tr>
+                <tr><th>Include</th><th>Name</th><th>Group</th><th>Reason</th>{% if scope_view %}<th>In the app</th>{% endif %}</tr>
               </thead>
               <tbody>
                 {% for s in scope.screens %}
@@ -122,8 +137,23 @@
                   <td>{{ s.name }}{% if editable and s.screen_id in suggested %} <span class="pill pill--warning">suggested</span>{% endif %}<br><span class="mono muted" style="font-size:11px;">{{ s.screen_id }}</span></td>
                   <td>{{ s.group or '—' }}</td>
                   <td class="muted">{{ s.reason }}</td>
+                  {% if scope_view %}
+                  {% set st = scope_view.statuses.get(s.screen_id) %}
+                  <td>{% if st %}<span class="pill pill--{{ st.tone }}">{{ st.label }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+                  {% endif %}
                 </tr>
                 {% endfor %}
+                {% if scope_view %}
+                {% for sid in scope_view.unlisted %}
+                <tr>
+                  <td><input type="checkbox" disabled></td>
+                  <td><span class="mono">{{ sid }}</span></td>
+                  <td>—</td>
+                  <td class="muted">not in the approved proposal</td>
+                  <td>{% if scope_view.built and sid in scope_view.built %}<span class="pill pill--info">added in rework</span>{% else %}<span class="pill pill--warning">requested · not built</span>{% endif %}</td>
+                </tr>
+                {% endfor %}
+                {% endif %}
               </tbody>
             </table>
           </div>

@@ -4,13 +4,18 @@
     <tbody>
     {% for row in timeline %}
       {% set operator_event = row.error and row.error.startswith('operator: ') %}
-      <tr{% if operator_event %} class="timeline-operator muted"{% endif %}>
-        <td><strong>{{ 'Verify (web)' if row.stage.value == 'verify' else row.stage.value.replace('_', ' ') }}</strong></td>
+      {% set functional_event = row.error and row.error.startswith('functional: ') %}
+      {% set functional_ok = functional_event and row.error.startswith('functional: ok') %}
+      <tr{% if operator_event %} class="timeline-operator muted"{% elif functional_event %} class="timeline-functional"{% endif %}>
+        <td><strong>{{ 'Functional checks' if functional_event else ('Verify (web)' if row.stage.value == 'verify' else row.stage.value.replace('_', ' ')) }}</strong></td>
         <td class="mono muted">{{ row.started_at.strftime('%H:%M:%S') if row.started_at else '—' }}</td>
         <td class="mono muted">{{ row.finished_at.strftime('%H:%M:%S') if row.finished_at else '—' }}</td>
         <td class="mono">{{ (row.duration_ms ~ ' ms') if row.duration_ms is not none else '—' }}</td>
         {% if operator_event %}
         <td class="mono muted">{{ row.error }}</td>
+        {% elif functional_event %}
+        <td class="mono"><span class="pill pill--{{ 'success' if functional_ok else 'danger' }}">{{ 'ok' if functional_ok else 'failed' }}</span>
+          <span style="color:var({{ '--success-text' if functional_ok else '--danger-text' }});">{{ row.error[12:] }}</span></td>
         {% else %}
         <td class="mono" style="color:var(--danger-text);">{{ row.error or '' }}</td>
         {% endif %}

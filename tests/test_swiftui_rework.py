@@ -415,3 +415,45 @@ def test_round_uploads_the_renders_it_judged(monkeypatch: pytest.MonkeyPatch) ->
 
     key = swiftui_tasks.generated_screen_key(str(job.id), "0001")
     assert storage.objects[key] == b"NEW-RENDER"
+
+
+def test_extend_route_records_the_operator_decision(monkeypatch: pytest.MonkeyPatch) -> None:
+    from iosforge.admin import scope_view
+
+    job, storage = _job(scope_status="approved")
+    session = _Session(job)
+    status, sent = _post(monkeypatch, session, storage, sources="jobs/x/sources/xcode_app.zip")
+    assert status == 303 and len(sent) == 1
+    [entry] = scope_view.extensions(job.source_app_metadata)
+    assert entry["screens"] == ["0002", "0003"] and entry["by"] == "op"
+    assert job.source_app_metadata["scope_status"] == "approved"
+
+
+def test_refused_extension_is_not_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    job, storage = _job(JobState.CODEGEN)
+    status, sent = _post(monkeypatch, _Session(job), storage, sources="jobs/x/xcode_app.zip")
+    assert (status, sent) == (409, [])
+    assert "scope_extensions" not in (job.source_app_metadata or {})
+
+
+def test_round_writes_the_functional_run_to_the_timeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    job, storage = _job()
+    session = _Session(job, GenerationResult(job_id=job.id, sources_key="jobs/x/s.zip"))
+    _wire(monkeypatch, job, storage, session)
+    monkeypatch.setattr(swiftui_tasks, "get_sessionmaker", lambda: lambda: session)
+    report = {
+        "ok": False,
+        "checks": [{"name": "echo", "passed": True}, {"name": "remote_api", "passed": False}],
+    }
+
+    def verify(paths: RunPaths, *a: Any, **k: Any) -> dict[str, Any]:
+        k["on_functional"](report, swiftui_tasks.utcnow())
+        return {"compliance_score": 0.9, "functional": report}
+
+    monkeypatch.setattr(swiftui_rework.compliance, "verify_ios", verify)
+    swiftui_rework.rework_swiftui.run(str(job.id), "fix it")
+
+    rows = [o for o in session.added if isinstance(o, StageTimeline)]
+    functional_row = next(r for r in rows if r.stage.value == "verify")
+    assert functional_row.finished_at is not None and functional_row.duration_ms is not None
+    assert functional_row.error == ("functional: failed · 1/2 checks passed · failing: remote_api")

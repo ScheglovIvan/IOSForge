@@ -16,7 +16,9 @@ backend (DECISIONS 2026-10-10 «Level 2»).
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from contextlib import ExitStack
+from datetime import datetime
 from typing import Any
 
 from iosforge.common.logging import get_logger
@@ -30,6 +32,10 @@ from iosforge.mvp.swiftui_functional import JOURNAL_NAME, UI_TEST_TARGET, Functi
 log = get_logger("mvp.functional")
 
 REPORT_NAME = "functional_report.json"
+EVENT_PREFIX = "functional: "
+SUMMARY_LIMIT = 600
+
+FunctionalHook = Callable[[dict[str, Any], datetime], None]
 
 MOCKS = swf.MOCKS
 register_mock = swf.register_mock
@@ -258,3 +264,30 @@ def _write(paths: RunPaths, report: dict[str, Any]) -> None:
     (paths.run_dir / REPORT_NAME).write_text(
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+
+
+def summary(report: dict[str, Any]) -> str:
+    """One line for the operator: verdict, passed/total checks, failing checks, infra error."""
+    checks = [c for c in report.get("checks") or [] if isinstance(c, dict)]
+    passed = sum(1 for c in checks if c.get("passed"))
+    parts = [f"{'ok' if report.get('ok') else 'failed'} · {passed}/{len(checks)} checks passed"]
+    if report.get("skipped"):
+        parts.append(f"skipped: {report['skipped']}")
+    failing = [str(c.get("name", "?")) for c in checks if not c.get("passed")]
+    if failing:
+        parts.append(f"failing: {', '.join(failing)}")
+    if report.get("infra_error"):
+        parts.append("infrastructure error")
+    if report.get("error"):
+        parts.append(str(report["error"]))
+    return " · ".join(parts)[:SUMMARY_LIMIT]
+
+
+def notify(hook: FunctionalHook | None, report: dict[str, Any], started_at: datetime) -> None:
+    """Hand a finished run to ``hook`` (the job timeline); a failing hook is only logged."""
+    if hook is None:
+        return
+    try:
+        hook(report, started_at)
+    except Exception as exc:
+        log.warning("functional.notify_failed", error=str(exc))

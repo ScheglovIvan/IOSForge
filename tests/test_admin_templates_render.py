@@ -210,3 +210,32 @@ def test_job_detail_native_build_card() -> None:
     assert "/jobs/job-3/xcode-delivery/ipa" in html and "2610091200" in html
     assert "Uploading to App Store Connect is disabled" in html
     assert 'action="/jobs/job-3/codemagic-build"' not in html
+
+
+def test_timeline_shows_functional_runs_with_their_verdict() -> None:
+    def row(error: str) -> NS:
+        return NS(
+            stage=NS(value="verify"),
+            started_at=_NOW,
+            finished_at=_NOW,
+            duration_ms=4200,
+            error=error,
+        )
+
+    job = NS(id="job-1", state=NS(value="codegen"), source_app_metadata={})
+    html = _render(
+        "_timeline.html",
+        job=job,
+        gen=None,
+        codegen_tasks=[],
+        timeline=[
+            row("functional: ok · 2/2 checks passed"),
+            row("functional: failed · 1/2 checks passed · failing: remote_api"),
+            row("structural gaps"),
+        ],
+    )
+    assert html.count("Functional checks") == 2 and "Verify (web)" in html
+    assert '<span class="pill pill--success">ok</span>' in html
+    assert '<span class="pill pill--danger">failed</span>' in html
+    assert "1/2 checks passed · failing: remote_api" in html
+    assert "functional: " not in html

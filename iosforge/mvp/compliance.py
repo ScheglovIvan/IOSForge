@@ -22,6 +22,7 @@ import re
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -804,8 +805,12 @@ def verify_ios(
     weights: ComplianceWeights,
     threshold: float,
     soft_floor: float,
+    on_functional: functional.FunctionalHook | None = None,
 ) -> dict[str, Any]:
-    """One-pass iOS check: build, render every screen on the Simulator, vision-judge."""
+    """One-pass iOS check: build, render every screen on the Simulator, vision-judge.
+
+    ``on_functional`` gets the functional report as soon as that run finishes.
+    """
     app = build_ios(paths)
     render_generated_ios(paths, env, app=app)
     report = evaluate(
@@ -813,7 +818,9 @@ def verify_ios(
     )
     spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
     if functional.app_checks(paths, spec):
+        started_at = datetime.now(UTC)
         report["functional"] = functional.run_safely(paths, udid=env.udid, spec=spec)
+        functional.notify(on_functional, report["functional"], started_at)
     return report
 
 
@@ -828,6 +835,7 @@ def refine_ios_until_complete(
     blank_max_bytes: int,
     timeout: int = 1800,
     structural_gate: bool = True,
+    on_functional: functional.FunctionalHook | None = None,
 ) -> dict[str, Any]:
     """The Vision-Judge loop: Simulator render + Swift navigation audit.
 
@@ -836,7 +844,8 @@ def refine_ios_until_complete(
     (PNG size, and frames ``render_generated_ios`` flagged as never drawn). Corrections run
     through :func:`apply_corrective`, which routes SwiftUI apps to the sandboxed screen
     tasks of :func:`iosforge.mvp.swiftui_gen.correct`. Scoring, weights and the loop itself
-    are the unchanged :func:`_refine`.
+    are the unchanged :func:`_refine`. ``on_functional`` gets every functional report as
+    soon as that run finishes (once per iteration).
     """
 
     spec = json.loads(paths.app_spec_json.read_text(encoding="utf-8"))
@@ -846,10 +855,12 @@ def refine_ios_until_complete(
         app = build_ios(paths, timeout=timeout)
         render_generated_ios(paths, env, app=app)
         if functional.app_checks(paths, spec):
+            started_at = datetime.now(UTC)
             functional_report.clear()
             functional_report.update(
                 functional.run_safely(paths, udid=env.udid, spec=spec, timeout=timeout)
             )
+            functional.notify(on_functional, dict(functional_report), started_at)
 
     def _audit() -> dict[str, Any]:
         structural = nav_audit_ios(paths)

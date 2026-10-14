@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -438,3 +439,67 @@ def test_tap_prefers_the_exact_label_over_longer_matches() -> None:
     tests = swf.render_ui_tests([_check()], [])
     assert 'NSRegularExpression(pattern: "^(?:" + pattern + ")$"' in tests
     assert "loosely.min(by: { $0.label.count < $1.label.count })" in tests
+
+
+def test_summary_states_the_verdict_and_the_passed_checks() -> None:
+    ok = {"ok": True, "checks": [{"name": "echo", "passed": True}]}
+    assert functional.summary(ok) == "ok · 1/1 checks passed"
+    infra = {"ok": False, "infra_error": True, "checks": [], "error": "no simulator"}
+    assert functional.summary(infra) == (
+        "failed · 0/0 checks passed · infrastructure error · no simulator"
+    )
+    skipped = {"ok": True, "checks": [], "skipped": "no functional checks"}
+    assert functional.summary(skipped).startswith("ok · 0/0 checks passed · skipped")
+    assert len(functional.summary({"ok": False, "error": "x" * 5000})) == functional.SUMMARY_LIMIT
+
+
+def test_a_failing_hook_never_breaks_the_run() -> None:
+    def boom(report: dict[str, Any], started_at: Any) -> None:
+        raise RuntimeError("db down")
+
+    functional.notify(boom, {"ok": True}, datetime.now(UTC))
+    functional.notify(None, {"ok": True}, datetime.now(UTC))
+
+
+def test_verify_ios_hands_the_functional_report_to_the_hook(
+    tmp_path: Path, echo_module: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _app(tmp_path, _echo_spec())
+    monkeypatch.setattr(compliance, "build_ios", lambda p: Path("/tmp/App.app"))
+    monkeypatch.setattr(compliance, "render_generated_ios", lambda p, env, app: None)
+    monkeypatch.setattr(compliance, "evaluate", lambda p, i, **kw: {"compliance_score": 0.9})
+    monkeypatch.setattr(functional, "run_safely", lambda p, udid, spec: {"ok": True, "checks": []})
+    seen: list[tuple[dict[str, Any], datetime]] = []
+    compliance.verify_ios(
+        paths, compliance.simulator.SimEnvironment(udid="U", locale="en-US"),
+        weights=compliance.ComplianceWeights(0.4, 0.3, 0.1, 0.2), threshold=0.8, soft_floor=0.6,
+        on_functional=lambda report, started: seen.append((report, started)),
+    )  # fmt: skip
+    assert [r for r, _ in seen] == [{"ok": True, "checks": []}]
+    assert seen[0][1].tzinfo is not None
+
+
+def test_refine_hands_every_functional_run_to_the_hook(
+    tmp_path: Path, echo_module: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _app(tmp_path, _echo_spec())
+    monkeypatch.setattr(compliance, "build_ios", lambda p, timeout=0: Path("/tmp/App.app"))
+    monkeypatch.setattr(compliance, "render_generated_ios", lambda p, env, app: None)
+    report = {"ok": True, "checks": [{"name": "echo", "screen_id": "0001", "passed": True}]}
+    monkeypatch.setattr(functional, "run", lambda p, udid, spec, timeout: report)
+
+    def fake_refine(p: RunPaths, prepare: Any, **kw: Any) -> dict[str, Any]:
+        prepare()
+        prepare()
+        return {}
+
+    monkeypatch.setattr(compliance, "_refine", fake_refine)
+    seen: list[dict[str, Any]] = []
+    compliance.refine_ios_until_complete(
+        paths,
+        compliance.simulator.SimEnvironment(udid="U", locale="en-US"),
+        threshold=0.8, soft_floor=0.6, max_iterations=2,
+        weights=compliance.ComplianceWeights(0.4, 0.3, 0.1, 0.2), blank_max_bytes=6000,
+        on_functional=lambda r, started: seen.append(r),
+    )  # fmt: skip
+    assert seen == [report, report]

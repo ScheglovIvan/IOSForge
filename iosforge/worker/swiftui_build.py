@@ -35,6 +35,7 @@ from iosforge.storage.client import S3ArtifactStorage
 from iosforge.worker.swiftui_tasks import (
     XCODE_QUEUE,
     claim_job,
+    functional_recorder,
     hydrate_inputs,
     job_locale,
     queue_delivery,
@@ -211,6 +212,7 @@ def build_swiftui(self: Any, job_id: str, epoch: int | None = None) -> str:
                     weights=compliance.ComplianceWeights.from_settings(settings),
                     blank_max_bytes=settings.web_blank_max_bytes,
                     structural_gate=settings.web_verify_hard_gate,
+                    on_functional=functional_recorder(job.id),
                 )
                 if _discarded(db, job, epoch):
                     return f"job {job_id} build discarded: superseded (epoch {epoch})"

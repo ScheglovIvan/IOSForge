@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from starlette.responses import PlainTextResponse, RedirectResponse, Response
 from starlette.status import HTTP_303_SEE_OTHER
 
-from iosforge.admin import archive_validate, artifacts_view, csrf, thumbs
+from iosforge.admin import archive_validate, artifacts_view, csrf, scope_view, thumbs
 from iosforge.admin.appstore_url import AppStoreUrlError
 from iosforge.admin.appstore_url import parse as parse_appstore_url
 from iosforge.admin.deps import get_db, get_storage, require_user
@@ -181,6 +181,7 @@ def _detail_context(
     can_xcode_delivery = xcode_build is not None or _has_sources(storage, job_id)
     can_build = job.state in (JobState.DONE, JobState.FAILED) and build_refusal(db, job) is None
     recovery = _recovery_context(db, job, xcode_build)
+    scope = _load_scope(storage, job_id, scope_status)
     return {
         **recovery,
         "job": job,
@@ -202,7 +203,14 @@ def _detail_context(
         "signed_ok": signed == "1",
         "sign_error": sign_error,
         "scope_status": scope_status,
-        "scope": _load_scope(storage, job_id, scope_status),
+        "scope": scope,
+        "scope_view": scope_view.load(
+            storage,
+            str(job_id),
+            job.source_app_metadata,
+            scope,
+            running=job.state == JobState.CODEGEN,
+        ),
         "capability_modules": _capability_modules(),
         "artifacts": artifacts_view.load(db, storage, job_id, gen),
     }
@@ -310,7 +318,7 @@ def jobs_extend_scope(
 
     if not ids or gen is None or not gen.sources_key.endswith(SOURCES_NAME):
         return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
-    return _enqueue_swiftui_round(db, storage, job_id, "", ids)
+    return _enqueue_swiftui_round(db, storage, job_id, "", ids, actor=user.username)
 
 
 def _enqueue_swiftui_round(
@@ -319,7 +327,10 @@ def _enqueue_swiftui_round(
     job_id: uuid.UUID,
     instructions: str,
     add_screens: list[str] | None,
+    *,
+    actor: str = "",
 ) -> Response:
+    """Queue one rework round; a scope extension is recorded as the operator's decision."""
     from iosforge.worker.swiftui_rework import rework_refusal, rework_swiftui
     from iosforge.worker.swiftui_tasks import XCODE_QUEUE
 
@@ -338,6 +349,13 @@ def _enqueue_swiftui_round(
         log.info("jobs.swiftui_round_requested", job_id=str(job_id), screens=add_screens)
     except Exception as exc:
         log.error("jobs.swiftui_round_enqueue_failed", job_id=str(job_id), error=str(exc))
+        return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
+    if add_screens:
+        job.source_app_metadata = scope_view.record_extension(
+            job.source_app_metadata, add_screens, actor, datetime.now(UTC)
+        )
+        db.commit()
+        return RedirectResponse(f"/jobs/{job_id}#t-scope", status_code=HTTP_303_SEE_OTHER)
     return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
 
 
