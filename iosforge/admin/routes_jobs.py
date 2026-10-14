@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 from urllib.parse import quote_plus
@@ -15,7 +16,14 @@ from sqlalchemy.orm import Session
 from starlette.responses import PlainTextResponse, RedirectResponse, Response
 from starlette.status import HTTP_303_SEE_OTHER
 
-from iosforge.admin import archive_validate, artifacts_view, csrf, scope_view, thumbs
+from iosforge.admin import (
+    archive_validate,
+    artifacts_view,
+    csrf,
+    rework_view,
+    scope_view,
+    thumbs,
+)
 from iosforge.admin.appstore_url import AppStoreUrlError
 from iosforge.admin.appstore_url import parse as parse_appstore_url
 from iosforge.admin.deps import get_db, get_storage, require_user
@@ -33,6 +41,7 @@ from iosforge.db.models import (
     StageTimeline,
     WalkthroughResult,
 )
+from iosforge.orchestrator import rework_request
 from iosforge.orchestrator.recovery import RESETTABLE_STATES, current_epoch
 from iosforge.storage.client import ArtifactStorage, build_key
 
@@ -146,6 +155,7 @@ def job_detail(
     sign_error: str = "",
     reset: str = "",
     reopened: str = "",
+    rework: str = "",
 ) -> Response:
     job = db.get(Job, job_id)
     if job is None:
@@ -153,6 +163,7 @@ def job_detail(
     ctx = _detail_context(request, job, user, db, storage, signed=signed, sign_error=sign_error)
     ctx["reset_to"] = reset if reset in {state.value for state in JobState} else ""
     ctx["reopened_ok"] = reopened == "1"
+    ctx["rework_queued"] = rework == "queued"
     if ctx["scope_status"] == "proposed" and ctx["scope"] is not None:
         proposal = cast("ScopeDecision", ctx["scope"])
         ctx["scope_problems"] = _proposal_warnings(storage, job_id, proposal)
@@ -182,8 +193,14 @@ def _detail_context(
     can_build = job.state in (JobState.DONE, JobState.FAILED) and build_refusal(db, job) is None
     recovery = _recovery_context(db, job, xcode_build)
     scope = _load_scope(storage, job_id, scope_status)
+    rework_round = _rework_round(job, gen is not None)
     return {
         **recovery,
+        "rework_round": rework_round,
+        "rework_queued": False,
+        "rework_error": "",
+        "rework_draft": "",
+        "screens_draft": "",
         "job": job,
         "user": user,
         "timeline": _timeline(db, job_id),
@@ -209,11 +226,21 @@ def _detail_context(
             str(job_id),
             job.source_app_metadata,
             scope,
-            running=job.state == JobState.CODEGEN,
+            running=rework_round.busy or job.state == JobState.CODEGEN,
         ),
         "capability_modules": _capability_modules(),
         "artifacts": artifacts_view.load(db, storage, job_id, gen),
     }
+
+
+def _rework_round(job: Job, generated: bool) -> rework_view.ReworkRound:
+    """The operator's rework round as the job's data show it (no broker probe)."""
+    return rework_view.status(
+        job.source_app_metadata,
+        codegen_running=generated and job.state == JobState.CODEGEN,
+        now=datetime.now(UTC),
+        stall_after_s=get_settings().job_reset_min_idle_s,
+    )
 
 
 def _recovery_context(db: Session, job: Job, xcode_build: XcodeBuild | None) -> dict[str, object]:
@@ -293,10 +320,11 @@ def jobs_rework(
         return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
     from iosforge.worker.swiftui_tasks import SOURCES_NAME
 
+    round_request = _RoundRequest(request, user, db, storage, job_id, draft=text)
     if gen.sources_key.endswith(SOURCES_NAME):
-        return _enqueue_swiftui_round(db, storage, job_id, text, None)
+        return _enqueue_swiftui_round(round_request, text, None)
     log.info("jobs.rework_legacy_unsupported", job_id=str(job_id), sources=gen.sources_key)
-    return Response("Rework is not available for legacy Flutter jobs.", status_code=409)
+    return _rework_refused(round_request, "Rework is not available for legacy Flutter jobs.")
 
 
 @router.post("/jobs/{job_id}/extend-scope")
@@ -318,45 +346,141 @@ def jobs_extend_scope(
 
     if not ids or gen is None or not gen.sources_key.endswith(SOURCES_NAME):
         return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
-    return _enqueue_swiftui_round(db, storage, job_id, "", ids, actor=user.username)
+    round_request = _RoundRequest(request, user, db, storage, job_id, screens=screens.strip())
+    return _enqueue_swiftui_round(round_request, "", ids)
+
+
+@dataclass(frozen=True)
+class _RoundRequest:
+    """One Apply rework / Add screens submission, with the operator's typed input."""
+
+    request: Request
+    user: SessionData
+    db: Session
+    storage: ArtifactStorage
+    job_id: uuid.UUID
+    draft: str = ""
+    screens: str = ""
+
+
+def _rework_refused(req: _RoundRequest, message: str, *, status: int = 409) -> Response:
+    """The job page on the Rework tab with ``message`` and the operator's input kept."""
+    job = req.db.get(Job, req.job_id)
+    if job is None:
+        return Response("Not found", status_code=404)
+    ctx = _detail_context(req.request, job, req.user, req.db, req.storage)
+    ctx.update(rework_error=message, rework_draft=req.draft, screens_draft=req.screens)
+    return templates.TemplateResponse(req.request, "job_detail.html", ctx, status_code=status)
 
 
 def _enqueue_swiftui_round(
-    db: Session,
-    storage: ArtifactStorage,
-    job_id: uuid.UUID,
-    instructions: str,
-    add_screens: list[str] | None,
-    *,
-    actor: str = "",
+    req: _RoundRequest, instructions: str, add_screens: list[str] | None
 ) -> Response:
-    """Queue one rework round; a scope extension is recorded as the operator's decision."""
+    """Queue one rework round and record it; a scope extension is the operator's decision too.
+
+    The job row is locked while the busy check runs and the request is written, so a
+    double submit queues one round. The request (with the id the message carries) is
+    committed before the message is sent; a broker failure withdraws only this request.
+    """
     from iosforge.worker.swiftui_rework import rework_refusal, rework_swiftui
     from iosforge.worker.swiftui_tasks import XCODE_QUEUE
 
-    job = db.get(Job, job_id)
+    db, job_id = req.db, req.job_id
+    job = db.get(Job, job_id, with_for_update=True, populate_existing=True)
     if job is None:
+        db.rollback()
         return Response("Not found", status_code=404)
-    refusal = rework_refusal(db, job, storage)
+    current = _rework_round(job, generated=True)
+    refusal = (
+        (f"a rework round is already {current.phase}" if current.busy else None)
+        or rework_refusal(db, job, req.storage)
+        or (_screens_refusal(req.storage, job, add_screens) if add_screens else None)
+    )
     if refusal:
-        return Response(f"Rework is not possible now: {refusal}.", status_code=409)
+        db.rollback()
+        log.info("jobs.swiftui_round_refused", job_id=str(job_id), reason=refusal)
+        return _rework_refused(req, f"Rework is not possible now: {refusal}.")
+    now = datetime.now(UTC)
+    actor = req.user.username
+    summary = rework_view.summarize(instructions, add_screens)
+    meta, request_id = rework_request.new_request(
+        job.source_app_metadata, summary=summary, actor=actor, at=now
+    )
+    if add_screens:
+        meta = scope_view.record_extension(meta, add_screens, actor, now)
+    job.source_app_metadata = meta
+    db.commit()
     try:
         rework_swiftui.apply_async(
             args=[str(job_id), instructions, add_screens],
-            kwargs={"epoch": current_epoch(job)},
+            kwargs={"epoch": current_epoch(job), "request_id": request_id},
             queue=XCODE_QUEUE,
         )
-        log.info("jobs.swiftui_round_requested", job_id=str(job_id), screens=add_screens)
     except Exception as exc:
         log.error("jobs.swiftui_round_enqueue_failed", job_id=str(job_id), error=str(exc))
-        return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
-    if add_screens:
-        job.source_app_metadata = scope_view.record_extension(
-            job.source_app_metadata, add_screens, actor, datetime.now(UTC)
+        _withdraw_round(db, job_id, request_id, now.isoformat() if add_screens else None)
+        return _rework_refused(
+            req,
+            "The round could not be queued: the task broker did not accept it. "
+            "Nothing was changed; try again in a moment.",
+            status=503,
         )
+    log.info(
+        "jobs.swiftui_round_requested",
+        job_id=str(job_id),
+        request_id=request_id,
+        screens=add_screens,
+    )
+    scope_tab = add_screens and (job.source_app_metadata or {}).get("scope_status") == "approved"
+    anchor = "#t-scope" if scope_tab else "#t-rework"
+    return RedirectResponse(f"/jobs/{job_id}?rework=queued{anchor}", status_code=HTTP_303_SEE_OTHER)
+
+
+def _screens_refusal(storage: ArtifactStorage, job: Job, screens: list[str]) -> str | None:
+    """Why ``Add screens`` cannot add ``screens`` (unknown ids, all already built)."""
+    from iosforge.mvp import scope_check
+    from iosforge.worker.swiftui_tasks import effective_scope_ids
+
+    try:
+        spec = scope_check.load_full_spec(storage, str(job.id))
+    except Exception as exc:
+        log.warning("jobs.extend_spec_unreadable", job_id=str(job.id), error=str(exc))
+        return "the app spec could not be loaded, so the screen ids cannot be checked"
+    known = {str(s.get("id")) for s in spec.get("screens", []) if isinstance(s, dict)}
+    unknown = [sid for sid in screens if sid not in known]
+    if unknown:
+        listed = ", ".join(unknown[: rework_view.MAX_SCREENS_SHOWN])
+        return f"unknown screen ids {listed}; use the ids of the full app spec"
+    try:
+        built = set(effective_scope_ids(job, storage, spec, get_settings()))
+    except Exception as exc:
+        log.warning("jobs.extend_scope_unreadable", job_id=str(job.id), error=str(exc))
+        return None
+    if all(sid in built for sid in screens):
+        return "every listed screen is already in the app"
+    return None
+
+
+def _withdraw_round(
+    db: Session, job_id: uuid.UUID, request_id: str, extension_at: str | None
+) -> None:
+    """Undo only this submission's request and scope extension (the rest of meta is kept)."""
+    try:
+        db.rollback()
+        job = db.get(Job, job_id, with_for_update=True, populate_existing=True)
+        if job is None:
+            return
+        meta = rework_request.withdraw(job.source_app_metadata, request_id)
+        if meta is None:
+            db.rollback()
+            return
+        if extension_at is not None:
+            meta = scope_view.drop_extension(meta, extension_at)
+        job.source_app_metadata = meta
         db.commit()
-        return RedirectResponse(f"/jobs/{job_id}#t-scope", status_code=HTTP_303_SEE_OTHER)
-    return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
+    except Exception as exc:
+        db.rollback()
+        log.error("jobs.swiftui_round_withdraw_failed", job_id=str(job_id), error=str(exc))
 
 
 @router.post("/jobs/{job_id}/build-settings")

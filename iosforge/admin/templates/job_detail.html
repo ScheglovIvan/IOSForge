@@ -5,8 +5,9 @@
 {% block head %}
   {% set build_running = build and build.status not in ['finished', 'failed', 'canceled', 'cancelled', 'timeout', 'skipped'] %}
   {% set xcode_running = xcode_build and xcode_build.status in ['queued', 'archiving'] %}
-  {% if job.state.value not in ['done', 'failed', 'cancelled', 'needs_input'] or build_running or xcode_running %}
-  <meta http-equiv="refresh" content="8">
+  {% set round_busy = rework_round is defined and rework_round.busy %}
+  {% if not rework_error and (job.state.value not in ['done', 'failed', 'cancelled', 'needs_input'] or build_running or xcode_running or round_busy) %}
+  <meta http-equiv="refresh" content="8; url=/jobs/{{ job.id }}">
   {% endif %}
 {% endblock %}
 {% block content %}
@@ -43,17 +44,19 @@
   </div>
   {% if reset_to %}<div class="alert alert--success">Job reset by an operator; it is now <strong>{{ reset_to.replace('_', ' ') }}</strong>.</div>{% endif %}
   {% if reopened_ok %}<div class="alert alert--success">Scope re-opened with the previous selection kept. Fix the screen set on the Scope tab and approve it again.</div>{% endif %}
+  {% if rework_queued %}<div class="alert alert--success rework-flash">Rework round queued{% if rework_round is defined and rework_round.summary %}: {{ rework_round.summary }}{% endif %}. The page will update when the Mac worker picks it up.</div>{% endif %}
+  {% if rework_error %}<div class="alert alert--danger rework-flash">{{ rework_error }} Your input is kept on the Rework tab.</div>{% endif %}
 </div>
 
-{% set active = 't-build' if (signed_ok or sign_error) else ('t-scope' if scope_status == 'proposed' else 't-overview') %}
-<div class="tabs">
+{% set active = 't-rework' if rework_error else ('t-build' if (signed_ok or sign_error) else ('t-scope' if scope_status == 'proposed' else 't-overview')) %}
+<div class="tabs"{% if rework_error %} data-tab-forced="t-rework"{% elif scope_blocked %} data-tab-forced="t-scope"{% endif %}>
   <input class="tab-radio" type="radio" name="jobtab" id="t-overview" {{ 'checked' if active == 't-overview' else '' }}>
   {% if scope_status in ['proposed', 'approved'] %}<input class="tab-radio" type="radio" name="jobtab" id="t-scope" {{ 'checked' if active == 't-scope' else '' }}>{% endif %}
   <input class="tab-radio" type="radio" name="jobtab" id="t-build" {{ 'checked' if active == 't-build' else '' }}>
   {% if can_ios_build %}<input class="tab-radio" type="radio" name="jobtab" id="t-ios">{% endif %}
   <input class="tab-radio" type="radio" name="jobtab" id="t-artifacts">
   {% if gen %}<input class="tab-radio" type="radio" name="jobtab" id="t-store">
-  <input class="tab-radio" type="radio" name="jobtab" id="t-rework">{% endif %}
+  <input class="tab-radio" type="radio" name="jobtab" id="t-rework" {{ 'checked' if active == 't-rework' else '' }}>{% endif %}
 
   <nav class="tab-bar" role="tablist">
     <label for="t-overview">Overview</label>
@@ -102,7 +105,7 @@
         {% endif %}
         {% if scope_view.pending %}
         <p class="hint">Requested, not built yet: <span class="mono">{{ scope_view.pending | join(', ') }}</span>
-          {% if job.state.value == 'codegen' %}— the rework round is running.{% else %}— no round has built them; see the timeline for the last round.{% endif %}</p>
+          {% if rework_round is defined and rework_round.phase == 'queued' %}— the rework round is queued for the Mac worker.{% elif job.state.value == 'codegen' %}— the rework round is running.{% else %}— no round has built them; see the timeline for the last round.{% endif %}</p>
         {% endif %}
         {% for e in scope_view.extensions %}
         <p class="hint">Screens added{% if e.by %} by <strong style="color:var(--text);">{{ e.by }}</strong>{% endif %}{% if e.at %} on {{ e.at[:19].replace('T', ' ') }}{% endif %}:
@@ -724,27 +727,48 @@
         <p class="hint">Version {{ job.result_version }}. Describe the bugs or the changes — the native
           app is edited in place on the Mac worker, judged again and re-archived as a new version.
           Runs only when the pipeline is idle and no native build is in flight.</p>
-        {% set busy = job.state.value not in ['done', 'failed', 'needs_input']
-          or (xcode_build and xcode_build.status in ['queued', 'archiving']) %}
+        {% set rr = rework_round if rework_round is defined else none %}
+        {% set delivering = xcode_build and xcode_build.status in ['queued', 'archiving'] %}
+        {% set busy = job.state.value not in ['done', 'failed', 'needs_input'] or delivering or (rr and rr.busy) %}
+        {% if rr and rr.phase == 'running' %}
+        <div class="alert alert--info rework-status">
+          <strong>Rework round in progress</strong>{% if rr.summary %}: {{ rr.summary }}{% endif %}.
+          The Mac worker is editing, judging and storing the new version; delivery is queued after it.
+          See the Overview timeline for the stage.</div>
+        {% elif rr and rr.phase == 'queued' %}
+        <div class="alert alert--info rework-status">
+          <strong>Rework round in progress</strong> — queued{% if rr.by %} by {{ rr.by }}{% endif %} {% if rr.waited_s < 60 %}just now{% else %}{{ rr.waited_s // 60 }} min ago{% endif %}{% if rr.summary %}: {{ rr.summary }}{% endif %}.
+          Waiting for the Mac worker to pick it up; the page refreshes on its own.</div>
+        {% elif rr and rr.phase == 'stalled' %}
+        <div class="alert alert--warning rework-status">
+          Queued {{ rr.waited_s // 60 }} min ago and not started yet{% if rr.summary %}: {{ rr.summary }}{% endif %}
+          (the Mac worker may be busy). Queue it again to replace the waiting request; the old one will be skipped.</div>
+        {% elif rr and rr.phase == 'declined' %}
+        <div class="alert alert--warning rework-status">
+          The Mac worker did not run the last round{% if rr.summary %} ({{ rr.summary }}){% endif %}: {{ rr.reason }}.
+          Fix the cause and queue it again.</div>
+        {% elif delivering %}
+        <p class="hint rework-status">A native delivery is in flight; rework opens again when it finishes.</p>
+        {% endif %}
         {% else %}
         <p class="hint">This is a legacy Flutter job: it can be viewed, but not reworked or rebuilt.</p>
         {% set busy = true %}
         {% endif %}
         <form method="post" action="/jobs/{{ job.id }}/rework">
           <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-          <textarea name="instructions" rows="5"
+          <textarea name="instructions" rows="5" required
             placeholder="e.g. On the Sounds tab the slot cards overflow; the paywall Continue button does nothing; German locale is missing on Settings → Language."
-            {{ 'disabled' if busy else '' }}></textarea>
+            {{ 'disabled' if busy else '' }}>{{ rework_draft or '' }}</textarea>
           <div class="form-actions">
             <button class="btn" type="submit" {{ 'disabled' if busy else '' }}>Apply rework</button>
-            {% if busy %}<span class="hint">Pipeline is busy…</span>{% endif %}
+            {% if busy and not (swiftui and ((rr and rr.busy) or delivering)) %}<span class="hint">Pipeline is busy…</span>{% endif %}
           </div>
         </form>
         {% if swiftui %}
         <form method="post" action="/jobs/{{ job.id }}/extend-scope" style="margin-top:16px;">
           <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
           <label class="hint">Extend the scope beyond the MVP — screen ids to add (from the full app spec):</label>
-          <input type="text" name="screens" placeholder="e.g. 0009, 0012" {{ 'disabled' if busy else '' }}>
+          <input type="text" name="screens" placeholder="e.g. 0009, 0012" required value="{{ screens_draft or '' }}" {{ 'disabled' if busy else '' }}>
           <div class="form-actions">
             <button class="btn btn--ghost" type="submit" {{ 'disabled' if busy else '' }}>Add screens</button>
           </div>

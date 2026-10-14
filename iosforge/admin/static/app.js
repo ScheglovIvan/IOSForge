@@ -26,7 +26,9 @@
     } catch (e) {}
   });
 
-  // Job detail tabs: keep the active tab across the periodic meta-refresh.
+  // Job detail tabs: keep the active tab across the periodic meta-refresh. A tab chosen
+  // by the server (a refused form) or by the redirect hash wins and is remembered, since
+  // the meta-refresh reloads /jobs/<id> without the hash.
   var TAB_KEY = "iosforge-jobtab";
   function isTabRadio(el) {
     return el && el.classList && el.classList.contains("tab-radio");
@@ -35,9 +37,16 @@
     var radios = document.querySelectorAll('.tab-radio[name="jobtab"]');
     if (!radios.length) return;
     var want = null;
+    var holder = document.querySelector(".tabs[data-tab-forced]");
+    var forced = holder ? holder.getAttribute("data-tab-forced") : "";
     var h = (location.hash || "").replace("#", "");
-    if (h && isTabRadio(document.getElementById(h))) want = h;
-    if (!want) {
+    if (forced && isTabRadio(document.getElementById(forced))) want = forced;
+    else if (h && isTabRadio(document.getElementById(h))) want = h;
+    if (want) {
+      try {
+        sessionStorage.setItem(TAB_KEY, want);
+      } catch (e) {}
+    } else {
       try {
         want = sessionStorage.getItem(TAB_KEY);
       } catch (e) {}

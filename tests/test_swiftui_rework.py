@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace as NS
 from typing import Any
 
 import pytest
@@ -15,6 +17,7 @@ from iosforge.db.models import GenerationResult, Job, StageTimeline, XcodeBuild
 from iosforge.mvp import swiftui_gen, xcode
 from iosforge.mvp.paths import RunPaths
 from iosforge.mvp.swiftui_prompts import rework_prompt
+from iosforge.orchestrator import rework_request
 from iosforge.worker import swiftui_rework, swiftui_tasks
 from tests.test_feasibility import _spec_three_screens
 
@@ -126,13 +129,15 @@ class _Session:
     def __exit__(self, *exc: object) -> None:
         return None
 
-    def get(self, model: type, pk: object) -> Any:
+    def get(self, model: type, pk: object, **_kw: object) -> Any:
         if model is Job:
             return self.job
         return next((o for o in self.added if getattr(o, "id", None) == pk), None)
 
     def scalar(self, stmt: Any) -> Any:
         text = str(stmt)
+        if text.startswith("SELECT jobs.source_app_metadata"):
+            return self.job.source_app_metadata
         if "xcode_builds" in text:
             return self.active
         return self.gen
@@ -147,6 +152,9 @@ class _Session:
 
     def rollback(self) -> None:
         self.rolled_back = True
+
+    def refresh(self, obj: object, **_kw: object) -> None:
+        return None
 
 
 SPEC_KEY = "jobs/{}/app_spec/app_spec.json"
@@ -329,23 +337,33 @@ def test_effective_scope_prefers_the_recorded_one(monkeypatch: pytest.MonkeyPatc
 def _post(
     monkeypatch: pytest.MonkeyPatch, session: _Session, storage: _Storage, *, sources: str
 ) -> tuple[int, list[Any]]:
+    response, sent = _respond(monkeypatch, session, storage, sources=sources)
+    return response.status_code, sent
+
+
+def _respond(
+    monkeypatch: pytest.MonkeyPatch, session: _Session, storage: _Storage, *, sources: str
+) -> tuple[Any, list[Any]]:
     from iosforge.admin import routes_jobs
     from iosforge.admin.session import SessionData
+    from tests.test_admin_scope import _page_context
 
     sent: list[Any] = []
     monkeypatch.setattr(swiftui_rework.rework_swiftui, "apply_async", lambda **k: sent.append(k))
+    monkeypatch.setattr(routes_jobs, "_detail_context", _page_context)
     session.gen = GenerationResult(job_id=session.job.id, sources_key=sources)
+    swiftui_tasks.save_built_scope(storage, str(session.job.id), ["0000", "0001"])  # type: ignore[arg-type]
     user = SessionData(user_id="u", username="op", csrf_token="t")
     response = routes_jobs.jobs_extend_scope(
-        None,
+        NS(url=NS(path="/jobs/x/extend-scope")),  # type: ignore[arg-type]
         session.job.id,
         "t",
-        "0002, 0003",
+        "0002",
         user,
         session,
         storage,  # type: ignore[arg-type]
     )
-    return response.status_code, sent
+    return response, sent
 
 
 def test_extend_route_queues_on_the_mac_queue_and_guards(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -353,15 +371,34 @@ def test_extend_route_queues_on_the_mac_queue_and_guards(monkeypatch: pytest.Mon
     session = _Session(job)
     status, sent = _post(monkeypatch, session, storage, sources="jobs/x/sources/v2/xcode_app.zip")
     assert status == 303
+    request_id = job.source_app_metadata[rework_request.REQUEST_KEY]["id"]
     assert sent == [
-        {"args": [str(job.id), "", ["0002", "0003"]], "kwargs": {"epoch": 0}, "queue": "xcode"}
+        {
+            "args": [str(job.id), "", ["0002"]],
+            "kwargs": {"epoch": 0, "request_id": request_id},
+            "queue": "xcode",
+        }
     ]
 
+    sources = "jobs/x/sources/xcode_app.zip"
+    job.source_app_metadata = {}
     job.state = JobState.CODEGEN
-    assert _post(monkeypatch, session, storage, sources="jobs/x/sources/xcode_app.zip") == (409, [])
+    response, sent = _respond(monkeypatch, session, storage, sources=sources)
+    assert (response.status_code, sent) == (409, [])
+    assert "Rework is not possible now: a rework round is already running." in (
+        response.body.decode()
+    )
+    job.state = JobState.NEEDS_INPUT
+    job.source_app_metadata = {"scope_status": "proposed"}
+    response, sent = _respond(monkeypatch, session, storage, sources=sources)
+    assert (response.status_code, sent) == (409, [])
+    assert "the scope proposal awaits approval" in response.body.decode()
     job.state = JobState.DONE
+    job.source_app_metadata = {}
     session.active = XcodeBuild(job_id=job.id, status="queued")
-    assert _post(monkeypatch, session, storage, sources="jobs/x/sources/xcode_app.zip") == (409, [])
+    response, sent = _respond(monkeypatch, session, storage, sources=sources)
+    assert (response.status_code, sent) == (409, [])
+    assert "Rework is not possible now: a native delivery is in flight." in response.body.decode()
 
 
 def test_extend_route_rejects_bad_csrf(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -425,7 +462,7 @@ def test_extend_route_records_the_operator_decision(monkeypatch: pytest.MonkeyPa
     status, sent = _post(monkeypatch, session, storage, sources="jobs/x/sources/xcode_app.zip")
     assert status == 303 and len(sent) == 1
     [entry] = scope_view.extensions(job.source_app_metadata)
-    assert entry["screens"] == ["0002", "0003"] and entry["by"] == "op"
+    assert entry["screens"] == ["0002"] and entry["by"] == "op"
     assert job.source_app_metadata["scope_status"] == "approved"
 
 
@@ -457,3 +494,66 @@ def test_round_writes_the_functional_run_to_the_timeline(monkeypatch: pytest.Mon
     functional_row = next(r for r in rows if r.stage.value == "verify")
     assert functional_row.finished_at is not None and functional_row.duration_ms is not None
     assert functional_row.error == ("functional: failed · 1/2 checks passed · failing: remote_api")
+
+
+def _with_request(job: Job) -> str:
+    meta, request_id = rework_request.new_request(
+        job.source_app_metadata, summary="“fix it”", actor="op", at=datetime.now(UTC)
+    )
+    job.source_app_metadata = meta
+    return request_id
+
+
+def test_round_of_the_current_request_runs_and_marks_it_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job, storage = _job()
+    session = _Session(job, GenerationResult(job_id=job.id, sources_key="jobs/x/s.zip"))
+    seen = _wire(monkeypatch, job, storage, session)
+    request_id = _with_request(job)
+
+    out = swiftui_rework.rework_swiftui.run(str(job.id), "fix it", request_id=request_id)
+
+    assert "reworked (v3)" in out and seen["rounds"] == ["fix it"]
+    assert job.source_app_metadata[rework_request.REQUEST_KEY]["started"] is True
+    assert job.state == JobState.DONE
+
+
+def test_waiting_message_of_a_replaced_request_is_a_no_op(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job, storage = _job()
+    session = _Session(job, GenerationResult(job_id=job.id, sources_key="jobs/x/s.zip"))
+    seen = _wire(monkeypatch, job, storage, session)
+    old_id = _with_request(job)
+    new_id = _with_request(job)
+    before = dict(job.source_app_metadata)
+
+    out = swiftui_rework.rework_swiftui.run(str(job.id), "fix it", request_id=old_id)
+
+    assert "stale rework request" in out
+    assert seen["claims"] == 0 and seen["rounds"] == [] and session.added == []
+    assert job.source_app_metadata == before and job.state == JobState.DONE
+    out = swiftui_rework.rework_swiftui.run(str(job.id), "fix it", request_id=new_id)
+    assert "reworked" in out and seen["rounds"] == ["fix it"]
+
+
+def test_round_whose_request_is_replaced_mid_run_restores_the_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job, storage = _job()
+    session = _Session(job, GenerationResult(job_id=job.id, sources_key="jobs/x/s.zip"))
+    seen = _wire(monkeypatch, job, storage, session)
+    request_id = _with_request(job)
+
+    def verify(*a: Any, **k: Any) -> dict[str, Any]:
+        _with_request(job)
+        return {"compliance_score": 0.9}
+
+    monkeypatch.setattr(swiftui_rework.compliance, "verify_ios", verify)
+    out = swiftui_rework.rework_swiftui.run(str(job.id), "fix it", request_id=request_id)
+
+    assert "a newer rework request replaced this round" in out
+    assert job.state == JobState.DONE and job.result_version == 2 and seen["queued"] == []
+    assert swiftui_tasks.sources_key(str(job.id)) in storage.objects
+    assert not any("/v3/" in key for key in storage.objects)

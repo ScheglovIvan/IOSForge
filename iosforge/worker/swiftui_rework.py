@@ -31,6 +31,7 @@ from iosforge.db.models import GenerationResult, Job, StageTimeline
 from iosforge.db.session import get_sessionmaker
 from iosforge.mvp import compliance, simulator, swiftui_gen
 from iosforge.mvp.paths import RunPaths
+from iosforge.orchestrator import rework_request
 from iosforge.orchestrator.recovery import is_stale, superseded
 from iosforge.storage.client import ArtifactStorage, S3ArtifactStorage, build_key
 from iosforge.worker.swiftui_tasks import (
@@ -118,6 +119,37 @@ def _discarded(db: Session, job: Job, epoch: int | None) -> bool:
     return True
 
 
+def _note_request(db: Session, job: Job, request_id: str | None, **fields: object) -> None:
+    """Set ``fields`` on the job's request ``request_id`` if it is still the current one.
+
+    The row is re-read under a lock and only the request entry changes, so a run epoch
+    or another key written meanwhile is kept. The caller commits.
+    """
+    if request_id is None:
+        return
+    db.refresh(job, with_for_update=True)
+    updated = rework_request.mark(job.source_app_metadata, request_id, **fields)
+    if updated is not None:
+        job.source_app_metadata = updated
+
+
+def _decline(db: Session, job: Job, request_id: str | None, reason: str) -> str:
+    """Record why the round did not run on its request (shown on the Rework tab)."""
+    _note_request(db, job, request_id, declined=reason[: rework_request.REASON_LIMIT])
+    db.commit()
+    log.info("swiftui.rework.declined", job_id=str(job.id), request_id=request_id, reason=reason)
+    return reason
+
+
+def _require_current_request(db: Session, job_id: uuid.UUID, request_id: str | None) -> None:
+    """Raise when a newer operator request replaced this round (read from the committed row)."""
+    if request_id is None:
+        return
+    meta = db.scalar(select(Job.source_app_metadata).where(Job.id == job_id))
+    if rework_request.is_stale(meta, request_id):
+        raise RuntimeError("a newer rework request replaced this round")
+
+
 @celery_app.task(base=PipelineTask, name="iosforge.rework_swiftui", bind=True, queue=XCODE_QUEUE)
 def rework_swiftui(
     self: Any,
@@ -125,11 +157,15 @@ def rework_swiftui(
     instructions: str = "",
     add_screens: list[str] | None = None,
     epoch: int | None = None,
+    request_id: str | None = None,
 ) -> str:
     """Run one operator round over the job's stored SwiftUI app, then queue delivery.
 
     A message queued under an older run epoch (superseded by an operator reset) does
-    nothing, both on start and before the final commit.
+    nothing, both on start and before the final commit. A message whose ``request_id``
+    is no longer the job's current rework request (the operator queued the round again)
+    is skipped on start; a round whose request is replaced while it runs fails before
+    storing a version and restores the job. ``None`` (older messages) skips both checks.
     """
     settings = get_settings()
     storage = S3ArtifactStorage()
@@ -141,26 +177,35 @@ def rework_swiftui(
         if is_stale(job, epoch):
             log.info("swiftui.rework.stale_epoch", job_id=job_id, epoch=epoch)
             return f"job {job_id} not reworked: superseded (epoch {epoch})"
+        if rework_request.is_stale(job.source_app_metadata, request_id):
+            log.info("swiftui.rework.stale_request", job_id=job_id, request_id=request_id)
+            return f"job {job_id} not reworked: stale rework request {request_id}"
         refusal = rework_refusal(db, job, storage)
         if refusal:
-            return f"job {job_id} cannot be reworked: {refusal}"
+            return f"job {job_id} cannot be reworked: {_decline(db, job, request_id, refusal)}"
         added = _additions(job, storage, list(add_screens or []), settings)
         if not instructions.strip() and not added:
-            return f"job {job_id}: nothing to rework"
+            reason = "nothing to rework: the screens are unknown or already in the app"
+            return f"job {job_id}: {_decline(db, job, request_id, reason)}"
         try:
             simulator.require_toolchain()
             udid = simulator.resolve_udid(settings.ios_simulator_udid)
         except simulator.SimulatorUnavailable as exc:
-            return f"job {job_id} cannot be reworked here: {exc}"
+            return (
+                f"job {job_id} cannot be reworked here: {_decline(db, job, request_id, str(exc))}"
+            )
         previous = job.state
         if not claim_job(db, job.id, REWORKABLE, JobState.CODEGEN):
-            return f"job {job_id} cannot be reworked: another round claimed it"
+            reason = "another round claimed it"
+            return f"job {job_id} cannot be reworked: {_decline(db, job, request_id, reason)}"
         if active_build(db, job.id) is not None:
             job.state = previous
             db.commit()
-            return f"job {job_id} cannot be reworked: a native delivery is in flight"
+            reason = "a native delivery is in flight"
+            return f"job {job_id} cannot be reworked: {_decline(db, job, request_id, reason)}"
         stage = StageTimeline(job_id=job.id, stage=Stage.CODEGEN, started_at=utcnow())
         db.add(stage)
+        _note_request(db, job, request_id, started=True)
         db.commit()
         stage_id = stage.id
         try:
@@ -188,12 +233,14 @@ def rework_swiftui(
                 )
                 if _discarded(db, job, epoch):
                     return f"job {job_id} rework discarded: superseded (epoch {epoch})"
+                _require_current_request(db, job.id, request_id)
                 store_generated_screens(storage, job_id, paths)
                 version = (job.result_version or 1) + 1
                 key = store_sources(storage, job_id, paths.xcode_app, version=version)
                 save_built_scope(storage, job_id, scope)
             if _discarded(db, job, epoch):
                 return f"job {job_id} rework discarded: superseded (epoch {epoch})"
+            _require_current_request(db, job.id, request_id)
             job.result_version = version
             record_version(db, job, key, report, version)
             stage.finished_at = utcnow()

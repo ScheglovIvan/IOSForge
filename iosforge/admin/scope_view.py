@@ -85,6 +85,20 @@ def record_extension(
     return updated
 
 
+def drop_extension(meta: dict[str, Any], at: str) -> dict[str, Any]:
+    """A copy of ``meta`` without the newest ``Add screens`` request recorded ``at``."""
+    raw = meta.get(EXTENSIONS_KEY)
+    if not isinstance(raw, list):
+        return dict(meta)
+    entries = list(raw)
+    for index in range(len(entries) - 1, -1, -1):
+        entry = entries[index]
+        if isinstance(entry, dict) and entry.get("at") == at:
+            del entries[index]
+            break
+    return {**meta, EXTENSIONS_KEY: entries}
+
+
 def read_built(storage: ArtifactStorage, job_id: str) -> list[str] | None:
     """Screen ids of the stored app (None when no build recorded them or unreadable)."""
     from iosforge.worker.swiftui_tasks import built_scope_key
