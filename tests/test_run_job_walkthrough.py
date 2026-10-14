@@ -156,5 +156,5 @@ def test_analysis_only_runs_filter_and_analyze_then_stops(
 
 
 def test_setting_defaults_false() -> None:
-    assert Settings().pipeline_stop_after_walkthrough is False
-    assert Settings().pipeline_stop_after_analyze is False
+    assert Settings(_env_file=None).pipeline_stop_after_walkthrough is False
+    assert Settings(_env_file=None).pipeline_stop_after_analyze is False

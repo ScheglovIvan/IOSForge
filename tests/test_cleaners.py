@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import plistlib
 from pathlib import Path
 from typing import Any
 
@@ -219,9 +220,26 @@ def test_privacy_policy_covers_the_cleaner_permissions() -> None:
     assert "NSPhotoLibraryUsageDescription" in practices
 
 
+def _english_simulator(udid: str) -> bool:
+    """The driver taps the English system-alert buttons. On another language XCUITest's
+    default handler taps "Don't Allow" and the denial sticks in the simulator's TCC."""
+    prefs = (
+        Path.home()
+        / f"Library/Developer/CoreSimulator/Devices/{udid}/data/Library/Preferences"
+        / ".GlobalPreferences.plist"
+    )
+    try:
+        languages = plistlib.loads(prefs.read_bytes()).get("AppleLanguages") or ["en"]
+    except (OSError, plistlib.InvalidFileException):
+        return True
+    return str(languages[0]).startswith("en")
+
+
 def _run(tmp_path: Path, module: str, kind: str, screen: str) -> dict[str, Any]:
     udid = _first_iphone()
     assert udid is not None
+    if not _english_simulator(udid):
+        pytest.skip(f"simulator {udid} is not in English (set IOSFORGE_TEST_SIMULATOR_UDID)")
     spec = _spec(module, kind)
     paths = RunPaths.create(tmp_path / "runs")
     paths.app_spec_json.write_text(json.dumps(spec))

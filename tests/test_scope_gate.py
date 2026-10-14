@@ -312,4 +312,4 @@ def test_run_job_scope_gate_off_keeps_prior_behaviour(monkeypatch: pytest.Monkey
 
 
 def test_scope_gate_setting_default_false() -> None:
-    assert Settings().pipeline_scope_gate is False
+    assert Settings(_env_file=None).pipeline_scope_gate is False

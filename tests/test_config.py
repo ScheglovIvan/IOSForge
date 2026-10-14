@@ -38,7 +38,7 @@ def _clear_settings_cache(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_defaults_match_decisions() -> None:
     """Placeholder defaults come from DECISIONS Q1/Q3."""
-    settings = Settings()
+    settings = Settings(_env_file=None)
     assert settings.env == "local"
     assert settings.debug is False
     assert settings.compliance_threshold == 0.95
@@ -62,7 +62,7 @@ def test_reads_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("COMPLIANCE_THRESHOLD", "0.9")
     monkeypatch.setenv("WALKTHROUGH_MAX_SCREENS", "12")
 
-    settings = Settings()
+    settings = Settings(_env_file=None)
 
     assert settings.database_url == "postgresql+psycopg://u:p@db:5432/x"
     assert settings.redis_url == "redis://cache:6379/1"
@@ -96,7 +96,7 @@ def test_reads_from_toml_config_file(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     # Env wins over the TOML file for this one field.
     monkeypatch.setenv("WALKTHROUGH_MAX_SCREENS", "99")
 
-    settings = Settings()
+    settings = Settings(_env_file=None)
 
     assert settings.env == "ci"
     assert settings.compliance_threshold == 0.85
@@ -110,6 +110,6 @@ def test_get_settings_is_cached() -> None:
 
 def test_secrets_not_hardcoded() -> None:
     """Secret fields default to empty — they must come from env/secret store."""
-    settings = Settings()
+    settings = Settings(_env_file=None)
     assert settings.s3_access_key_id == ""
     assert settings.s3_secret_access_key == ""

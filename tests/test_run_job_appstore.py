@@ -78,7 +78,9 @@ def test_appstore_archive_analysis_then_done(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(run_job_module, "get_sessionmaker", lambda: lambda: session)
     monkeypatch.setattr(run_job_module, "S3ArtifactStorage", _FakeStorage)
     # analysis-only mode: no auto-chain into frontend build
-    monkeypatch.setattr(run_job_module, "get_settings", lambda: Settings(auto_build_frontend=False))
+    monkeypatch.setattr(
+        run_job_module, "get_settings", lambda: Settings(_env_file=None, auto_build_frontend=False)
+    )
 
     monkeypatch.setattr(
         appstore,
@@ -126,7 +128,7 @@ def test_appstore_analysis_autochains_frontend_build(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(run_job_module, "get_sessionmaker", lambda: lambda: session)
     monkeypatch.setattr(run_job_module, "S3ArtifactStorage", _FakeStorage)
     monkeypatch.setattr(
-        run_job_module, "get_settings", lambda: Settings()
+        run_job_module, "get_settings", lambda: Settings(_env_file=None)
     )  # auto_build_frontend=True
 
     monkeypatch.setattr(
@@ -185,7 +187,7 @@ def test_appstore_without_archive_fails(monkeypatch: pytest.MonkeyPatch) -> None
     session = _NoArchiveSession(job, archive=DataArchiveArtifact())
     monkeypatch.setattr(run_job_module, "get_sessionmaker", lambda: lambda: session)
     monkeypatch.setattr(run_job_module, "S3ArtifactStorage", _FakeStorage)
-    monkeypatch.setattr(run_job_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(run_job_module, "get_settings", lambda: Settings(_env_file=None))
 
     result = run_job_module.run_job.run(str(job.id))
     assert job.state is JobState.FAILED
