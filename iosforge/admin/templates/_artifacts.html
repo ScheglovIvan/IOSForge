@@ -1,0 +1,110 @@
+{# Artifacts tab: original vs generated screens, Vision Judge scores, functional checks. #}
+{% set obj = '/jobs/' ~ job.id ~ '/artifacts/object?key=' %}
+{% set J = A.judge if A else none %}
+<div class="card">
+  <h3>Vision Judge <span class="muted" style="font-weight:400;">— last run</span></h3>
+  {% if not A or not A.built %}
+    <p class="muted">No build yet. The original screens are listed below; generated renders appear after the SwiftUI build.</p>
+  {% elif not J %}
+    <p class="muted">This build has no Vision Judge report.</p>
+  {% else %}
+    <div class="table-wrap">
+      <table class="kv judge-summary">
+        <tr><th>Status</th><td><span class="pill pill--{{ J.tone }}">{{ J.status or '—' }}</span>
+          {% if J.stop_reason %}<span class="muted"> · stopped: {{ J.stop_reason.replace('_', ' ') }}</span>{% endif %}</td></tr>
+        <tr><th>Compliance score</th><td><strong>{{ '%.1f%%'|format(J.compliance_score * 100) if J.compliance_score is not none else '—' }}</strong>
+          {% if J.threshold is not none %}<span class="muted"> (bar {{ '%.0f%%'|format(J.threshold * 100) }})</span>{% endif %}</td></tr>
+        <tr><th>Structure</th><td>{{ '%.2f'|format(J.structure) if J.structure is not none else '—' }}</td></tr>
+        <tr><th>Coverage</th><td>{{ '%.2f'|format(J.coverage) if J.coverage is not none else '—' }}</td></tr>
+        <tr><th>Flows</th><td>{{ '%.2f'|format(J.flows) if J.flows is not none else '—' }}</td></tr>
+        <tr><th>Divergence</th><td>{{ '%.2f'|format(J.divergence) if J.divergence is not none else '—' }}</td></tr>
+        <tr><th>Iteration / version</th><td>{{ J.iteration if J.iteration is not none else '—' }} / {{ ('v' ~ J.version) if J.version is not none else '—' }}</td></tr>
+      </table>
+    </div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Screens <span class="muted" style="font-weight:400;">— original | generated</span></h3>
+  {% if A and A.screens %}
+  <div class="table-wrap">
+    <table class="artifact-grid">
+      <thead><tr><th>ID</th><th>Name</th><th>Original</th><th>Generated</th><th>Score</th><th>Diffs</th></tr></thead>
+      <tbody>
+      {% for s in A.screens %}
+        <tr id="screen-{{ s.screen_id }}">
+          <td class="mono">{{ s.screen_id }}</td>
+          <td>{{ s.name or '—' }}</td>
+          <td class="shot">
+            {% if s.original_key %}
+            <a href="{{ obj }}{{ s.original_key | urlencode }}" target="_blank" rel="noopener">
+              <img src="{{ obj }}{{ s.original_key | urlencode }}&w=160" loading="lazy" decoding="async" alt="original {{ s.screen_id }}"></a>
+            {% else %}<span class="muted">no capture</span>{% endif %}
+          </td>
+          <td class="shot">
+            {% if s.generated_key %}
+            <a href="{{ obj }}{{ s.generated_key | urlencode }}" target="_blank" rel="noopener">
+              <img src="{{ obj }}{{ s.generated_key | urlencode }}&w=160" loading="lazy" decoding="async" alt="generated {{ s.screen_id }}"></a>
+            {% elif A.built %}<span class="pill pill--danger">screen not generated</span>
+            {% else %}<span class="muted">no build yet</span>{% endif %}
+          </td>
+          <td class="mono">{{ '%.2f'|format(s.score) if s.score is not none else '—' }}
+            {% if s.divergence is not none %}<br><span class="muted" style="font-size:11px;">div {{ '%.2f'|format(s.divergence) }}</span>{% endif %}</td>
+          <td>
+            {% if s.diffs %}
+            <ul class="diffs">{% for d in s.diffs %}<li>{{ d }}</li>{% endfor %}</ul>
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    <p class="muted">No screens captured yet.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Functional checks <span class="muted" style="font-weight:400;">— against the capability mocks</span></h3>
+  {% set F = A.functional if A else none %}
+  {% if not A or not A.built %}
+    <p class="muted">No build yet.</p>
+  {% elif not F %}
+    <p class="muted">No functional run recorded for this build.</p>
+  {% else %}
+    <p class="hint">Overall:
+      <span class="pill pill--{{ 'success' if F.ok else ('warning' if F.infra_error else 'danger') }}">{{ 'ok' if F.ok else ('infra error' if F.infra_error else 'failed') }}</span>
+      {% if F.skipped %} · {{ F.skipped }}{% endif %}</p>
+    {% if F.error %}<div class="alert alert--danger">{{ F.error }}</div>{% endif %}
+    {% if F.checks %}
+    <div class="table-wrap">
+      <table class="functional-checks">
+        <thead><tr><th>Check</th><th>Screen</th><th>Status</th><th>UI flow</th><th>Details</th></tr></thead>
+        <tbody>
+        {% for c in F.checks %}
+          <tr>
+            <td class="mono">{{ c.name }}</td>
+            <td class="mono">{{ c.screen_id }}</td>
+            <td><span class="pill pill--{{ 'success' if c.passed else ('warning' if c.infra_error else 'danger') }}">{{ c.status }}</span></td>
+            <td>{{ 'passed' if c.ui_passed else 'failed' }}</td>
+            <td>
+              <details>
+                <summary>{{ c.message or ('all effects recorded' if c.passed else 'details') }}</summary>
+                <table class="kv">
+                  <tr><th>Flow</th><td>{{ c.flow or '—' }}</td></tr>
+                  <tr><th>Events</th><td class="mono">{{ c.events | join(', ') or '—' }}</td></tr>
+                  <tr><th>Missing events</th><td class="mono">{{ c.missing_events | join(', ') or '—' }}</td></tr>
+                  <tr><th>Infra error</th><td>{{ 'yes' if c.infra_error else 'no' }}</td></tr>
+                  {% if c.message %}<tr><th>Message</th><td><pre class="mono">{{ c.message }}</pre></td></tr>{% endif %}
+                </table>
+              </details>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  {% endif %}
+</div>

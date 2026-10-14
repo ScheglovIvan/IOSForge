@@ -57,6 +57,7 @@ log = get_logger("worker.swiftui")
 
 SOURCES_NAME = "xcode_app.zip"
 BUILT_SCOPE_NAME = "swiftui_scope.json"
+GENERATED_SCREENS_KIND = "generated_screenshots"
 LOG_LIMIT = 200_000
 XCODE_QUEUE = "xcode"
 ACTIVE_STATUSES = ("queued", "archiving")
@@ -90,6 +91,19 @@ def store_sources(
     versioned = build_key(job_id=job_id, kind="sources", name=f"v{version}/{SOURCES_NAME}")
     storage.put(versioned, buffer.getvalue(), content_type="application/zip")
     return versioned
+
+
+def generated_screen_key(job_id: str, screen_id: str) -> str:
+    """Storage key of the Vision Judge's simulator render of one generated screen."""
+    return build_key(job_id=job_id, kind=GENERATED_SCREENS_KIND, name=f"{screen_id}.png")
+
+
+def store_generated_screens(storage: ArtifactStorage, job_id: str, paths: RunPaths) -> None:
+    """Upload the latest simulator renders so the admin shows the app that was judged."""
+    for png in sorted(paths.generated_screens_dir.glob("*.png")):
+        storage.put(
+            generated_screen_key(job_id, png.stem), png.read_bytes(), content_type="image/png"
+        )
 
 
 def hydrate_sources(storage: ArtifactStorage, job_id: str, app_dir: Path) -> None:

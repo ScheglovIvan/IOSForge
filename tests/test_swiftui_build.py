@@ -101,7 +101,7 @@ def _wire(
         return report
 
     monkeypatch.setattr(swiftui_build.compliance, "refine_ios_until_complete", refine)
-    monkeypatch.setattr(swiftui_build, "_store_screens", lambda *a: None)
+    monkeypatch.setattr(swiftui_build, "store_generated_screens", lambda *a: None)
     monkeypatch.setattr(
         swiftui_build,
         "store_sources",

@@ -31,7 +31,7 @@ from iosforge.db.session import get_sessionmaker
 from iosforge.mvp import build_profile, compliance, simulator, swiftui_gen
 from iosforge.mvp.paths import RunPaths
 from iosforge.orchestrator.recovery import is_stale, superseded
-from iosforge.storage.client import S3ArtifactStorage, build_key
+from iosforge.storage.client import S3ArtifactStorage
 from iosforge.worker.swiftui_tasks import (
     XCODE_QUEUE,
     claim_job,
@@ -40,6 +40,7 @@ from iosforge.worker.swiftui_tasks import (
     queue_delivery,
     save_built_scope,
     scope_ids,
+    store_generated_screens,
     store_sources,
 )
 
@@ -149,15 +150,6 @@ def _discarded(db: Session, job: Job, epoch: int | None) -> bool:
     return True
 
 
-def _store_screens(storage: Any, job_id: str, paths: RunPaths) -> None:
-    for png in sorted(paths.generated_screens_dir.glob("*.png")):
-        storage.put(
-            build_key(job_id=job_id, kind="generated_screenshots", name=png.name),
-            png.read_bytes(),
-            content_type="image/png",
-        )
-
-
 @celery_app.task(base=PipelineTask, name="iosforge.build_swiftui", bind=True, queue=XCODE_QUEUE)
 def build_swiftui(self: Any, job_id: str, epoch: int | None = None) -> str:
     """Generate, refine and store the job's SwiftUI app, then queue its delivery.
@@ -222,7 +214,7 @@ def build_swiftui(self: Any, job_id: str, epoch: int | None = None) -> str:
                 )
                 if _discarded(db, job, epoch):
                     return f"job {job_id} build discarded: superseded (epoch {epoch})"
-                _store_screens(storage, job_id, paths)
+                store_generated_screens(storage, job_id, paths)
                 version = job.result_version or 1
                 key = store_sources(storage, job_id, paths.xcode_app, version=version)
                 save_built_scope(storage, job_id, scope)

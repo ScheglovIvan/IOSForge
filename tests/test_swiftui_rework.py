@@ -399,3 +399,19 @@ def test_delivery_queued_before_the_claim_releases_the_job(
     out = swiftui_rework.rework_swiftui.run(str(job.id), "fix it")
     assert "delivery is in flight" in out and job.state == JobState.DONE
     assert seen["rounds"] == []
+
+
+def test_round_uploads_the_renders_it_judged(monkeypatch: pytest.MonkeyPatch) -> None:
+    job, storage = _job()
+    session = _Session(job, GenerationResult(job_id=job.id, sources_key="jobs/x/s.zip"))
+    _wire(monkeypatch, job, storage, session)
+
+    def verify(paths: RunPaths, *a: Any, **k: Any) -> dict[str, Any]:
+        (paths.generated_screens_dir / "0001.png").write_bytes(b"NEW-RENDER")
+        return {"compliance_score": 0.9}
+
+    monkeypatch.setattr(swiftui_rework.compliance, "verify_ios", verify)
+    swiftui_rework.rework_swiftui.run(str(job.id), "bigger buttons")
+
+    key = swiftui_tasks.generated_screen_key(str(job.id), "0001")
+    assert storage.objects[key] == b"NEW-RENDER"

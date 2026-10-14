@@ -44,6 +44,7 @@ from iosforge.worker.swiftui_tasks import (
     queue_delivery,
     save_built_scope,
     sources_key,
+    store_generated_screens,
     store_sources,
 )
 
@@ -185,6 +186,7 @@ def rework_swiftui(
                 )
                 if _discarded(db, job, epoch):
                     return f"job {job_id} rework discarded: superseded (epoch {epoch})"
+                store_generated_screens(storage, job_id, paths)
                 version = (job.result_version or 1) + 1
                 key = store_sources(storage, job_id, paths.xcode_app, version=version)
                 save_built_scope(storage, job_id, scope)

@@ -268,6 +268,7 @@ legend { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; co
 #t-scope:checked    ~ .tab-bar label[for="t-scope"],
 #t-build:checked    ~ .tab-bar label[for="t-build"],
 #t-ios:checked      ~ .tab-bar label[for="t-ios"],
+#t-artifacts:checked ~ .tab-bar label[for="t-artifacts"],
 #t-store:checked    ~ .tab-bar label[for="t-store"],
 #t-rework:checked   ~ .tab-bar label[for="t-rework"] {
   color: var(--accent); background: var(--surface);
@@ -277,6 +278,7 @@ legend { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; co
 #t-scope:checked    ~ .tab-panels .panel-scope,
 #t-build:checked    ~ .tab-panels .panel-build,
 #t-ios:checked      ~ .tab-panels .panel-ios,
+#t-artifacts:checked ~ .tab-panels .panel-artifacts,
 #t-store:checked    ~ .tab-panels .panel-store,
 #t-rework:checked   ~ .tab-panels .panel-rework { display: block; }
 
@@ -284,6 +286,7 @@ legend { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; co
 #t-scope:focus-visible    ~ .tab-bar label[for="t-scope"],
 #t-build:focus-visible    ~ .tab-bar label[for="t-build"],
 #t-ios:focus-visible      ~ .tab-bar label[for="t-ios"],
+#t-artifacts:focus-visible ~ .tab-bar label[for="t-artifacts"],
 #t-store:focus-visible    ~ .tab-bar label[for="t-store"],
 #t-rework:focus-visible   ~ .tab-bar label[for="t-rework"] {
   box-shadow: 0 0 0 3px var(--accent-ring);
@@ -315,6 +318,15 @@ legend { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; co
 .thumb .cap { font-size: 12px; color: var(--text-muted); margin: 6px 0 4px; }
 .gallery { display: flex; flex-wrap: wrap; gap: 8px; }
 .gallery img { max-width: 200px; border: 1px solid var(--border); border-radius: 8px; }
+
+/* ---------- artifacts tab ---------- */
+.artifact-grid td { vertical-align: top; }
+.artifact-grid td.shot { width: 172px; }
+.artifact-grid td.shot img { width: 160px; display: block; border: 1px solid var(--border); border-radius: 8px; }
+.artifact-grid .diffs { margin: 0; padding-left: 16px; font-size: 12.5px; }
+.functional-checks td { vertical-align: top; }
+.functional-checks details summary { cursor: pointer; }
+.functional-checks pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 11.5px; }
 
 .ios-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--success-text); font-weight: 600; }
 

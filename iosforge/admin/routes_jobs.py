@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from starlette.responses import PlainTextResponse, RedirectResponse, Response
 from starlette.status import HTTP_303_SEE_OTHER
 
-from iosforge.admin import archive_validate, csrf, thumbs
+from iosforge.admin import archive_validate, artifacts_view, csrf, thumbs
 from iosforge.admin.appstore_url import AppStoreUrlError
 from iosforge.admin.appstore_url import parse as parse_appstore_url
 from iosforge.admin.deps import get_db, get_storage, require_user
@@ -204,6 +204,7 @@ def _detail_context(
         "scope_status": scope_status,
         "scope": _load_scope(storage, job_id, scope_status),
         "capability_modules": _capability_modules(),
+        "artifacts": artifacts_view.load(db, storage, job_id, gen),
     }
 
 
@@ -1184,10 +1185,8 @@ def artifact_object(
     user: SessionData = Depends(require_user),
     storage: ArtifactStorage = Depends(get_storage),
 ) -> Response:
-    # Authorization: the key MUST live under this job's prefix — prevents reading
-    # another job's artifacts by passing an arbitrary key.
-    if not key.startswith(f"jobs/{job_id}/"):
-        return Response("Forbidden", status_code=403)
+    if not artifacts_view.owned_key(job_id, key):
+        return Response("Not found", status_code=404)
     try:
         data = storage.get(key)
     except Exception:
@@ -1217,7 +1216,7 @@ def artifact_object(
         media, disposition = "application/zip", "attachment"
     else:
         media, disposition = "application/octet-stream", "attachment"
-    headers = {"Content-Disposition": f'{disposition}; filename="{filename}"'}
+    headers = {"Content-Disposition": artifacts_view.content_disposition(disposition, filename)}
     if key.endswith(".png"):
         headers["Cache-Control"] = "private, max-age=604800"
         headers["ETag"] = f'"{thumbs.etag(key, 0, len(data))}"'

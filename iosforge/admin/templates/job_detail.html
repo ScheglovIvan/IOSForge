@@ -51,6 +51,7 @@
   {% if scope_status in ['proposed', 'approved'] %}<input class="tab-radio" type="radio" name="jobtab" id="t-scope" {{ 'checked' if active == 't-scope' else '' }}>{% endif %}
   <input class="tab-radio" type="radio" name="jobtab" id="t-build" {{ 'checked' if active == 't-build' else '' }}>
   {% if can_ios_build %}<input class="tab-radio" type="radio" name="jobtab" id="t-ios">{% endif %}
+  <input class="tab-radio" type="radio" name="jobtab" id="t-artifacts">
   {% if gen %}<input class="tab-radio" type="radio" name="jobtab" id="t-store">
   <input class="tab-radio" type="radio" name="jobtab" id="t-rework">{% endif %}
 
@@ -59,6 +60,7 @@
     {% if scope_status in ['proposed', 'approved'] %}<label for="t-scope">Scope{% if scope_status == 'proposed' %} <span class="tcount">!</span>{% endif %}</label>{% endif %}
     <label for="t-build">Build &amp; sign</label>
     {% if can_ios_build %}<label for="t-ios">iOS build</label>{% endif %}
+    <label for="t-artifacts">Artifacts{% if artifacts is defined and artifacts.screens %} <span class="tcount">{{ artifacts.screens|length }}</span>{% endif %}</label>
     {% if gen %}<label for="t-store">Store assets{% if store_slides %} <span class="tcount">{{ store_slides|length }}</span>{% endif %}</label>
     <label for="t-rework">Rework</label>{% endif %}
   </nav>
@@ -403,6 +405,11 @@
       {% endif %}
     </section>
     {% endif %}
+
+    <section class="tab-panel panel-artifacts" role="tabpanel" aria-label="Artifacts">
+      {% set A = artifacts if artifacts is defined else none %}
+      {% include "_artifacts.html" %}
+    </section>
 
     {% if gen %}
     <section class="tab-panel panel-store" role="tabpanel" aria-label="Store assets">
