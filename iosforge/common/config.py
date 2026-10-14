@@ -282,7 +282,10 @@ class Settings(BaseSettings):
     # Claude Code CLI as before; "codex" runs the Codex CLI (OpenAI, e.g. gpt-6-astra).
     codegen_agent: CodegenAgent = "claude"
     claude_bin: str = "claude"
+    # codex runs only inside this image (docker/codex/Dockerfile); codex_bin is its path there.
     codex_bin: str = "codex"
+    codex_image: str = "iosforge-codex:0.153.4"
+    docker_bin: str = "docker"
     codex_model: str = "gpt-6-astra"
     # Empty = the model's default reasoning effort (low for gpt-6-astra).
     codex_reasoning_effort: CodexReasoningEffort | None = None

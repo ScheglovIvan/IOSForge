@@ -1,16 +1,16 @@
-"""The coding-agent seam (mvp/agent_backend.py): claude as before, codex via a fake binary.
+"""The coding-agent seam (mvp/agent_backend.py): claude as before, codex via a fake docker.
 
-No real agent runs here: claude is replaced at ``agent_backend.subprocess.run`` and codex by a
-fake executable that records its argv/stdin, writes the result file into ``-C <ws>`` the way
-the real agent would, and prints chatter on stdout that no caller may depend on.
+No real agent runs here: claude is replaced at ``agent_backend.subprocess.run``; codex runs
+through a fake ``docker`` that answers ``info``/``image inspect``/``kill`` and, for ``run``,
+plays the codex CLI inside the container: it records the docker and codex argv and stdin,
+writes the result file into ``-C <ws>`` the way the real agent would, and prints chatter on
+stdout that no caller may depend on. The real container is probed in
+``test_agent_backend_isolation.py``.
 """
 
 from __future__ import annotations
 
-import json
 import subprocess
-import sys
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -28,31 +28,8 @@ from iosforge.mvp import (
     screen_filter,
 )
 from iosforge.mvp.agent_backend import AgentResult
-from tests.test_ad_analysis import _seed as _seed_ads
-from tests.test_feasibility import _proposal_payload, _spec_three_screens, _write_spec
-from tests.test_mvp_analyze import _VALID_APP_SPEC
-from tests.test_mvp_analyze import _make_paths as _analyze_paths
 from tests.test_mvp_compliance import _WEIGHTS
 from tests.test_mvp_compliance import _make_paths as _compliance_paths
-from tests.test_screen_filter import _seed_run
-
-_FAKE_CODEX = """#!{python}
-import json, os, sys
-argv = sys.argv[1:]
-ws = argv[argv.index("-C") + 1]
-last = argv[argv.index("-o") + 1]
-prompt = sys.stdin.read()
-with open(os.environ["FAKE_CODEX_LOG"], "w") as fh:
-    json.dump({{"argv": argv, "stdin": prompt, "cwd": os.getcwd()}}, fh)
-name = os.environ.get("FAKE_CODEX_FILE")
-if name:
-    with open(os.path.join(ws, name), "w") as fh:
-        fh.write(os.environ["FAKE_CODEX_PAYLOAD"])
-with open(last, "w") as fh:
-    fh.write("done: wrote " + (name or "nothing"))
-print("codex chatter that is not JSON {{")
-sys.exit(int(os.environ.get("FAKE_CODEX_EXIT", "0")))
-"""
 
 
 def _settings(**kwargs: Any) -> Settings:
@@ -68,29 +45,10 @@ def _no_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "CODEX_MODEL",
         "CODEX_REASONING_EFFORT",
         "CODEX_IGNORE_USER_CONFIG",
+        "CODEX_IMAGE",
+        "DOCKER_BIN",
     ):
         monkeypatch.delenv(key, raising=False)
-
-
-@pytest.fixture
-def fake_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., Path]:
-    """Point the configured backend at a fake codex; returns a setter for its output."""
-    binary = tmp_path / "bin" / "codex"
-    binary.parent.mkdir()
-    binary.write_text(_FAKE_CODEX.format(python=sys.executable))
-    binary.chmod(0o755)
-    log = tmp_path / "codex_call.json"
-    monkeypatch.setenv("FAKE_CODEX_LOG", str(log))
-    settings = _settings(codegen_agent="codex", codex_bin=str(binary))
-    monkeypatch.setattr(agent_backend, "get_settings", lambda: settings)
-
-    def produce(filename: str | None = None, payload: object = None) -> Path:
-        if filename:
-            monkeypatch.setenv("FAKE_CODEX_FILE", filename)
-            monkeypatch.setenv("FAKE_CODEX_PAYLOAD", json.dumps(payload))
-        return log
-
-    return produce
 
 
 class _Recorder:
@@ -193,37 +151,6 @@ def test_codex_command_web_search_effort_and_user_config(tmp_path: Path) -> None
     assert not any("model_reasoning_effort" in part for part in empty)
 
 
-def test_codex_fake_binary_gets_prompt_on_stdin_and_edits_ws(
-    tmp_path: Path, fake_codex: Callable[..., Path]
-) -> None:
-    """A long prompt goes through stdin, not argv; the -o file stays outside ws."""
-    log = fake_codex("out.json", {"ok": True})
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    prompt = "line one\n" + "x" * 300_000
-
-    result = agent_backend.run_agent(ws, prompt, timeout=30)
-
-    call = json.loads(log.read_text())
-    assert call["stdin"] == prompt
-    assert prompt not in call["argv"]
-    assert call["argv"][-1] == "-"
-    assert Path(call["cwd"]).resolve() == ws.resolve()
-    assert json.loads((ws / "out.json").read_text()) == {"ok": True}
-    assert result.backend == "codex" and result.returncode == 0
-    assert result.last_message == "done: wrote out.json"
-    assert "chatter" in result.stdout
-    assert sorted(p.name for p in ws.iterdir()) == ["out.json"]
-
-
-def test_codex_non_zero_exit_is_returned_not_raised(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_codex: Callable[..., Path]
-) -> None:
-    fake_codex()
-    monkeypatch.setenv("FAKE_CODEX_EXIT", "3")
-    assert agent_backend.run_agent(tmp_path, "p", timeout=30).returncode == 3
-
-
 def test_run_task_transcript_falls_back_to_codex_last_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -233,52 +160,6 @@ def test_run_task_transcript_falls_back_to_codex_last_message(
     monkeypatch.setattr(agent_backend, "run_agent", fake)
     claude_gen.run_task(tmp_path, "p", timeout=5, tlog=claude_gen.get_logger("t"))
     assert claude_gen.task_tail(tmp_path).startswith("final words")
-
-
-# --- every model task consumes its result file the same way on codex --------------------
-
-
-def test_analyze_on_codex(tmp_path: Path, fake_codex: Callable[..., Path]) -> None:
-    log = fake_codex("app_spec.json", _VALID_APP_SPEC)
-    out = analyze.analyze(_analyze_paths(tmp_path))
-    assert json.loads(out.read_text())["app_name"] == "Todo"
-    assert 'web_search="live"' in json.loads(log.read_text())["argv"]
-
-
-def test_feasibility_on_codex(tmp_path: Path, fake_codex: Callable[..., Path]) -> None:
-    from iosforge.mvp.paths import RunPaths
-
-    log = fake_codex("scope_proposal.json", _proposal_payload())
-    paths = RunPaths.create(tmp_path / "run")
-    _write_spec(paths, _spec_three_screens())
-    decision = feasibility.propose(paths, settings=_settings())
-    assert decision.counts.included == 2 and decision.counts.excluded == 1
-    assert 'web_search="disabled"' in json.loads(log.read_text())["argv"]
-
-
-def test_ad_analysis_on_codex(tmp_path: Path, fake_codex: Callable[..., Path]) -> None:
-    fake_codex(
-        "ad_analysis.json",
-        {"ad_networks": [], "ad_placements": [{"format": "rewarded", "trigger": "tap"}]},
-    )
-    out = ad_analysis.analyze_ads(_seed_ads(tmp_path, with_ads=True, with_spec=True))
-    assert out is not None
-    assert [p["format"] for p in json.loads(out.read_text())["ad_placements"]] == ["rewarded"]
-
-
-def test_screen_filter_on_codex(tmp_path: Path, fake_codex: Callable[..., Path]) -> None:
-    fake_codex("screen_labels.json", {"labels": [{"file": "0000.png", "label": "ad"}]})
-    labels = screen_filter._classify(_seed_run(tmp_path), 30)
-    assert labels == {"0000.png": {"label": "ad", "reason": ""}}
-
-
-def test_vision_judge_on_codex(tmp_path: Path, fake_codex: Callable[..., Path]) -> None:
-    judge = {"screens": [{"id": "0000", "score": 0.9, "diffs": []}], "flows_score": 0.8}
-    fake_codex("judge.json", judge)
-    report = compliance.evaluate(
-        _compliance_paths(tmp_path), 1, weights=_WEIGHTS, threshold=0.95, soft_floor=0.8, history=[]
-    )
-    assert report["structure"] == pytest.approx(0.9)
 
 
 def test_every_model_task_goes_through_the_seam(

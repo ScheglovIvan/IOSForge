@@ -172,6 +172,10 @@ renders the app on an iOS Simulator for the Vision Judge, and archives an IPA.
 - **Signing:** without a key the job delivers an **unsigned IPA**, which the admin offers
   under job → iOS build → Download IPA. Signed and App Store builds need a per-app ASC key
   (Build & sign tab) and the `store` profile. Those builds are out of scope for local runs.
+- **Optional, codex agent:** the factory uses Claude Code by default. To run model tasks on
+  OpenAI's Codex instead (`CODEGEN_AGENT=codex`), log in with `codex login` and build the
+  container image codex always runs in: `docker build -t iosforge-codex:0.153.4 docker/codex`.
+  See [agent-backend.md](agent-backend.md).
 
 ## 8. Run a job from the admin
 

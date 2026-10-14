@@ -98,6 +98,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "mac: needs macOS with Xcode + XcodeGen (skipped when the toolchain is missing)",
+    "docker: needs Docker and the iosforge-codex image (skipped when missing)",
 ]
 
 [tool.uv]
