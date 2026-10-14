@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from iosforge.mvp import analyze
+from iosforge.mvp import agent_backend, analyze
 from iosforge.mvp.paths import RunPaths
 
 _SCREENS_JSON = {
@@ -213,7 +213,9 @@ def test_analyze_writes_and_validates_app_spec(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     rp = _make_paths(tmp_path)
-    monkeypatch.setattr(analyze.subprocess, "run", _fake_claude("app_spec.json", _VALID_APP_SPEC))
+    monkeypatch.setattr(
+        agent_backend.subprocess, "run", _fake_claude("app_spec.json", _VALID_APP_SPEC)
+    )
 
     out = analyze.analyze(rp)
 
@@ -246,7 +248,7 @@ def test_analyze_writes_and_validates_app_spec(
 def test_analyze_rejects_empty_screens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     rp = _make_paths(tmp_path)
     bad = {"app_name": "X", "package": "p", "screens": []}
-    monkeypatch.setattr(analyze.subprocess, "run", _fake_claude("app_spec.json", bad))
+    monkeypatch.setattr(agent_backend.subprocess, "run", _fake_claude("app_spec.json", bad))
 
     with pytest.raises(RuntimeError, match="schema violation"):
         analyze.analyze(rp)
@@ -255,7 +257,7 @@ def test_analyze_rejects_empty_screens(tmp_path: Path, monkeypatch: pytest.Monke
 def test_analyze_rejects_incomplete_spec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     rp = _make_paths(tmp_path)
     incomplete = {"app_name": "X", "package": "p", "screens": [{"id": "0000"}]}
-    monkeypatch.setattr(analyze.subprocess, "run", _fake_claude("app_spec.json", incomplete))
+    monkeypatch.setattr(agent_backend.subprocess, "run", _fake_claude("app_spec.json", incomplete))
 
     with pytest.raises(RuntimeError, match="schema violation"):
         analyze.analyze(rp)

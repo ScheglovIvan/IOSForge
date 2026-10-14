@@ -1,22 +1,20 @@
-"""The local Claude Code CLI runner shared by every model task.
+"""The coding-agent task runner shared by every model task.
 
-:func:`run_task` writes ``TASK.md`` and runs ``claude -p`` non-interactively in a
-workspace, keeping the tail of the transcript (:data:`TASK_LOG`) so a no-op run can be
-explained (:func:`task_tail`).
+:func:`run_task` writes ``TASK.md`` and runs the agent (:mod:`iosforge.mvp.agent_backend`)
+non-interactively in a workspace, keeping the tail of the transcript (:data:`TASK_LOG`) so a
+no-op run can be explained (:func:`task_tail`).
 """
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import structlog
 
 from iosforge.common.logging import get_logger
+from iosforge.mvp import agent_backend
 
 log = get_logger("mvp.claude_gen")
-
-CLAUDE_BIN = "claude"
 
 
 def run_task(
@@ -26,7 +24,7 @@ def run_task(
     timeout: int,
     tlog: structlog.stdlib.BoundLogger,
 ) -> int:
-    """Write TASK.md and run one `claude -p` task invocation in ``workspace``.
+    """Write TASK.md and run one agent task invocation in ``workspace``.
 
     Shared by the SwiftUI sandboxed screen tasks, the Vision Judge, its corrective
     rounds and the store-asset tasks. Returns the CLI return code; a non-zero code is
@@ -34,19 +32,13 @@ def run_task(
     is still valid).
     """
     (workspace / "TASK.md").write_text(prompt)
-    res = subprocess.run(
-        [CLAUDE_BIN, "-p", prompt, "--permission-mode", "acceptEdits"],
-        cwd=workspace,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    res = agent_backend.run_agent(workspace, prompt, timeout=timeout, tlog=tlog)
+    out = res.stdout or res.last_message or ""
     # The CLI sometimes exits 0 having written nothing. Without its transcript there is
     # no way to tell a refusal from a crash, so keep the tail next to the workspace.
     try:
         (workspace / TASK_LOG).write_text(
-            f"{res.stdout[-8000:]}\n[stderr]\n{res.stderr[-2000:]}", encoding="utf-8"
+            f"{out[-8000:]}\n[stderr]\n{res.stderr[-2000:]}", encoding="utf-8"
         )
     except OSError:
         pass
@@ -56,6 +48,8 @@ def run_task(
 
 
 TASK_LOG = ".claude_task.log"
+"""Transcript tail of the last task in a workspace, whichever agent backend ran it (the name
+predates the backend switch and other code ignores files by it)."""
 
 
 def task_tail(workspace: Path, limit: int = 400) -> str:

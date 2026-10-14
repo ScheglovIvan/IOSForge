@@ -15,17 +15,15 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
 from iosforge.common.logging import get_logger
-from iosforge.mvp import spec_contract
+from iosforge.mvp import agent_backend, spec_contract
 from iosforge.mvp.paths import RunPaths
 
 log = get_logger("mvp.ad_analysis")
 
-CLAUDE_BIN = "claude"
 AD_TOOLS = "Read Write Glob"
 _ALLOWED_FORMATS = frozenset({"banner", "interstitial", "rewarded", "native", "offerwall"})
 
@@ -69,21 +67,10 @@ Output nothing but `ad_analysis.json`.
 
 
 def _run_claude(prompt: str, workdir: Path, timeout: int) -> None:
-    cmd = [
-        CLAUDE_BIN,
-        "-p",
-        prompt,
-        "--permission-mode",
-        "acceptEdits",
-        "--allowed-tools",
-        AD_TOOLS,
-    ]
-    res = subprocess.run(
-        cmd, cwd=workdir, capture_output=True, text=True, timeout=timeout, check=False
-    )
+    res = agent_backend.run_agent(workdir, prompt, timeout=timeout, allowed_tools=AD_TOOLS)
     if res.returncode != 0:
         log.error("ad_analysis.cli_failed", code=res.returncode, stderr=res.stderr[-2000:])
-        raise RuntimeError(f"claude CLI exited {res.returncode}: {res.stderr[-500:]}")
+        raise RuntimeError(f"{res.backend} CLI exited {res.returncode}: {res.stderr[-500:]}")
 
 
 def _normalise(payload: object) -> dict[str, Any]:

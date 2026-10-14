@@ -20,7 +20,6 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +27,7 @@ from typing import Any
 
 from iosforge.common.config import Settings
 from iosforge.common.logging import get_logger
-from iosforge.mvp import claude_gen, functional, simulator, swiftui_gen, xcode
+from iosforge.mvp import agent_backend, functional, simulator, swiftui_gen, xcode
 from iosforge.mvp.paths import RunPaths
 from iosforge.mvp.swiftui_ads import is_ad_component
 from iosforge.mvp.swiftui_permissions import blank_comments_and_strings
@@ -405,14 +404,7 @@ def evaluate(
     ids = "\n".join(f"- {oid}" for oid, _ in matches) or "- (none)"
     prompt = JUDGE_PROMPT.replace("{ids}", ids)
     (paths.claude_ws / "JUDGE.md").write_text(prompt)
-    res = subprocess.run(
-        [claude_gen.CLAUDE_BIN, "-p", prompt, "--permission-mode", "acceptEdits"],
-        cwd=paths.claude_ws,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    res = agent_backend.run_agent(paths.claude_ws, prompt, timeout=timeout)
     if res.returncode != 0:
         bound.warning(
             "compliance.evaluate.cli_failed", code=res.returncode, stderr=res.stderr[-500:]

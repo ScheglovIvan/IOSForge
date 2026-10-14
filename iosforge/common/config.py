@@ -15,10 +15,13 @@ from __future__ import annotations
 import tomllib
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+
+CodegenAgent = Literal["claude", "codex"]
+CodexReasoningEffort = Literal["low", "medium", "high", "xhigh", "max", "ultra"]
 
 # Repository root: iosforge/common/config.py -> parents[2] == repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -275,12 +278,27 @@ class Settings(BaseSettings):
     # Max concurrent screen-build workers when the orchestrator parallelizes the
     # screen layer (worktree-per-task). Caps rate-limit / subscription pressure.
     codegen_max_parallel: int = Field(default=4, gt=0)
+    # Coding agent behind every model task (mvp/agent_backend.py). "claude" runs the
+    # Claude Code CLI as before; "codex" runs the Codex CLI (OpenAI, e.g. gpt-6-astra).
+    codegen_agent: CodegenAgent = "claude"
+    claude_bin: str = "claude"
+    codex_bin: str = "codex"
+    codex_model: str = "gpt-6-astra"
+    # Empty = the model's default reasoning effort (low for gpt-6-astra).
+    codex_reasoning_effort: CodexReasoningEffort | None = None
+    # Skip ~/.codex/config.toml so a personal profile cannot change the run; auth still applies.
+    codex_ignore_user_config: bool = True
     # Design divergence (anti-clone): after analysis, rewrite app_spec design_tokens
     # into a NEW visual language (hue-rotated palette + gradients + shifted radii)
     # while preserving structure/navigation. Set False to reproduce a faithful clone.
     design_divergence: bool = Field(default=True)
     # Swap captured fonts for similar-but-different families (same typographic class).
     design_font_substitution: bool = Field(default=True)
+
+    @field_validator("codex_reasoning_effort", mode="before")
+    @classmethod
+    def _empty_effort_is_default(cls, value: object) -> object:
+        return None if value == "" else value
 
     # --- Admin panel (SPEC §7) — internet-facing behind a TLS reverse proxy ---
     # Secret for signing session ids / CSRF tokens. MUST be set via env in prod.

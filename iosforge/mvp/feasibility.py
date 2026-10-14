@@ -21,14 +21,13 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 from iosforge.common.config import Settings, get_settings
 from iosforge.common.logging import get_logger
-from iosforge.mvp import capability_registry, spec_contract
+from iosforge.mvp import agent_backend, capability_registry, spec_contract
 from iosforge.mvp.paths import RunPaths
 from iosforge.mvp.scope_models import (
     FeasibilityFinding,
@@ -41,7 +40,6 @@ from iosforge.storage.client import ArtifactRef, ArtifactStorage, build_key
 
 log = get_logger("mvp.feasibility")
 
-CLAUDE_BIN = "claude"
 SCOPE_TOOLS = "Read Write Glob"
 SCOPE_KIND = "scope"
 SCOPE_NAME = "scope.json"
@@ -112,21 +110,11 @@ def scope_prompt() -> str:
 
 
 def _run_claude(prompt: str, workdir: Path, timeout: int, tools: str | None = None) -> None:
-    """Invoke the local Claude Code CLI non-interactively in ``workdir``."""
-    cmd = [CLAUDE_BIN, "-p", prompt, "--permission-mode", "acceptEdits"]
-    if tools:
-        cmd += ["--allowed-tools", tools]
-    res = subprocess.run(
-        cmd,
-        cwd=workdir,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    """Run the coding agent non-interactively in ``workdir``."""
+    res = agent_backend.run_agent(workdir, prompt, timeout=timeout, allowed_tools=tools)
     if res.returncode != 0:
         log.error("feasibility.cli_failed", code=res.returncode, stderr=res.stderr[-2000:])
-        raise RuntimeError(f"claude CLI exited {res.returncode}: {res.stderr[-500:]}")
+        raise RuntimeError(f"{res.backend} CLI exited {res.returncode}: {res.stderr[-500:]}")
 
 
 def _scope_workspace(paths: RunPaths) -> Path:

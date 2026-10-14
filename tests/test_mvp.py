@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from iosforge.mvp import claude_gen, crawl
+from iosforge.mvp import agent_backend, claude_gen, crawl
 from iosforge.mvp.paths import RunPaths
 
 _SAMPLE_UI_XML = """<?xml version='1.0' encoding='UTF-8'?>
@@ -54,7 +54,7 @@ def test_run_task_keeps_the_cli_transcript_for_a_silent_no_op(tmp_path, monkeypa
     def fake_run(*args, **kwargs):
         return sp.CompletedProcess(args=[], returncode=0, stdout="wrote nothing", stderr="warn")
 
-    monkeypatch.setattr(claude_gen.subprocess, "run", fake_run)
+    monkeypatch.setattr(agent_backend.subprocess, "run", fake_run)
     log = claude_gen.get_logger("test")
     assert claude_gen.run_task(tmp_path, "do it", timeout=5, tlog=log) == 0
     tail = claude_gen.task_tail(tmp_path)

@@ -12,15 +12,14 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 from iosforge.common.logging import get_logger
+from iosforge.mvp import agent_backend
 from iosforge.mvp.paths import RunPaths
 
 log = get_logger("mvp.screen_filter")
 
-CLAUDE_BIN = "claude"
 CLASSIFY_TOOLS = "Read Write Glob"
 KEEP_LABEL = "app"
 AD_LABEL = "ad"
@@ -59,21 +58,10 @@ Output nothing but `screen_labels.json`.
 
 
 def _run_claude(prompt: str, workdir: Path, timeout: int) -> None:
-    cmd = [
-        CLAUDE_BIN,
-        "-p",
-        prompt,
-        "--permission-mode",
-        "acceptEdits",
-        "--allowed-tools",
-        CLASSIFY_TOOLS,
-    ]
-    res = subprocess.run(
-        cmd, cwd=workdir, capture_output=True, text=True, timeout=timeout, check=False
-    )
+    res = agent_backend.run_agent(workdir, prompt, timeout=timeout, allowed_tools=CLASSIFY_TOOLS)
     if res.returncode != 0:
         log.error("screen_filter.cli_failed", code=res.returncode, stderr=res.stderr[-2000:])
-        raise RuntimeError(f"claude CLI exited {res.returncode}: {res.stderr[-500:]}")
+        raise RuntimeError(f"{res.backend} CLI exited {res.returncode}: {res.stderr[-500:]}")
 
 
 def _classify(paths: RunPaths, timeout: int) -> dict[str, dict[str, str]]:

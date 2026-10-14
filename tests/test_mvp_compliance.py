@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from iosforge.mvp import compliance
+from iosforge.mvp import agent_backend, compliance
 from iosforge.mvp.compliance import ComplianceWeights
 from iosforge.mvp.paths import RunPaths
 
@@ -190,7 +190,7 @@ def test_evaluate_uses_judge_json_and_writes_report(
         (cwd / "judge.json").write_text(json.dumps(judge))
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(compliance.subprocess, "run", _fake_claude)
+    monkeypatch.setattr(agent_backend.subprocess, "run", _fake_claude)
 
     report = compliance.evaluate(
         rp, 1, weights=_WEIGHTS, threshold=0.95, soft_floor=0.80, history=[]

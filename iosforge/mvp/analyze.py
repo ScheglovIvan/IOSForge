@@ -15,13 +15,12 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
 from iosforge.common.config import Settings, get_settings
 from iosforge.common.logging import get_logger
-from iosforge.mvp import design, handoff, spec_contract
+from iosforge.mvp import agent_backend, design, handoff, spec_contract
 from iosforge.mvp.paths import RunPaths
 
 _NO_ADS_NOTE = """
@@ -48,7 +47,6 @@ def _strip_ads(spec: dict[str, object]) -> None:
 
 log = get_logger("mvp.analyze")
 
-CLAUDE_BIN = "claude"
 ANALYZE_TOOLS = "WebSearch WebFetch Read Write Edit Glob Grep"
 
 ANALYZE_PROMPT = """\
@@ -376,21 +374,11 @@ def _prepare_analysis_workspace(paths: RunPaths, prompt: str = ANALYZE_PROMPT) -
 
 
 def _run_claude(prompt: str, workdir: Path, timeout: int, tools: str | None = None) -> None:
-    """Invoke the local Claude Code CLI non-interactively in ``workdir``."""
-    cmd = [CLAUDE_BIN, "-p", prompt, "--permission-mode", "acceptEdits"]
-    if tools:
-        cmd += ["--allowed-tools", tools]
-    res = subprocess.run(
-        cmd,
-        cwd=workdir,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    """Run the coding agent non-interactively in ``workdir``."""
+    res = agent_backend.run_agent(workdir, prompt, timeout=timeout, allowed_tools=tools)
     if res.returncode != 0:
         log.error("analyze.cli_failed", code=res.returncode, stderr=res.stderr[-2000:])
-        raise RuntimeError(f"claude CLI exited {res.returncode}: {res.stderr[-500:]}")
+        raise RuntimeError(f"{res.backend} CLI exited {res.returncode}: {res.stderr[-500:]}")
 
 
 _SECTION_TITLES = {
