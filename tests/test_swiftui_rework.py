@@ -353,7 +353,9 @@ def test_extend_route_queues_on_the_mac_queue_and_guards(monkeypatch: pytest.Mon
     session = _Session(job)
     status, sent = _post(monkeypatch, session, storage, sources="jobs/x/sources/v2/xcode_app.zip")
     assert status == 303
-    assert sent == [{"args": [str(job.id), "", ["0002", "0003"]], "queue": "xcode"}]
+    assert sent == [
+        {"args": [str(job.id), "", ["0002", "0003"]], "kwargs": {"epoch": 0}, "queue": "xcode"}
+    ]
 
     job.state = JobState.CODEGEN
     assert _post(monkeypatch, session, storage, sources="jobs/x/sources/xcode_app.zip") == (409, [])

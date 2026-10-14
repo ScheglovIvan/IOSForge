@@ -31,6 +31,7 @@ from iosforge.db.models import GenerationResult, Job, StageTimeline
 from iosforge.db.session import get_sessionmaker
 from iosforge.mvp import compliance, simulator, swiftui_gen
 from iosforge.mvp.paths import RunPaths
+from iosforge.orchestrator.recovery import is_stale, superseded
 from iosforge.storage.client import ArtifactStorage, S3ArtifactStorage, build_key
 from iosforge.worker.swiftui_tasks import (
     XCODE_QUEUE,
@@ -106,11 +107,28 @@ def _additions(
     return list(dict.fromkeys(s for s in add_screens if s in known and s not in current))
 
 
+def _discarded(db: Session, job: Job, epoch: int | None) -> bool:
+    """True (logged, session rolled back) when a recovery superseded this run's epoch."""
+    if not superseded(db, job.id, epoch):
+        return False
+    db.rollback()
+    log.info("swiftui.rework.superseded", job_id=str(job.id), epoch=epoch)
+    return True
+
+
 @celery_app.task(base=PipelineTask, name="iosforge.rework_swiftui", bind=True, queue=XCODE_QUEUE)
 def rework_swiftui(
-    self: Any, job_id: str, instructions: str = "", add_screens: list[str] | None = None
+    self: Any,
+    job_id: str,
+    instructions: str = "",
+    add_screens: list[str] | None = None,
+    epoch: int | None = None,
 ) -> str:
-    """Run one operator round over the job's stored SwiftUI app, then queue delivery."""
+    """Run one operator round over the job's stored SwiftUI app, then queue delivery.
+
+    A message queued under an older run epoch (superseded by an operator reset) does
+    nothing, both on start and before the final commit.
+    """
     settings = get_settings()
     storage = S3ArtifactStorage()
     maker = get_sessionmaker()
@@ -118,6 +136,9 @@ def rework_swiftui(
         job = db.get(Job, uuid.UUID(job_id))
         if job is None:
             return f"job {job_id} not found"
+        if is_stale(job, epoch):
+            log.info("swiftui.rework.stale_epoch", job_id=job_id, epoch=epoch)
+            return f"job {job_id} not reworked: superseded (epoch {epoch})"
         refusal = rework_refusal(db, job, storage)
         if refusal:
             return f"job {job_id} cannot be reworked: {refusal}"
@@ -162,9 +183,13 @@ def rework_swiftui(
                     threshold=settings.frontend_verify_threshold,
                     soft_floor=settings.compliance_soft_floor,
                 )
+                if _discarded(db, job, epoch):
+                    return f"job {job_id} rework discarded: superseded (epoch {epoch})"
                 version = (job.result_version or 1) + 1
                 key = store_sources(storage, job_id, paths.xcode_app, version=version)
                 save_built_scope(storage, job_id, scope)
+            if _discarded(db, job, epoch):
+                return f"job {job_id} rework discarded: superseded (epoch {epoch})"
             job.result_version = version
             record_version(db, job, key, report, version)
             stage.finished_at = utcnow()
@@ -173,6 +198,8 @@ def rework_swiftui(
         except Exception as exc:
             log.error("swiftui.rework.failed", job_id=job_id, error=str(exc))
             db.rollback()
+            if superseded(db, uuid.UUID(job_id), epoch):
+                return f"job {job_id} rework failed after it was superseded: {exc}"
             failed_job = db.get(Job, uuid.UUID(job_id))
             row = db.get(StageTimeline, stage_id)
             if row is not None:

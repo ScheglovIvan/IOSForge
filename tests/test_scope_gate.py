@@ -76,6 +76,9 @@ class _FakeSession:
     def add(self, obj: object) -> None:
         self.added.append(obj)
 
+    def execute(self, stmt: object) -> None:
+        self.executed = [*getattr(self, "executed", []), str(stmt)]
+
     def commit(self) -> None:
         self.commits += 1
 
@@ -211,6 +214,9 @@ class _FakeApptoreSession:
 
     def add(self, obj: object) -> None:
         self.added.append(obj)
+
+    def execute(self, stmt: object) -> None:
+        self.executed = [*getattr(self, "executed", []), str(stmt)]
 
     def commit(self) -> None:
         return None

@@ -30,6 +30,7 @@ from iosforge.db.models import GenerationResult, Job, StageTimeline, Walkthrough
 from iosforge.db.session import get_sessionmaker
 from iosforge.mvp import build_profile, compliance, simulator, swiftui_gen
 from iosforge.mvp.paths import RunPaths
+from iosforge.orchestrator.recovery import is_stale, superseded
 from iosforge.storage.client import S3ArtifactStorage, build_key
 from iosforge.worker.swiftui_tasks import (
     XCODE_QUEUE,
@@ -79,9 +80,14 @@ def build_refusal(db: Session, job: Job, *, check_running: bool = True) -> str |
     return None
 
 
-def enqueue_build(job_id: str) -> None:
-    """Queue the job's SwiftUI build on the Mac queue (pipeline chain and admin)."""
-    build_swiftui.apply_async(args=[job_id], queue=XCODE_QUEUE)
+def enqueue_build(job_id: str, epoch: int | None = None) -> None:
+    """Queue the job's SwiftUI build on the Mac queue (pipeline chain and admin).
+
+    ``epoch`` is the job's run epoch at queueing time; the task ignores itself once an
+    operator recovery has moved the epoch on.
+    """
+    kwargs = {} if epoch is None else {"epoch": epoch}
+    build_swiftui.apply_async(args=[job_id], kwargs=kwargs, queue=XCODE_QUEUE)
 
 
 def _close_stale_stages(db: Session, job: Job) -> None:
@@ -134,6 +140,15 @@ def hold_reason(report: dict[str, Any], *, structural_gate: bool) -> str | None:
     )
 
 
+def _discarded(db: Session, job: Job, epoch: int | None) -> bool:
+    """True (logged, session rolled back) when a recovery superseded this run's epoch."""
+    if not superseded(db, job.id, epoch):
+        return False
+    db.rollback()
+    log.info("build_swiftui.superseded", job_id=str(job.id), epoch=epoch)
+    return True
+
+
 def _store_screens(storage: Any, job_id: str, paths: RunPaths) -> None:
     for png in sorted(paths.generated_screens_dir.glob("*.png")):
         storage.put(
@@ -144,8 +159,12 @@ def _store_screens(storage: Any, job_id: str, paths: RunPaths) -> None:
 
 
 @celery_app.task(base=PipelineTask, name="iosforge.build_swiftui", bind=True, queue=XCODE_QUEUE)
-def build_swiftui(self: Any, job_id: str) -> str:
-    """Generate, refine and store the job's SwiftUI app, then queue its delivery."""
+def build_swiftui(self: Any, job_id: str, epoch: int | None = None) -> str:
+    """Generate, refine and store the job's SwiftUI app, then queue its delivery.
+
+    A message queued under an older run epoch (superseded by an operator reset or
+    scope re-open) does nothing, both on start and before the final commit.
+    """
     settings = get_settings()
     storage = S3ArtifactStorage()
     maker = get_sessionmaker()
@@ -153,6 +172,9 @@ def build_swiftui(self: Any, job_id: str) -> str:
         job = db.get(Job, uuid.UUID(job_id))
         if job is None:
             return f"job {job_id} not found"
+        if is_stale(job, epoch):
+            log.info("build_swiftui.stale_epoch", job_id=job_id, epoch=epoch)
+            return f"job {job_id} not built: superseded (epoch {epoch})"
         refusal = build_refusal(db, job, check_running=False)
         if refusal:
             log.info("build_swiftui.refused", job_id=job_id, reason=refusal)
@@ -198,10 +220,14 @@ def build_swiftui(self: Any, job_id: str) -> str:
                     blank_max_bytes=settings.web_blank_max_bytes,
                     structural_gate=settings.web_verify_hard_gate,
                 )
+                if _discarded(db, job, epoch):
+                    return f"job {job_id} build discarded: superseded (epoch {epoch})"
                 _store_screens(storage, job_id, paths)
                 version = job.result_version or 1
                 key = store_sources(storage, job_id, paths.xcode_app, version=version)
                 save_built_scope(storage, job_id, scope)
+            if _discarded(db, job, epoch):
+                return f"job {job_id} build discarded: superseded (epoch {epoch})"
             reason = hold_reason(report, structural_gate=settings.web_verify_hard_gate)
             gated = reason is not None
             db.add(
@@ -225,6 +251,8 @@ def build_swiftui(self: Any, job_id: str) -> str:
         except Exception as exc:
             log.error("build_swiftui.failed", job_id=job_id, error=str(exc))
             db.rollback()
+            if superseded(db, uuid.UUID(job_id), epoch):
+                return f"job {job_id} build failed after it was superseded: {exc}"
             failed = db.get(Job, uuid.UUID(job_id))
             row = db.get(StageTimeline, stage_id)
             if row is not None:

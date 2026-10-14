@@ -279,7 +279,9 @@ def _save_settings(session: _Session, monkeypatch: pytest.MonkeyPatch) -> list[s
     from iosforge.admin.session import SessionData
 
     calls: list[str] = []
-    monkeypatch.setattr(routes_jobs, "_enqueue_build", lambda job_id: calls.append("build"))
+    monkeypatch.setattr(
+        routes_jobs, "_enqueue_build", lambda job_id, epoch=None: calls.append("build")
+    )
     monkeypatch.setattr(swiftui_tasks, "queue_delivery", lambda db, job: calls.append("delivery"))
     user = SessionData(user_id="u", username="op", csrf_token="t")
     response = routes_jobs.jobs_build_settings(

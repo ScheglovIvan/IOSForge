@@ -33,11 +33,14 @@ from iosforge.db.models import (
     StageTimeline,
     WalkthroughResult,
 )
+from iosforge.orchestrator.recovery import RESETTABLE_STATES, current_epoch
 from iosforge.storage.client import ArtifactStorage, build_key
 
 if TYPE_CHECKING:
+    from iosforge.db.models import XcodeBuild
     from iosforge.mvp.scope_check import ScopeProblem
     from iosforge.mvp.scope_models import ScopeDecision
+    from iosforge.orchestrator.liveness import TaskProbe
 
 log = get_logger("admin.jobs")
 router = APIRouter()
@@ -128,7 +131,7 @@ async def jobs_create(
     )
     db.commit()
     log.info("jobs.created", job_id=str(job_id), app_id=parsed.app_id)
-    _enqueue(job_id)
+    _enqueue(job_id, current_epoch(job))
     return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
 
 
@@ -141,11 +144,15 @@ def job_detail(
     storage: ArtifactStorage = Depends(get_storage),
     signed: str = "",
     sign_error: str = "",
+    reset: str = "",
+    reopened: str = "",
 ) -> Response:
     job = db.get(Job, job_id)
     if job is None:
         return Response("Not found", status_code=404)
     ctx = _detail_context(request, job, user, db, storage, signed=signed, sign_error=sign_error)
+    ctx["reset_to"] = reset if reset in {state.value for state in JobState} else ""
+    ctx["reopened_ok"] = reopened == "1"
     if ctx["scope_status"] == "proposed" and ctx["scope"] is not None:
         proposal = cast("ScopeDecision", ctx["scope"])
         ctx["scope_problems"] = _proposal_warnings(storage, job_id, proposal)
@@ -173,7 +180,9 @@ def _detail_context(
     xcode_build = latest_xcode_build(db, job_id)
     can_xcode_delivery = xcode_build is not None or _has_sources(storage, job_id)
     can_build = job.state in (JobState.DONE, JobState.FAILED) and build_refusal(db, job) is None
+    recovery = _recovery_context(db, job, xcode_build)
     return {
+        **recovery,
         "job": job,
         "user": user,
         "timeline": _timeline(db, job_id),
@@ -195,6 +204,31 @@ def _detail_context(
         "scope_status": scope_status,
         "scope": _load_scope(storage, job_id, scope_status),
         "capability_modules": _capability_modules(),
+    }
+
+
+def _recovery_context(db: Session, job: Job, xcode_build: XcodeBuild | None) -> dict[str, object]:
+    """Whether the job page offers Reset stuck job / Re-open scope (no liveness probe here).
+
+    The page refreshes every few seconds, so only the cheap DB criteria are checked;
+    the POST runs the full check including the Celery/Redis probe.
+    """
+    from iosforge.db.base import utcnow
+    from iosforge.orchestrator.recovery import (
+        ACTIVE_BUILD_STATUSES,
+        idle_seconds,
+        reopen_refusal,
+    )
+
+    settings = get_settings()
+    running = xcode_build is not None and xcode_build.status in ACTIVE_BUILD_STATUSES
+    build = xcode_build if running else None
+    idle = idle_seconds(db, job, utcnow(), build)
+    stuck_candidate = job.state in RESETTABLE_STATES or build is not None
+    return {
+        "can_reset": stuck_candidate and idle >= settings.job_reset_min_idle_s,
+        "can_reopen": reopen_refusal(db, job, settings) is None,
+        "last_activity_s": int(idle),
     }
 
 
@@ -295,7 +329,11 @@ def _enqueue_swiftui_round(
     if refusal:
         return Response(f"Rework is not possible now: {refusal}.", status_code=409)
     try:
-        rework_swiftui.apply_async(args=[str(job_id), instructions, add_screens], queue=XCODE_QUEUE)
+        rework_swiftui.apply_async(
+            args=[str(job_id), instructions, add_screens],
+            kwargs={"epoch": current_epoch(job)},
+            queue=XCODE_QUEUE,
+        )
         log.info("jobs.swiftui_round_requested", job_id=str(job_id), screens=add_screens)
     except Exception as exc:
         log.error("jobs.swiftui_round_enqueue_failed", job_id=str(job_id), error=str(exc))
@@ -374,7 +412,7 @@ def jobs_build_settings(
 
         if gen is None:
             if job.state == JobState.DONE and build_refusal(db, job) is None:
-                _enqueue_build(job_id)
+                _enqueue_build(job_id, current_epoch(job))
         elif gen.sources_key.endswith(SOURCES_NAME) and job.state in DELIVERABLE_STATES:
             queue_delivery(db, job)
         log.info(
@@ -968,7 +1006,7 @@ async def jobs_scope_approve(
     job.state = JobState.CODEGEN
     db.commit()
 
-    _enqueue_build(job_id)
+    _enqueue_build(job_id, current_epoch(job))
     log.info(
         "jobs.scope_approved",
         job_id=str(job_id),
@@ -1085,7 +1123,7 @@ def jobs_build(
     if refusal or job.state not in (JobState.DONE, JobState.FAILED):
         log.info("jobs.build_refused", job_id=str(job_id), reason=refusal or str(job.state))
         return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
-    _enqueue_build(job_id)
+    _enqueue_build(job_id, current_epoch(job))
     log.info("jobs.build_requested", job_id=str(job_id))
     return RedirectResponse(f"/jobs/{job_id}", status_code=HTTP_303_SEE_OTHER)
 
@@ -1226,22 +1264,111 @@ def _load_scope(
         return None
 
 
-def _enqueue(job_id: uuid.UUID) -> None:
+def _enqueue(job_id: uuid.UUID, epoch: int | None = None) -> None:
     try:
         from iosforge.worker.run_job import run_job
 
-        run_job.apply_async(args=[str(job_id)], queue="codegen")
+        kwargs = {} if epoch is None else {"epoch": epoch}
+        run_job.apply_async(args=[str(job_id)], kwargs=kwargs, queue="codegen")
     except Exception as exc:  # broker down — Job stays QUEUED, surfaced in the UI
         log.error("jobs.enqueue_failed", job_id=str(job_id), error=str(exc))
 
 
-def _enqueue_build(job_id: uuid.UUID) -> None:
+def _enqueue_build(job_id: uuid.UUID, epoch: int | None = None) -> None:
     try:
         from iosforge.worker.swiftui_build import enqueue_build
 
-        enqueue_build(str(job_id))
+        enqueue_build(str(job_id), epoch=epoch)
     except Exception as exc:  # broker down — surfaced in the UI, build can be retried
         log.error("jobs.build_enqueue_failed", job_id=str(job_id), error=str(exc))
+
+
+def _enqueue_scope_gate(job_id: uuid.UUID, epoch: int | None = None) -> None:
+    """Queue the scope proposal again (after a reset); a broker error is only logged."""
+    try:
+        from iosforge.worker.run_job import scope_gate
+
+        kwargs = {} if epoch is None else {"epoch": epoch}
+        scope_gate.apply_async(args=[str(job_id)], kwargs=kwargs, queue="codegen")
+    except Exception as exc:
+        log.error("jobs.scope_gate_enqueue_failed", job_id=str(job_id), error=str(exc))
+
+
+def _task_probe() -> TaskProbe:
+    """The Celery/Redis liveness probe with the configured timeout."""
+    from iosforge.orchestrator.liveness import probe_job_tasks
+
+    timeout = get_settings().job_probe_timeout_s
+    return lambda job_id: probe_job_tasks(job_id, timeout=timeout)
+
+
+@router.post("/jobs/{job_id}/reset")
+def jobs_reset(
+    request: Request,
+    job_id: uuid.UUID,
+    csrf_token: str = Form(...),
+    user: SessionData = Depends(require_user),
+    db: Session = Depends(get_db),
+    storage: ArtifactStorage = Depends(get_storage),
+) -> Response:
+    """Reset a stuck job (its task is gone); the follow-up task is queued after the commit."""
+    from iosforge.orchestrator.recovery import RecoveryError, reset_stuck_job
+
+    if not csrf.verify(user.csrf_token, csrf_token):
+        return Response("Invalid request (CSRF).", status_code=400)
+    try:
+        outcome = reset_stuck_job(
+            db,
+            storage,
+            job_id,
+            actor=user.username,
+            probe=_task_probe(),
+            settings=get_settings(),
+        )
+    except RecoveryError as exc:
+        if exc.code == "not_found":
+            return Response("Not found", status_code=404)
+        log.info("jobs.reset_refused", job_id=str(job_id), code=exc.code, reason=exc.message)
+        return PlainTextResponse(f"Reset is not possible now: {exc.message}.", status_code=409)
+    if outcome.action == "run_job":
+        _enqueue(job_id, outcome.epoch)
+    elif outcome.action == "scope_gate":
+        _enqueue_scope_gate(job_id, outcome.epoch)
+    target = f"/jobs/{job_id}?reset={outcome.to_state.value}"
+    if outcome.reopened:
+        target += "#t-scope"
+    return RedirectResponse(target, status_code=HTTP_303_SEE_OTHER)
+
+
+@router.post("/jobs/{job_id}/scope/reopen")
+def jobs_scope_reopen(
+    request: Request,
+    job_id: uuid.UUID,
+    csrf_token: str = Form(...),
+    user: SessionData = Depends(require_user),
+    db: Session = Depends(get_db),
+    storage: ArtifactStorage = Depends(get_storage),
+) -> Response:
+    """Put a failed job's scope back up for approval with the operator's selection kept."""
+    from iosforge.orchestrator.recovery import RecoveryError, reopen_scope
+
+    if not csrf.verify(user.csrf_token, csrf_token):
+        return Response("Invalid request (CSRF).", status_code=400)
+    try:
+        reopen_scope(
+            db,
+            storage,
+            job_id,
+            actor=user.username,
+            probe=_task_probe(),
+            settings=get_settings(),
+        )
+    except RecoveryError as exc:
+        if exc.code == "not_found":
+            return Response("Not found", status_code=404)
+        log.info("jobs.reopen_refused", job_id=str(job_id), code=exc.code, reason=exc.message)
+        return PlainTextResponse(f"Re-open is not possible now: {exc.message}.", status_code=409)
+    return RedirectResponse(f"/jobs/{job_id}?reopened=1#t-scope", status_code=HTTP_303_SEE_OTHER)
 
 
 def _store_slides(job_id: uuid.UUID) -> list[str]:

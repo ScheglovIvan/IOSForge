@@ -3,12 +3,17 @@
     <thead><tr><th>Stage</th><th>Started</th><th>Finished</th><th>Duration</th><th>Error</th></tr></thead>
     <tbody>
     {% for row in timeline %}
-      <tr>
+      {% set operator_event = row.error and row.error.startswith('operator: ') %}
+      <tr{% if operator_event %} class="timeline-operator muted"{% endif %}>
         <td><strong>{{ 'Verify (web)' if row.stage.value == 'verify' else row.stage.value.replace('_', ' ') }}</strong></td>
         <td class="mono muted">{{ row.started_at.strftime('%H:%M:%S') if row.started_at else '—' }}</td>
         <td class="mono muted">{{ row.finished_at.strftime('%H:%M:%S') if row.finished_at else '—' }}</td>
         <td class="mono">{{ (row.duration_ms ~ ' ms') if row.duration_ms is not none else '—' }}</td>
+        {% if operator_event %}
+        <td class="mono muted">{{ row.error }}</td>
+        {% else %}
         <td class="mono" style="color:var(--danger-text);">{{ row.error or '' }}</td>
+        {% endif %}
       </tr>
     {% else %}
       <tr><td colspan="5" class="muted">No stages recorded yet (waiting for the worker).</td></tr>
@@ -51,5 +56,8 @@
 {% if gen and gen.codemagic and gen.codemagic.get('application_id') %}<div class="alert alert--success">CodeMagic integration completed —
   <a href="https://codemagic.io/app/{{ gen.codemagic.get('application_id') }}" target="_blank" rel="noopener">{{ gen.codemagic.get('project_name') }}</a>
   (app id {{ gen.codemagic.get('application_id') }}, branch {{ gen.codemagic.get('default_branch') }})</div>{% endif %}
-{% if job.state.value == 'needs_input' %}<div class="alert alert--warning">Needs input — structural web verification finished with open gaps. Review the audit and choose to ship or rework.</div>{% endif %}
+{% if job.state.value == 'needs_input' %}
+  {% if (job.source_app_metadata or {}).get('scope_status') == 'proposed' %}<div class="alert alert--warning">Scope awaits approval — review the screens on the Scope tab and approve to start the build.</div>
+  {% else %}<div class="alert alert--warning">Needs input — structural web verification finished with open gaps. Review the audit and choose to ship or rework.</div>{% endif %}
+{% endif %}
 {% if job.state.value == 'failed' %}<div class="alert alert--danger">Job failed — see the stage error above.</div>{% endif %}

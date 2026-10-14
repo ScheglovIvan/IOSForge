@@ -156,7 +156,7 @@ def _call(
         )
 
     monkeypatch.setattr("iosforge.mvp.feasibility.save_scope", _save)
-    monkeypatch.setattr(routes_jobs, "_enqueue_build", lambda jid: enqueued.append(jid))
+    monkeypatch.setattr(routes_jobs, "_enqueue_build", lambda jid, epoch=None: enqueued.append(jid))
 
     request = _FakeRequest(FormData([("csrf_token", user.csrf_token), *form_items]))
     resp = asyncio.run(

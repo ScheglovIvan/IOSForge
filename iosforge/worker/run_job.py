@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from iosforge.common.config import get_settings
 from iosforge.common.logging import get_logger
@@ -34,6 +34,7 @@ from iosforge.db.models import (
     WalkthroughResult,
 )
 from iosforge.db.session import get_sessionmaker
+from iosforge.orchestrator.recovery import current_epoch, is_stale, superseded
 from iosforge.storage.client import S3ArtifactStorage, build_key
 
 if TYPE_CHECKING:
@@ -45,7 +46,22 @@ if TYPE_CHECKING:
 log = get_logger("worker.run_job")
 
 
-def _start_stage(db, job: Job, stage: Stage, state: JobState) -> StageTimeline:
+class Superseded(RuntimeError):
+    """An operator recovery moved the job's run epoch on while this task ran."""
+
+
+def _guard(db, job: Job, epoch: int | None) -> None:
+    """Raise :class:`Superseded` (after a rollback) when ``epoch`` is no longer current."""
+    if superseded(db, job.id, epoch):
+        db.rollback()
+        raise Superseded(f"job {job.id} superseded (epoch {epoch})")
+
+
+def _start_stage(
+    db, job: Job, stage: Stage, state: JobState, epoch: int | None = None
+) -> StageTimeline:
+    """Open ``stage`` and move the job into ``state`` (fenced by the run epoch)."""
+    _guard(db, job, epoch)
     job.state = state
     row = StageTimeline(job_id=job.id, stage=stage, started_at=utcnow())
     db.add(row)
@@ -58,6 +74,34 @@ def _finish_stage(db, row: StageTimeline) -> None:
     if row.started_at:
         row.duration_ms = int((row.finished_at - row.started_at).total_seconds() * 1000)
     db.commit()
+
+
+def _fenced(db, job: Job, epoch: int | None, task: str) -> bool:
+    """True (and logged) when an operator recovery superseded this task's run epoch."""
+    if not superseded(db, job.id, epoch):
+        return False
+    log.info(f"{task}.superseded", job_id=str(job.id), epoch=epoch)
+    db.rollback()
+    return True
+
+
+def _replace_walkthrough(db, job: Job, result: WalkthroughResult, epoch: int | None = None) -> None:
+    """Store ``result`` as the job's only walkthrough (a re-run replaces the old one)."""
+    _guard(db, job, epoch)
+    db.execute(delete(WalkthroughResult).where(WalkthroughResult.job_id == job.id))
+    db.add(result)
+
+
+def _queue_scope_gate(job: Job) -> None:
+    scope_gate.apply_async(
+        args=[str(job.id)], kwargs={"epoch": current_epoch(job)}, queue="codegen"
+    )
+
+
+def _queue_build(job: Job) -> None:
+    from iosforge.worker.swiftui_build import enqueue_build
+
+    enqueue_build(str(job.id), epoch=current_epoch(job))
 
 
 def _ingest_appstore(db, storage, job: Job, settings, appstore) -> None:
@@ -102,7 +146,13 @@ def _ingest_appstore(db, storage, job: Job, settings, appstore) -> None:
 
 
 @celery_app.task(base=PipelineTask, name="iosforge.run_job", bind=True)
-def run_job(self, job_id: str) -> str:
+def run_job(self, job_id: str, epoch: int | None = None) -> str:
+    """Ingest the capture, analyse it, then hand off to the scope gate or the build.
+
+    Re-runnable: a reset job starts over and its walkthrough replaces the previous
+    one. A message queued under an older run epoch (superseded by an operator
+    recovery) does nothing, both on start and before each hand-off.
+    """
     from iosforge.mvp import (
         ad_analysis,
         admin_gen,
@@ -125,6 +175,10 @@ def run_job(self, job_id: str) -> str:
         job = db.get(Job, uuid.UUID(job_id))
         if job is None:
             return f"job {job_id} not found"
+        if is_stale(job, epoch):
+            log.info("run_job.stale_epoch", job_id=job_id, epoch=epoch)
+            shutil.rmtree(tmp, ignore_errors=True)
+            return f"job {job_id} skipped: superseded (epoch {epoch})"
         apk_art = db.scalar(select(ApkArtifact).where(ApkArtifact.job_id == job.id))
         is_appstore = job.submission_kind == "appstore"
         if apk_art is None and not is_appstore:
@@ -146,7 +200,7 @@ def run_job(self, job_id: str) -> str:
                 paths = RunPaths.create(tmp / "run")
 
                 # --- Walkthrough: App Store metadata (best-effort) + Frida archive ---
-                stage_row = _start_stage(db, job, Stage.WALKTHROUGH, JobState.WALKTHROUGH)
+                stage_row = _start_stage(db, job, Stage.WALKTHROUGH, JobState.WALKTHROUGH, epoch)
                 try:
                     _ingest_appstore(db, storage, job, settings, appstore)
                 except Exception as exc:  # metadata is enrichment; the archive is the source
@@ -167,21 +221,24 @@ def run_job(self, job_id: str) -> str:
                         paths.network_index_json.read_bytes(),
                         content_type="application/json",
                     )
-                db.add(
+                _replace_walkthrough(
+                    db,
+                    job,
                     WalkthroughResult(
                         job_id=job.id,
                         screenshot_keys=screenshot_keys,
                         screen_map=screen_map,
                         provider="frida-appstore",
                         strategy={"source": "frida-appstore"},
-                    )
+                    ),
+                    epoch,
                 )
                 _finish_stage(db, stage_row)
                 stage_row = None
 
                 # --- Analysis only: App Spec v3 + handoff; development is a separate,
                 # human-triggered step (no codegen here). ---
-                stage_row = _start_stage(db, job, Stage.ANALYSIS, JobState.ANALYSIS)
+                stage_row = _start_stage(db, job, Stage.ANALYSIS, JobState.ANALYSIS, epoch)
                 analyze.analyze(paths)
                 for kind, src in (("app_spec", paths.app_spec_json), ("spec_md", paths.spec_md)):
                     if src.exists():
@@ -201,19 +258,19 @@ def run_job(self, job_id: str) -> str:
                             )
                 _finish_stage(db, stage_row)
                 stage_row = None
+                if _fenced(db, job, epoch, "run_job"):
+                    return f"job {job_id} analysis discarded: superseded (epoch {epoch})"
                 if settings.pipeline_scope_gate:
                     job.state = JobState.SCOPE
                     db.commit()
                     log.info("run_job.analysis_done_scope_gate", job_id=job_id)
-                    scope_gate.apply_async(args=[job_id], queue="codegen")
+                    _queue_scope_gate(job)
                     return f"job {job_id} analysis done -> scope gate queued"
                 if settings.auto_build_frontend:
                     job.state = JobState.CODEGEN
                     db.commit()
                     log.info("run_job.analysis_done_autochain", job_id=job_id)
-                    from iosforge.worker.swiftui_build import enqueue_build
-
-                    enqueue_build(job_id)
+                    _queue_build(job)
                     return f"job {job_id} analysis done -> SwiftUI build queued"
                 job.state = JobState.DONE
                 db.commit()
@@ -223,7 +280,7 @@ def run_job(self, job_id: str) -> str:
             paths = RunPaths.create(tmp / "run")
 
             # --- Walkthrough: emulator crawl (legacy APK path; not offered in the UI) ---
-            stage_row = _start_stage(db, job, Stage.WALKTHROUGH, JobState.WALKTHROUGH)
+            stage_row = _start_stage(db, job, Stage.WALKTHROUGH, JobState.WALKTHROUGH, epoch)
             if apk_art is not None:
                 apk_path = tmp / "app.apk"
                 apk_path.write_bytes(storage.get(apk_art.storage_key))
@@ -242,26 +299,31 @@ def run_job(self, job_id: str) -> str:
                 key = build_key(job_id=job_id, kind="screenshots", name=png.name)
                 storage.put(key, png.read_bytes(), content_type="image/png")
                 screenshot_keys.append(key)
-            db.add(
+            _replace_walkthrough(
+                db,
+                job,
                 WalkthroughResult(
                     job_id=job.id,
                     screenshot_keys=screenshot_keys,
                     screen_map=screen_map,
                     provider=provider,
                     strategy=strategy,
-                )
+                ),
+                epoch,
             )
             _finish_stage(db, stage_row)
             stage_row = None
 
             if settings.pipeline_stop_after_walkthrough:
+                if _fenced(db, job, epoch, "run_job"):
+                    return f"job {job_id} walkthrough discarded: superseded (epoch {epoch})"
                 job.state = JobState.DONE
                 db.commit()
                 log.info("run_job.walkthrough_only_done", job_id=job_id)
                 return f"job {job_id} done (walkthrough only)"
 
             # --- Codegen (Stage B->C->D->E inside one CODEGEN span) ---
-            stage_row = _start_stage(db, job, Stage.CODEGEN, JobState.CODEGEN)
+            stage_row = _start_stage(db, job, Stage.CODEGEN, JobState.CODEGEN, epoch)
             if settings.filter_junk_frames:
                 audit = screen_filter.filter_screens(paths)
                 labels_key = build_key(
@@ -345,6 +407,8 @@ def run_job(self, job_id: str) -> str:
                             content_type=ctype,
                         )
                 _finish_stage(db, stage_row)
+                if _fenced(db, job, epoch, "run_job"):
+                    return f"job {job_id} analysis discarded: superseded (epoch {epoch})"
                 job.state = JobState.DONE
                 db.commit()
                 log.info("run_job.analysis_only_done", job_id=job_id)
@@ -361,10 +425,12 @@ def run_job(self, job_id: str) -> str:
                         )
                 _finish_stage(db, stage_row)
                 stage_row = None
+                if _fenced(db, job, epoch, "run_job"):
+                    return f"job {job_id} analysis discarded: superseded (epoch {epoch})"
                 job.state = JobState.SCOPE
                 db.commit()
                 log.info("run_job.analysis_done_scope_gate", job_id=job_id)
-                scope_gate.apply_async(args=[job_id], queue="codegen")
+                _queue_scope_gate(job)
                 return f"job {job_id} analysis done -> scope gate queued"
 
             for kind, src in (("app_spec", paths.app_spec_json), ("spec_md", paths.spec_md)):
@@ -377,12 +443,12 @@ def run_job(self, job_id: str) -> str:
                     )
             _finish_stage(db, stage_row)
             stage_row = None
+            if _fenced(db, job, epoch, "run_job"):
+                return f"job {job_id} analysis discarded: superseded (epoch {epoch})"
             if settings.auto_build_frontend:
                 job.state = JobState.CODEGEN
                 db.commit()
-                from iosforge.worker.swiftui_build import enqueue_build
-
-                enqueue_build(job_id)
+                _queue_build(job)
                 log.info("run_job.analysis_done_autochain", job_id=job_id)
                 return f"job {job_id} analysis done -> SwiftUI build queued"
             job.state = JobState.DONE
@@ -391,6 +457,12 @@ def run_job(self, job_id: str) -> str:
             return f"job {job_id} done (analysis)"
         except Exception as exc:
             db.rollback()
+            if isinstance(exc, Superseded):
+                log.info("run_job.superseded", job_id=job_id, epoch=epoch)
+                return f"job {job_id} stopped: superseded (epoch {epoch})"
+            if superseded(db, job.id, epoch):
+                log.info("run_job.failed_superseded", job_id=job_id, epoch=epoch, error=str(exc))
+                return f"job {job_id} failed after it was superseded: {exc}"
             job2 = db.get(Job, job.id)
             if job2 is not None:
                 job2.state = JobState.FAILED
@@ -407,7 +479,7 @@ def run_job(self, job_id: str) -> str:
 
 
 @celery_app.task(base=PipelineTask, name="iosforge.scope_gate", bind=True)
-def scope_gate(self, job_id: str) -> str:
+def scope_gate(self, job_id: str, epoch: int | None = None) -> str:
     """Stage SCOPE: propose an MVP scope + iOS feasibility, then park in NEEDS_INPUT.
 
     Hydrates a fresh RunPaths from the stored analysis (``screens.json`` from
@@ -416,7 +488,8 @@ def scope_gate(self, job_id: str) -> str:
     ``proposed``) to the versioned bucket, records the version id and
     ``scope_status`` in ``Job.source_app_metadata``, then sets the Job to
     ``NEEDS_INPUT`` so an operator approves/edits the scope before codegen
-    (``PipelineTask`` supplies retry/dead-letter).
+    (``PipelineTask`` supplies retry/dead-letter). A message queued under an older
+    run epoch (superseded by an operator recovery) does nothing.
     """
     from iosforge.mvp import feasibility
     from iosforge.mvp.paths import RunPaths
@@ -431,6 +504,9 @@ def scope_gate(self, job_id: str) -> str:
             job = db.get(Job, uuid.UUID(job_id))
             if job is None:
                 return f"job {job_id} not found"
+            if is_stale(job, epoch):
+                bound.info("scope.stale_epoch", epoch=epoch)
+                return f"job {job_id} scope skipped: superseded (epoch {epoch})"
             walk = db.scalar(select(WalkthroughResult).where(WalkthroughResult.job_id == job.id))
             if walk is None or not walk.screen_map:
                 job.state = JobState.FAILED
@@ -452,8 +528,10 @@ def scope_gate(self, job_id: str) -> str:
                     bound.error("scope.no_app_spec", error=str(exc))
                     return f"job {job_id} app_spec unavailable"
 
-                stage_row = _start_stage(db, job, Stage.SCOPE, JobState.SCOPE)
+                stage_row = _start_stage(db, job, Stage.SCOPE, JobState.SCOPE, epoch)
                 scope = feasibility.propose(paths)
+                if _fenced(db, job, epoch, "scope_gate"):
+                    return f"job {job_id} scope discarded: superseded (epoch {epoch})"
                 ref = feasibility.save_scope(storage, job_id, scope)
 
                 meta = dict(job.source_app_metadata or {})
@@ -476,6 +554,12 @@ def scope_gate(self, job_id: str) -> str:
                 return f"job {job_id} scope proposed -> needs input"
             except Exception as exc:
                 db.rollback()
+                if isinstance(exc, Superseded):
+                    bound.info("scope.superseded", epoch=epoch)
+                    return f"job {job_id} scope stopped: superseded (epoch {epoch})"
+                if superseded(db, uuid.UUID(job_id), epoch):
+                    bound.info("scope.failed_superseded", epoch=epoch, error=str(exc))
+                    return f"job {job_id} scope failed after it was superseded: {exc}"
                 job2 = db.get(Job, uuid.UUID(job_id))
                 if job2 is not None:
                     job2.state = JobState.FAILED

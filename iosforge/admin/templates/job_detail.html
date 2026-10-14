@@ -26,7 +26,23 @@
     {% if gen and gen.github_repo_url %}
     <a class="btn btn--ghost" href="{{ gen.github_repo_url }}" target="_blank" rel="noopener">GitHub repository ↗</a>
     {% endif %}
+    {% if can_reset %}
+    <form method="post" action="/jobs/{{ job.id }}/reset" class="recovery-reset" style="display:inline;"
+          onsubmit="return confirm('Reset this stuck job? It was last active {{ (last_activity_s or 0) // 60 }} min ago. The admin first checks that no worker still runs or queues a task for it.');">
+      <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+      <button class="btn btn--ghost" type="submit">Reset stuck job</button>
+    </form>
+    {% endif %}
+    {% if can_reopen %}
+    <form method="post" action="/jobs/{{ job.id }}/scope/reopen" class="recovery-reopen" style="display:inline;"
+          onsubmit="return confirm('Re-open the scope of this failed job? The previous selection is kept and the job waits for a new approval.');">
+      <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+      <button class="btn btn--ghost" type="submit">Re-open scope</button>
+    </form>
+    {% endif %}
   </div>
+  {% if reset_to %}<div class="alert alert--success">Job reset by an operator; it is now <strong>{{ reset_to.replace('_', ' ') }}</strong>.</div>{% endif %}
+  {% if reopened_ok %}<div class="alert alert--success">Scope re-opened with the previous selection kept. Fix the screen set on the Scope tab and approve it again.</div>{% endif %}
 </div>
 
 {% set active = 't-build' if (signed_ok or sign_error) else ('t-scope' if scope_status == 'proposed' else 't-overview') %}
@@ -179,6 +195,18 @@
           {% endif %}
         </div>
       </form>
+      {% if not editable and can_reopen %}
+      <div class="card">
+        <h3>Re-open scope</h3>
+        <p class="hint">The build failed before an app was generated. Re-opening puts this scope
+          back up for approval with the current selection kept; fix the screen set and approve again.</p>
+        <form method="post" action="/jobs/{{ job.id }}/scope/reopen"
+              onsubmit="return confirm('Re-open the scope of this failed job? The previous selection is kept and the job waits for a new approval.');">
+          <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+          <div class="form-actions"><button class="btn" type="submit">Re-open scope</button></div>
+        </form>
+      </div>
+      {% endif %}
     </section>
     {% endif %}
 

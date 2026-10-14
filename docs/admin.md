@@ -31,10 +31,62 @@ Frida-архив (legacy: APK + эмулятор), запускает анали
 на Mac-воркере очереди `xcode` (`swiftui_build`, `swiftui_tasks`, `swiftui_rework`); без него
 джоба остаётся в CODEGEN. Без запущенного воркера `codegen` Job остаётся `QUEUED`.
 
+## Recovering a stuck or failed job
+
+Two operator actions on the job page bring a job back without re-running the expensive analysis.
+Both ask for confirmation, need a signed-in operator, and are logged in the job timeline
+(muted rows starting with `operator:`) and in the audit log.
+
+### Reset stuck job
+
+Use it when a job sits in an intermediate state (Queued, Walkthrough, Analysis, Scope, Codegen…)
+but its worker task is gone (worker restarted, out of memory, killed), or when a native delivery
+stays "queued/archiving" forever.
+
+The button appears after 5 minutes without activity (`JOB_RESET_MIN_IDLE_S`; the worker
+probe waits `JOB_PROBE_TIMEOUT_S` for an answer). On click the admin
+asks every Celery worker and the Redis queues whether a task for this job is still running or
+waiting. If it is, the reset is refused (409) with the worker or queue name, so wait or check
+`scripts/factory.sh status`. A message left behind by a killed worker does not block the reset.
+It is listed in the audit entry and becomes a no-op if Redis redelivers it later. Messages
+queued before this feature was deployed carry no run epoch and are not fenced, so right after
+the deploy wait out the broker visibility timeout (6 h) before resetting a job whose old task
+was killed.
+
+Where the job goes:
+
+| Stuck in | Result |
+|---|---|
+| Queued / Walkthrough / Analysis | back to Queued, the analysis restarts from the uploaded archive |
+| Scope | the scope proposal is prepared again |
+| Codegen, app already built (a rework round died) | Done (or Needs input if the last build was held), the last good version stays deliverable |
+| Codegen, first build, scope approved | the scope is re-opened (see below), approve it again to rebuild (Failed if the stored scope cannot be read) |
+| Codegen, first build, no scope gate | Failed, press **Build app** |
+| a stuck native delivery | the delivery is marked failed, the job state is unchanged |
+
+A delivery only runs while its row is *queued*. If its final database write fails, the Celery
+retry no longer starts it again, so the delivery stays *archiving* until an operator resets it.
+
+Open stages are closed with "interrupted — reset by <operator>".
+
+### Re-open scope
+
+For a **failed** job whose app was never built (for example the build stopped with
+"screens reachable from no tab"). The approved scope goes back to *proposed* with your previous
+selection, notes and capability routing kept, and the job waits in **Needs input** on the Scope
+tab. Fix the screen set and press **Approve & generate**. The approval is checked again, and the
+build starts on the Mac worker.
+
+Kept: the analysis, screenshots, app spec and every earlier scope version (MinIO versioning). The
+next build overwrites the generated screenshots and sources. Re-open is refused when the scope
+gate is off, the app is already built (use Rework / Extend scope instead), the job failed before
+the scope stage, or a retry of the job is still scheduled.
+
 ## Настройки (env, см. `.env.example`)
 `ADMIN_SESSION_SECRET`, `ADMIN_COOKIE_SECURE` (prod=true), `ADMIN_SESSION_TTL_S`,
 `ADMIN_UPLOAD_MAX_BYTES`, `ADMIN_LOGIN_MAX_ATTEMPTS`, `ADMIN_LOGIN_LOCKOUT_S`, `ADMIN_AVD`,
-`ADMIN_SEED_USERNAME`/`ADMIN_SEED_PASSWORD` (только для сид-команды).
+`ADMIN_SEED_USERNAME`/`ADMIN_SEED_PASSWORD` (только для сид-команды), `JOB_RESET_MIN_IDLE_S`,
+`JOB_PROBE_TIMEOUT_S` (восстановление застрявших Job).
 
 ## Вне скоупа MVP (фаза 2)
 CRUD промптов/провайдеров/источников, роли сложнее одного оператора, discovery/acquisition

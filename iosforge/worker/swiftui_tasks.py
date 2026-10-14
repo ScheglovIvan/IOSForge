@@ -212,7 +212,8 @@ def run_xcode_delivery(self: Any, job_id: str, build_id: str | None = None) -> s
     Refreshes the contract with the job's current identity, integrations and icon,
     then runs :func:`iosforge.mvp.ios_delivery.deliver`. Fills the ``queued``
     ``XcodeBuild`` row (or a new one) and a DELIVERY timeline stage; the job's state
-    is left untouched.
+    is left untouched. A ``build_id`` whose row is no longer ``queued`` (already
+    taken, finished, or failed by an operator reset) is a redelivered message: no-op.
     """
     settings = get_settings()
     storage = S3ArtifactStorage()
@@ -222,6 +223,11 @@ def run_xcode_delivery(self: Any, job_id: str, build_id: str | None = None) -> s
         if job is None:
             return f"job {job_id} not found"
         build = db.get(XcodeBuild, uuid.UUID(build_id)) if build_id else None
+        if build is not None and build.status != "queued":
+            log.info(
+                "swiftui.delivery.superseded", job_id=job_id, build_id=build_id, status=build.status
+            )
+            return f"job {job_id} delivery {build_id} is {build.status}; nothing to do"
         if build is None:
             build = XcodeBuild(job_id=job.id)
             db.add(build)

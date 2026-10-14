@@ -313,6 +313,10 @@ class Settings(BaseSettings):
     admin_login_max_attempts: int = Field(default=5, gt=0)
     admin_login_lockout_s: int = Field(default=300, gt=0)
     admin_avd: str = "mvp"  # AVD the worker boots for the walkthrough
+    # Job recovery from the admin: a job counts as stuck only after this many seconds
+    # without activity, and the Celery/Redis liveness probe waits this long for workers.
+    job_reset_min_idle_s: int = Field(default=300, ge=0)
+    job_probe_timeout_s: float = Field(default=2.0, gt=0)
     # --- App Store ingestion: the source app is identified by its official App
     # Store URL; the worker resolves name/description/screenshots via the iTunes
     # Lookup API during the WALKTHROUGH stage. Screenshots are kept as reference
